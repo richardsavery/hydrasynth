@@ -1,0 +1,262 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <meta name="theme-color" content="#0a0d13">
+  <title>Hydrasynth Telemetry</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <a class="skip-link" href="#parameter-groups">Skip to parameters</a>
+
+  <div class="ambient ambient--cyan" aria-hidden="true"></div>
+  <div class="ambient ambient--amber" aria-hidden="true"></div>
+
+  <header class="topbar">
+    <div class="brand-lockup">
+      <svg class="brand-mark" viewBox="0 0 44 44" aria-hidden="true">
+        <path d="M5 28.5 12.5 11l7 16 5-11 6.5 15 8-19"/>
+        <path d="M5 35h34"/>
+      </svg>
+      <div>
+        <p class="eyebrow">ASM / TELEMETRY SURFACE</p>
+        <h1>Hydrasynth <span>Observer</span></h1>
+      </div>
+    </div>
+
+    <div class="connection-cluster" role="status" aria-live="polite" aria-atomic="true">
+      <div class="connection-copy">
+        <span id="connection-label" class="connection-label">Connecting</span>
+        <span id="connection-detail" class="connection-detail">Waiting for the local MIDI service</span>
+      </div>
+      <span id="connection-light" class="connection-light is-pending" aria-hidden="true"></span>
+    </div>
+  </header>
+
+  <main>
+    <div id="error-banner" class="error-banner" role="alert" hidden>
+      <svg viewBox="0 0 24 24" aria-hidden="true">
+        <path d="M12 8v5m0 3.2v.1M10.5 3.6 2.7 18a1.7 1.7 0 0 0 1.5 2.5h15.6a1.7 1.7 0 0 0 1.5-2.5L13.5 3.6a1.7 1.7 0 0 0-3 0Z"/>
+      </svg>
+      <div>
+        <strong id="error-title">Telemetry unavailable</strong>
+        <span id="error-message">The dashboard will retry automatically.</span>
+      </div>
+      <span class="retry-pulse" aria-hidden="true"></span>
+    </div>
+
+    <section class="hero-grid" aria-label="Synthesizer overview">
+      <article class="panel patch-panel">
+        <div class="panel-kicker">
+          <span>Active voice</span>
+          <span id="mode-badge" class="mode-badge">Live</span>
+        </div>
+        <div class="patch-display">
+          <div class="patch-bank">
+            <span class="lcd-label">BANK</span>
+            <strong id="patch-bank">—</strong>
+          </div>
+          <div class="patch-number">
+            <span class="lcd-label">PROGRAM</span>
+            <strong id="patch-number">---</strong>
+          </div>
+        </div>
+        <div class="device-line">
+          <span class="device-icon" aria-hidden="true">
+            <i></i><i></i><i></i>
+          </span>
+          <div>
+            <span id="device-name">Hydrasynth</span>
+            <small id="midi-route">MIDI route not reported</small>
+          </div>
+        </div>
+      </article>
+
+      <article class="panel transport-panel">
+        <div class="panel-heading">
+          <div>
+            <p class="panel-kicker">Transport health</p>
+            <h2>MIDI stream</h2>
+          </div>
+          <div id="stream-orbit" class="stream-orbit" aria-hidden="true">
+            <span></span>
+          </div>
+        </div>
+        <dl class="telemetry-stats">
+          <div>
+            <dt>Sequence</dt>
+            <dd id="stat-sequence">—</dd>
+          </div>
+          <div>
+            <dt>Queue</dt>
+            <dd id="stat-queue">—</dd>
+          </div>
+          <div>
+            <dt>Jobs</dt>
+            <dd id="stat-jobs">—</dd>
+          </div>
+          <div>
+            <dt>Dropped</dt>
+            <dd id="stat-dropped">—</dd>
+          </div>
+        </dl>
+        <div class="health-track" aria-hidden="true">
+          <span id="health-fill"></span>
+        </div>
+        <p id="health-caption" class="health-caption">Establishing service health…</p>
+      </article>
+
+      <article class="panel performance-panel">
+        <div class="panel-heading">
+          <div>
+            <p class="panel-kicker">Performance monitor</p>
+            <h2>Tracked held notes</h2>
+          </div>
+          <div class="performance-readouts">
+            <span><b id="active-note-count">0</b> notes</span>
+            <span>CH <b id="midi-channel">—</b></span>
+          </div>
+        </div>
+        <div id="keyboard" class="keyboard" role="img" aria-label="No active notes"></div>
+        <div class="performance-footer">
+          <span id="note-readout">No notes held</span>
+          <span id="expression-readout">Sustain — · Recent bend —</span>
+        </div>
+      </article>
+    </section>
+
+    <section class="parameter-section" aria-labelledby="parameters-title">
+      <div class="section-heading">
+        <div>
+          <p class="eyebrow">SIGNAL ARCHITECTURE</p>
+          <h2 id="parameters-title">Parameter field</h2>
+          <p id="parameter-summary" class="section-subtitle">Waiting for the first state snapshot.</p>
+        </div>
+
+        <div class="view-meta">
+          <span id="snapshot-age" class="snapshot-age">Not yet updated</span>
+          <span id="live-pulse" class="live-pulse" aria-hidden="true"></span>
+        </div>
+      </div>
+
+      <form id="parameter-filter-form" class="filter-bar" role="search">
+        <label class="search-field" for="parameter-search">
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <circle cx="10.8" cy="10.8" r="6.6"></circle>
+            <path d="m16 16 4.2 4.2"></path>
+          </svg>
+          <span class="sr-only">Search parameters</span>
+          <input id="parameter-search" type="search" placeholder="Search parameters, CC or NRPN…" autocomplete="off">
+          <kbd>/</kbd>
+        </label>
+        <fieldset class="filter-options">
+          <legend class="sr-only">Filter parameters</legend>
+          <button type="button" class="filter-chip is-active" data-filter="all" aria-pressed="true">All</button>
+          <button type="button" class="filter-chip" data-filter="changed" aria-pressed="false">
+            <i class="chip-dot chip-dot--changed" aria-hidden="true"></i>Changed
+          </button>
+          <button type="button" class="filter-chip" data-filter="user" aria-pressed="false">
+            <i class="chip-dot chip-dot--user" aria-hidden="true"></i>User
+          </button>
+          <button type="button" class="filter-chip" data-filter="agent" aria-pressed="false">
+            <i class="chip-dot chip-dot--agent" aria-hidden="true"></i>Agent
+          </button>
+          <button type="button" class="filter-chip" data-filter="takeover" aria-pressed="false">
+            <i class="chip-dot chip-dot--takeover" aria-hidden="true"></i>Takeover
+          </button>
+          <button type="button" class="filter-chip" data-filter="catalog" aria-pressed="false">
+            <i class="chip-dot chip-dot--catalog" aria-hidden="true"></i>Catalog
+          </button>
+        </fieldset>
+      </form>
+
+      <div id="parameter-loading" class="loading-state" aria-live="polite">
+        <div class="loading-scope" aria-hidden="true">
+          <i></i><i></i><i></i>
+        </div>
+        <p>Listening for parameter state</p>
+        <small>Controls appear as they are observed.</small>
+      </div>
+
+      <div id="parameter-empty" class="empty-state" hidden>
+        <div class="empty-glyph" aria-hidden="true">Ø</div>
+        <div>
+          <h3>No parameters match this view</h3>
+          <p>Try another filter or move a control on the instrument.</p>
+        </div>
+      </div>
+
+      <div id="parameter-groups" class="parameter-groups" tabindex="-1"></div>
+    </section>
+
+    <section class="lower-grid" aria-label="Activity and provenance">
+      <article class="panel activity-panel">
+        <div class="panel-heading">
+          <div>
+            <p class="panel-kicker">Incoming + scheduled</p>
+            <h2>Activity timeline</h2>
+          </div>
+          <span id="event-count" class="count-badge">0 events</span>
+        </div>
+        <div id="event-announcer" class="sr-only" role="status" aria-live="polite" aria-atomic="true"></div>
+        <ol id="event-timeline" class="event-timeline">
+          <li class="timeline-empty">
+            <span class="timeline-mark"></span>
+            <div>
+              <strong>Awaiting activity</strong>
+              <small>Performance and parameter events will appear here.</small>
+            </div>
+          </li>
+        </ol>
+      </article>
+
+      <aside class="panel provenance-panel">
+        <div>
+          <p class="panel-kicker">Control provenance</p>
+          <h2>Who moved it?</h2>
+        </div>
+        <ul class="source-legend">
+          <li>
+            <span class="source-symbol source-symbol--user">U</span>
+            <div><strong>User</strong><small>Front panel or external MIDI</small></div>
+          </li>
+          <li>
+            <span class="source-symbol source-symbol--agent">A</span>
+            <div><strong>Agent</strong><small>Generated control or automation</small></div>
+          </li>
+          <li>
+            <span class="source-symbol source-symbol--echo">↳</span>
+            <div><strong>Echo</strong><small>Hardware acknowledgement</small></div>
+          </li>
+        </ul>
+        <div id="takeover-status" class="takeover-status">
+          <div class="takeover-dial" aria-hidden="true"><span></span></div>
+          <div>
+            <small>User-priority window</small>
+            <strong id="takeover-copy">Waiting for state</strong>
+          </div>
+        </div>
+        <p class="readonly-notice">
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M7 10V7a5 5 0 0 1 10 0v3m-11 0h12v10H6z"/>
+          </svg>
+          Read-only monitor
+        </p>
+      </aside>
+    </section>
+  </main>
+
+  <footer>
+    <span>HYDRA // LOCAL INSTRUMENT LINK</span>
+    <span id="footer-clock">—</span>
+  </footer>
+
+  <noscript>
+    <div class="noscript-message">This telemetry dashboard requires JavaScript to display live state.</div>
+  </noscript>
+
+  <script src="app.js" defer></script>
+</body>
+</html>
