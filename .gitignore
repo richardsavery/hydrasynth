@@ -219,3 +219,12 @@ __marimo__/
 
 # Swift build output (the native C controller uses build/)
 .build/
+
+# Portable recordings are committed in compressed form. Keep raw captures and
+# live scratch output out of Git so a local session cannot accidentally add a
+# very large file.
+recordings/*.jsonl
+recordings/*.jsonl.txt
+recordings/*.ndjson
+recordings/*.ndjson.txt
+recordings/incoming/

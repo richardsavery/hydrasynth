@@ -290,6 +290,16 @@ CoreMIDI delivery and scheduling.
 Build a live view over the controller's language-neutral state/event stream so
 the user can understand what the synth, the user, and the agent are doing.
 
+### RAPP sonification
+
+- [x] Index RAPP JSONL recordings and map joint/tensor reductions to browser
+  audio or Hydrasynth Web MIDI controls.
+- [x] Bundle portable gzip-compressed recordings so a fresh macOS clone can run
+  `make dashboard-sonify` without a second repository.
+- [ ] Add a browser WebSocket source for the existing RAPP protocol, using
+  bounded rolling reductions and the recorded-mode mapping engine. See
+  `docs/live_streaming.md`.
+
 - [x] Show the selected device endpoints, MIDI channel, active patch, and
   conservative service/transport health.
 - [x] Show tracked active notes, sustain CC state, and recent pitch-bend

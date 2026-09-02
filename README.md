@@ -3,6 +3,66 @@
 A small, dependency-free macOS command-line controller for an ASM Hydrasynth over
 USB MIDI. It uses Apple's CoreMIDI framework directly.
 
+## Interactive sonification dashboard
+
+The dashboard can turn RAPP newline-delimited JSON into music without requiring
+the Hydrasynth to be connected. Portable gzip-compressed copies of the three
+current recordings are included in [`recordings/`](recordings/), so a fresh
+clone is ready to use on macOS without the RAPP repository beside it. The
+dashboard reads the compressed files directly, discovers their channels and
+numeric fields, and reduces large tensors to a bounded series before they reach
+the browser.
+
+On a MacBook, clone the repository and run:
+
+```sh
+cd hydrasynth
+make dashboard-sonify
+```
+
+The same service provides both dashboards:
+
+- **Signal Lab** at <http://127.0.0.1:8790/> for mapping JSON data to sound.
+- **Observer** at <http://127.0.0.1:8790/observer/> for the original live
+  Hydrasynth telemetry view.
+
+Each dashboard has a switcher in its header, so both remain available while the
+service is running. Observer's **Auto** source follows Signal Lab whenever its
+preview is playing, then falls back to native/demo telemetry after the preview
+stops. Choose **Signal Lab** in Observer to keep that view locked to the
+sonification feed. This works for browser audio as well as MIDI output and does
+not depend on the Hydrasynth echoing its controls back to the computer.
+
+This preview-only path needs Python 3 but does not build the native MIDI
+controller. When a larger or newer external dataset is preferred, pass
+`RECORDINGS_DIR=/path/to/recordings` or set `RAPP_RECORDINGS_DIR`; an explicit
+folder takes priority over the bundled copies.
+
+The working surface lets you:
+
+- choose any recording and inspect its discovered JSON channels;
+- use direct joint position/velocity values or reduce tensor fields by mean,
+  RMS energy, minimum, maximum, or one flattened index;
+- combine up to six robot fields in one mapping using average, weighted average,
+  sum, difference, minimum, or maximum before shaping the output;
+- map signals to pitch, velocity, gate length, note probability, Hydrasynth
+  filter/effect controls, or any of the eight macros;
+- adjust input curves, output ranges, tempo, rhythmic resolution, scale, and
+  preview voice; and
+- audition the result through browser audio now, then choose a Web MIDI output
+  and send the same note and CC mapping to the Hydrasynth later.
+
+For MIDI output, connect and power on the synth, set `PARAM RX` to `CC`, click
+**Connect MIDI device**, grant browser MIDI access, and select the Hydrasynth.
+The dashboard sends on MIDI channel 1 and provides a dedicated all-notes-off
+control. Mapping choices are saved locally in the browser for each recording.
+
+RAPP's existing live and replay servers already broadcast the same message
+schema over WebSocket. The planned live-source integration and its acceptance
+criteria are recorded in [docs/live_streaming.md](docs/live_streaming.md); it
+will reuse the mapping and sonification engine rather than introduce another
+data format.
+
 ## First connection
 
 1. Connect and power on the Hydrasynth.

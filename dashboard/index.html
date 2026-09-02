@@ -4,259 +4,182 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="dark">
-  <meta name="theme-color" content="#0a0d13">
-  <title>Hydrasynth Telemetry</title>
+  <meta name="theme-color" content="#10110f">
+  <title>Hydra Signal Lab</title>
+  <meta name="description" content="Map RAPP JSONL recordings to browser audio and Hydrasynth MIDI parameters.">
   <link rel="stylesheet" href="styles.css">
 </head>
 <body>
-  <a class="skip-link" href="#parameter-groups">Skip to parameters</a>
-
-  <div class="ambient ambient--cyan" aria-hidden="true"></div>
-  <div class="ambient ambient--amber" aria-hidden="true"></div>
-
+  <a class="skip-link" href="#stage">Skip to sonification controls</a>
   <header class="topbar">
-    <div class="brand-lockup">
-      <svg class="brand-mark" viewBox="0 0 44 44" aria-hidden="true">
-        <path d="M5 28.5 12.5 11l7 16 5-11 6.5 15 8-19"/>
-        <path d="M5 35h34"/>
-      </svg>
-      <div>
-        <p class="eyebrow">ASM / TELEMETRY SURFACE</p>
-        <h1>Hydrasynth <span>Observer</span></h1>
-      </div>
+    <a class="brand" href="#stage" aria-label="Hydra Signal Lab home">
+      <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span>
+      <span><b>HYDRA</b><small>SIGNAL LAB</small></span>
+    </a>
+    <div class="project-title">
+      <span class="eyebrow">RAPP → HYDRASYNTH</span>
+      <nav class="dashboard-switcher" aria-label="Dashboard views">
+        <a class="is-active" href="/" aria-current="page">Signal Lab</a>
+        <a href="/observer/" data-open-observer aria-controls="observer-overlay">Observer</a>
+      </nav>
     </div>
-
-    <div class="connection-cluster" role="status" aria-live="polite" aria-atomic="true">
-      <div class="connection-copy">
-        <span id="connection-label" class="connection-label">Connecting</span>
-        <span id="connection-detail" class="connection-detail">Waiting for the local MIDI service</span>
-      </div>
-      <span id="connection-light" class="connection-light is-pending" aria-hidden="true"></span>
+    <div id="engine-state" class="engine-state" role="status" aria-live="polite">
+      <span class="status-light is-pending"></span>
+      <span><b>Loading recordings</b><small>Preparing the preview engine</small></span>
     </div>
   </header>
 
-  <main>
-    <div id="error-banner" class="error-banner" role="alert" hidden>
-      <svg viewBox="0 0 24 24" aria-hidden="true">
-        <path d="M12 8v5m0 3.2v.1M10.5 3.6 2.7 18a1.7 1.7 0 0 0 1.5 2.5h15.6a1.7 1.7 0 0 0 1.5-2.5L13.5 3.6a1.7 1.7 0 0 0-3 0Z"/>
-      </svg>
-      <div>
-        <strong id="error-title">Telemetry unavailable</strong>
-        <span id="error-message">The dashboard will retry automatically.</span>
+  <main class="workspace">
+    <aside class="rail source-rail" aria-labelledby="recordings-title">
+      <div class="rail-heading">
+        <span class="eyebrow">01 / SOURCE</span>
+        <button id="refresh-recordings" class="icon-button" type="button" aria-label="Refresh recordings" title="Refresh recordings">↻</button>
       </div>
-      <span class="retry-pulse" aria-hidden="true"></span>
-    </div>
+      <h1 id="recordings-title">Recordings</h1>
+      <p class="rail-intro">JSONL streams from the RAPP recordings folder.</p>
+      <div id="recording-list" class="recording-list" role="listbox" aria-label="Available recordings" aria-busy="true">
+        <div class="recording-skeleton"><i></i><i></i></div>
+        <div class="recording-skeleton"><i></i><i></i></div>
+        <div class="recording-skeleton"><i></i><i></i></div>
+      </div>
+      <div id="recording-empty" class="recording-empty" hidden>
+        <b>No recording folder linked</b>
+        <p>Restart the dashboard with <code>--recordings-dir</code> pointing at the RAPP <code>recordings</code> folder.</p>
+      </div>
+      <div id="source-summary" class="source-summary" hidden>
+        <span>Selected source</span>
+        <b id="source-channel">—</b>
+        <small id="source-field">—</small>
+      </div>
+      <p id="recordings-path" class="recordings-path" title=""></p>
+    </aside>
 
-    <section class="hero-grid" aria-label="Synthesizer overview">
-      <article class="panel patch-panel">
-        <div class="panel-kicker">
-          <span>Active voice</span>
-          <span id="mode-badge" class="mode-badge">Live</span>
+    <section id="stage" class="stage" aria-label="Sonification workspace">
+      <div class="stage-heading">
+        <div>
+          <span class="eyebrow">02 / SHAPE THE SOUND</span>
+          <h2 id="recording-title">Choose a recording</h2>
+          <p id="recording-detail" class="stage-detail">The signal and mappings will appear here.</p>
         </div>
-        <div class="patch-display">
-          <div class="patch-bank">
-            <span class="lcd-label">BANK</span>
-            <strong id="patch-bank">—</strong>
-          </div>
-          <div class="patch-number">
-            <span class="lcd-label">PROGRAM</span>
-            <strong id="patch-number">---</strong>
-          </div>
+        <div class="transport-cluster">
+          <label>Tempo <input id="tempo" type="number" min="20" max="240" value="96" inputmode="numeric"> BPM</label>
+          <label>Steps / beat
+            <select id="steps-per-beat"><option value="1">1</option><option value="2" selected>2</option><option value="4">4</option></select>
+          </label>
+          <button id="preview-button" class="play-button" type="button" disabled><span>▶</span> Preview</button>
         </div>
-        <div class="device-line">
-          <span class="device-icon" aria-hidden="true">
-            <i></i><i></i><i></i>
-          </span>
-          <div>
-            <span id="device-name">Hydrasynth</span>
-            <small id="midi-route">MIDI route not reported</small>
-          </div>
-        </div>
-      </article>
+      </div>
 
-      <article class="panel transport-panel">
-        <div class="panel-heading">
-          <div>
-            <p class="panel-kicker">Transport health</p>
-            <h2>MIDI stream</h2>
-          </div>
-          <div id="stream-orbit" class="stream-orbit" aria-hidden="true">
-            <span></span>
-          </div>
+      <section class="signal-panel" aria-labelledby="signal-title">
+        <div class="panel-meta">
+          <div><span class="eyebrow">SIGNAL</span><b id="signal-title">Waiting for a source</b></div>
+          <div class="signal-stats"><span id="signal-min">MIN —</span><span id="signal-max">MAX —</span></div>
         </div>
-        <dl class="telemetry-stats">
-          <div>
-            <dt>Sequence</dt>
-            <dd id="stat-sequence">—</dd>
-          </div>
-          <div>
-            <dt>Queue</dt>
-            <dd id="stat-queue">—</dd>
-          </div>
-          <div>
-            <dt>Jobs</dt>
-            <dd id="stat-jobs">—</dd>
-          </div>
-          <div>
-            <dt>Dropped</dt>
-            <dd id="stat-dropped">—</dd>
-          </div>
-        </dl>
-        <div class="health-track" aria-hidden="true">
-          <span id="health-fill"></span>
+        <div id="waveform" class="waveform" tabindex="0" role="slider" aria-label="Sonification playhead" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+          <svg viewBox="0 0 900 190" preserveAspectRatio="none" aria-hidden="true">
+            <g class="grid-lines"><path d="M0 48h900M0 95h900M0 142h900"/><path d="M150 0v190M300 0v190M450 0v190M600 0v190M750 0v190"/></g>
+            <path id="signal-area" class="signal-area" d=""></path>
+            <path id="signal-line" class="signal-line" d=""></path>
+            <path id="playhead" class="playhead" d="M0 0v190"></path>
+          </svg>
+          <div id="wave-empty" class="wave-empty">Select a mapping source to inspect its shape.</div>
+          <div class="wave-time"><span>START</span><span id="wave-progress">0%</span><span>END</span></div>
         </div>
-        <p id="health-caption" class="health-caption">Establishing service health…</p>
-      </article>
+      </section>
 
-      <article class="panel performance-panel">
-        <div class="panel-heading">
-          <div>
-            <p class="panel-kicker">Performance monitor</p>
-            <h2>Tracked held notes</h2>
-          </div>
-          <div class="performance-readouts">
-            <span><b id="active-note-count">0</b> notes</span>
-            <span>CH <b id="midi-channel">—</b></span>
-          </div>
+      <section class="mapping-panel" aria-labelledby="mapping-title">
+        <div class="panel-meta mapping-heading">
+          <div><span class="eyebrow">MAPPING MATRIX</span><b id="mapping-title">What the data controls</b></div>
+          <button id="add-mapping" class="text-button" type="button" disabled>+ Add mapping</button>
         </div>
-        <div id="keyboard" class="keyboard" role="img" aria-label="No active notes"></div>
-        <div class="performance-footer">
-          <span id="note-readout">No notes held</span>
-          <span id="expression-readout">Sustain — · Recent bend —</span>
+        <div class="mapping-labels" aria-hidden="true"><span>Input recipe</span><span>Curve</span><span>Destination</span><span>Output range</span><span></span></div>
+        <div id="mapping-rows" class="mapping-rows">
+          <div class="mapping-placeholder">Mappings are created after a recording is selected.</div>
         </div>
-      </article>
+      </section>
+      <p id="mapping-help" class="mapping-help">Combine up to six robot signals in each recipe. Composite inputs are normalized before average, weighted, sum, difference, minimum or maximum operations.</p>
     </section>
 
-    <section class="parameter-section" aria-labelledby="parameters-title">
-      <div class="section-heading">
-        <div>
-          <p class="eyebrow">SIGNAL ARCHITECTURE</p>
-          <h2 id="parameters-title">Parameter field</h2>
-          <p id="parameter-summary" class="section-subtitle">Waiting for the first state snapshot.</p>
-        </div>
-
-        <div class="view-meta">
-          <span id="snapshot-age" class="snapshot-age">Not yet updated</span>
-          <span id="live-pulse" class="live-pulse" aria-hidden="true"></span>
-        </div>
+    <aside class="rail output-rail" aria-labelledby="output-title">
+      <span class="eyebrow">03 / OUTPUT</span>
+      <h2 id="output-title">Sound engine</h2>
+      <div class="output-choice" role="radiogroup" aria-label="Sonification output">
+        <button class="is-selected" type="button" role="radio" aria-checked="true" data-output="audio"><span>◉</span><b>Browser preview</b><small>Available now</small></button>
+        <button type="button" role="radio" aria-checked="false" data-output="midi"><span>⌁</span><b>Hydrasynth MIDI</b><small id="midi-choice-detail">Connect when ready</small></button>
       </div>
 
-      <form id="parameter-filter-form" class="filter-bar" role="search">
-        <label class="search-field" for="parameter-search">
-          <svg viewBox="0 0 24 24" aria-hidden="true">
-            <circle cx="10.8" cy="10.8" r="6.6"></circle>
-            <path d="m16 16 4.2 4.2"></path>
-          </svg>
-          <span class="sr-only">Search parameters</span>
-          <input id="parameter-search" type="search" placeholder="Search parameters, CC or NRPN…" autocomplete="off">
-          <kbd>/</kbd>
+      <div class="mini-synth">
+        <div class="mini-synth-head"><span>Preview voice</span><b id="voice-name">GLASS / 01</b></div>
+        <label>Wave
+          <select id="wave-type"><option value="sine">Sine</option><option value="triangle" selected>Triangle</option><option value="sawtooth">Saw</option><option value="square">Square</option></select>
         </label>
-        <fieldset class="filter-options">
-          <legend class="sr-only">Filter parameters</legend>
-          <button type="button" class="filter-chip is-active" data-filter="all" aria-pressed="true">All</button>
-          <button type="button" class="filter-chip" data-filter="changed" aria-pressed="false">
-            <i class="chip-dot chip-dot--changed" aria-hidden="true"></i>Changed
-          </button>
-          <button type="button" class="filter-chip" data-filter="user" aria-pressed="false">
-            <i class="chip-dot chip-dot--user" aria-hidden="true"></i>User
-          </button>
-          <button type="button" class="filter-chip" data-filter="agent" aria-pressed="false">
-            <i class="chip-dot chip-dot--agent" aria-hidden="true"></i>Agent
-          </button>
-          <button type="button" class="filter-chip" data-filter="takeover" aria-pressed="false">
-            <i class="chip-dot chip-dot--takeover" aria-hidden="true"></i>Takeover
-          </button>
-          <button type="button" class="filter-chip" data-filter="catalog" aria-pressed="false">
-            <i class="chip-dot chip-dot--catalog" aria-hidden="true"></i>Catalog
-          </button>
-        </fieldset>
-      </form>
-
-      <div id="parameter-loading" class="loading-state" aria-live="polite">
-        <div class="loading-scope" aria-hidden="true">
-          <i></i><i></i><i></i>
-        </div>
-        <p>Listening for parameter state</p>
-        <small>Controls appear as they are observed.</small>
+        <label>Attack <input id="attack" type="range" min="0" max="100" value="8"><output id="attack-output">0.08s</output></label>
+        <label>Release <input id="release" type="range" min="5" max="100" value="38"><output id="release-output">0.38s</output></label>
+        <label>Brightness <input id="brightness" type="range" min="0" max="100" value="64"><output id="brightness-output">64%</output></label>
       </div>
 
-      <div id="parameter-empty" class="empty-state" hidden>
-        <div class="empty-glyph" aria-hidden="true">Ø</div>
-        <div>
-          <h3>No parameters match this view</h3>
-          <p>Try another filter or move a control on the instrument.</p>
+      <div class="scale-card">
+        <div><span>Pitch language</span><b id="scale-copy">C minor pentatonic</b></div>
+        <div class="scale-controls">
+          <label>Root<select id="scale-root"><option>C</option><option>C♯</option><option>D</option><option>D♯</option><option>E</option><option>F</option><option>F♯</option><option>G</option><option>G♯</option><option>A</option><option>A♯</option><option>B</option></select></label>
+          <label>Scale<select id="scale-name"><option value="minor-pentatonic">Minor pentatonic</option><option value="major-pentatonic">Major pentatonic</option><option value="minor">Natural minor</option><option value="major">Major</option><option value="chromatic">Chromatic</option></select></label>
         </div>
+        <div id="piano-roll" class="piano-roll" aria-hidden="true"></div>
       </div>
 
-      <div id="parameter-groups" class="parameter-groups" tabindex="-1"></div>
-    </section>
-
-    <section class="lower-grid" aria-label="Activity and provenance">
-      <article class="panel activity-panel">
-        <div class="panel-heading">
-          <div>
-            <p class="panel-kicker">Incoming + scheduled</p>
-            <h2>Activity timeline</h2>
-          </div>
-          <span id="event-count" class="count-badge">0 events</span>
-        </div>
-        <div id="event-announcer" class="sr-only" role="status" aria-live="polite" aria-atomic="true"></div>
-        <ol id="event-timeline" class="event-timeline">
-          <li class="timeline-empty">
-            <span class="timeline-mark"></span>
-            <div>
-              <strong>Awaiting activity</strong>
-              <small>Performance and parameter events will appear here.</small>
-            </div>
-          </li>
-        </ol>
-      </article>
-
-      <aside class="panel provenance-panel">
-        <div>
-          <p class="panel-kicker">Control provenance</p>
-          <h2>Who moved it?</h2>
-        </div>
-        <ul class="source-legend">
-          <li>
-            <span class="source-symbol source-symbol--user">U</span>
-            <div><strong>User</strong><small>Front panel or external MIDI</small></div>
-          </li>
-          <li>
-            <span class="source-symbol source-symbol--agent">A</span>
-            <div><strong>Agent</strong><small>Generated control or automation</small></div>
-          </li>
-          <li>
-            <span class="source-symbol source-symbol--echo">↳</span>
-            <div><strong>Echo</strong><small>Hardware acknowledgement</small></div>
-          </li>
-        </ul>
-        <div id="takeover-status" class="takeover-status">
-          <div class="takeover-dial" aria-hidden="true"><span></span></div>
-          <div>
-            <small>User-priority window</small>
-            <strong id="takeover-copy">Waiting for state</strong>
-          </div>
-        </div>
-        <p class="readonly-notice">
-          <svg viewBox="0 0 24 24" aria-hidden="true">
-            <path d="M7 10V7a5 5 0 0 1 10 0v3m-11 0h12v10H6z"/>
-          </svg>
-          Read-only monitor
-        </p>
-      </aside>
-    </section>
+      <div id="midi-panel" class="midi-panel" hidden>
+        <label for="midi-output">MIDI destination</label>
+        <select id="midi-output"><option value="">No device selected</option></select>
+        <p id="midi-status">Connect the Hydrasynth, then grant browser MIDI access.</p>
+      </div>
+      <button id="connect-midi" class="connect-button" type="button">Connect MIDI device <span>→</span></button>
+      <button id="panic-button" class="panic-button" type="button" hidden>Stop all MIDI notes</button>
+      <p class="output-note">No keyboard is needed to audition a mapping. Browser preview follows the same pitch, velocity, gate and CC rules as MIDI output.</p>
+    </aside>
   </main>
 
-  <footer>
-    <span>HYDRA // LOCAL INSTRUMENT LINK</span>
+  <footer class="footer-bar">
+    <span id="recording-link-status"><i class="status-light is-pending"></i> Checking RAPP recordings</span>
     <span id="footer-clock">—</span>
+    <span id="session-state">LOCAL SESSION · READY</span>
   </footer>
 
-  <noscript>
-    <div class="noscript-message">This telemetry dashboard requires JavaScript to display live state.</div>
-  </noscript>
+  <template id="mapping-template">
+    <div class="mapping-row">
+      <div class="signal-builder">
+        <div class="signal-builder-head">
+          <label class="operator-control"><span>Combine</span><select data-role="operator"><option value="direct">Single signal</option><option value="average">Average</option><option value="weighted">Weighted average</option><option value="sum">Sum</option><option value="difference">Difference</option><option value="minimum">Minimum</option><option value="maximum">Maximum</option></select></label>
+          <button class="add-source-button" type="button" data-role="add-source">+ Source</button>
+        </div>
+        <div class="mapping-sources" data-role="sources"></div>
+      </div>
+      <label><span class="sr-only">Curve</span><select data-role="curve"><option value="linear">Linear ↗</option><option value="smooth">Soft S</option><option value="exponential">Exponential</option><option value="inverse">Inverted ↘</option></select></label>
+      <label><span class="sr-only">Destination</span><select data-role="destination"></select></label>
+      <div class="range-inputs"><label><span>From</span><input data-role="minimum" type="number"></label><i>→</i><label><span>To</span><input data-role="maximum" type="number"></label></div>
+      <button class="row-menu" type="button" data-role="remove" aria-label="Remove mapping">×</button>
+    </div>
+  </template>
 
+  <template id="mapping-source-template">
+    <div class="mapping-source">
+      <span class="source-number" data-role="source-number">1</span>
+      <label class="source-field-label"><span class="sr-only">Source signal</span><select data-role="source"></select></label>
+      <label class="reducer-control"><span class="sr-only">Reduction</span><select data-role="reducer"></select></label>
+      <label class="weight-control" hidden><span>Weight</span><input data-role="weight" type="number" min="0" max="10" step="0.1" value="1"></label>
+      <button class="remove-source-button" type="button" data-role="remove-source" aria-label="Remove source">−</button>
+      <label class="index-control" hidden>Flattened index <input data-role="index" type="number" min="0" value="0"></label>
+    </div>
+  </template>
+
+  <section id="observer-overlay" class="observer-overlay" aria-label="Hydrasynth Observer" hidden>
+    <div class="observer-overlay-toolbar">
+      <button id="close-observer" type="button">← Signal Lab</button>
+      <span><i class="status-light is-ready"></i> Signal Lab remains active underneath</span>
+    </div>
+    <iframe id="observer-frame" title="Hydrasynth Observer dashboard" data-src="/observer/?embedded=1"></iframe>
+  </section>
+
+  <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
   <script src="app.js" defer></script>
 </body>
 </html>

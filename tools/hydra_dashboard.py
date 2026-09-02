@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Local read-only web dashboard and authenticated Unix command broker."""
+"""Local telemetry and sonification dashboards with a Unix command broker."""
 
 from __future__ import annotations
 
@@ -26,7 +26,9 @@ from collections import deque
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
-from urllib.parse import unquote, urlsplit
+from urllib.parse import parse_qs, unquote, urlsplit
+
+from recording_library import RecordingLibrary, default_recordings_directory
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -47,6 +49,9 @@ HYDRACTL_JSON_LINE_LIMIT = 16 * 1024
 DEFAULT_BROKER_SOCKET = Path(f"/tmp/hydrasynth-dashboard-{os.getuid()}.sock")
 DEFAULT_BROKER_TOKEN = Path(f"/tmp/hydrasynth-dashboard-{os.getuid()}.token")
 BROKER_READ_ONLY_OPERATIONS = {"ping", "status", "capabilities", "state"}
+SIGNAL_LAB_REQUEST_LIMIT = 64 * 1024
+SIGNAL_LAB_ACTIVE_SECONDS = 2.5
+SIGNAL_LAB_CC_LIMIT = 64
 
 DEMO_CONTROLS = (
     ("osc1-level", 44),
@@ -1566,6 +1571,256 @@ class SnapshotStore:
         }
 
 
+class SignalLabFeed:
+    """Thread-safe virtual MIDI feed published by the Signal Lab browser."""
+
+    def __init__(self, catalog: ParameterCatalog | None = None) -> None:
+        self.store = SnapshotStore("signal-lab", catalog)
+        self.lock = threading.RLock()
+        self.started = time.monotonic()
+        self.sequence = 0
+        self.last_publish: float | None = None
+        self.note_deadlines: dict[tuple[int, int], float] = {}
+        self.metadata: dict[str, Any] = {
+            "recording": None,
+            "output": "browser audio",
+            "progress": 0.0,
+            "mapping_count": 0,
+            "composite_count": 0,
+        }
+        self.store.accept(
+            {
+                "v": 1,
+                "type": "ready",
+                "connected": False,
+                "destination": "BROWSER AUDIO",
+                "input_connected": False,
+                "source": "SIGNAL LAB",
+                "scheduler": True,
+                "event_writer": True,
+                "channel": 1,
+                "takeover_seconds": 0.0,
+            }
+        )
+        self.store.capabilities = {
+            "ops": ["state"],
+            "timbre_controls": [],
+            "limits": {"notification_queue": 0},
+        }
+        self.store.status = {
+            "connected": False,
+            "input_connected": False,
+            "scheduler": True,
+            "queued_events": 0,
+            "active_jobs": 0,
+            "event_writer": True,
+            "notification_queued": 0,
+            "notification_dropped": 0,
+            "event_sequence": 0,
+            "channel": 1,
+            "takeover_seconds": 0.0,
+            "incoming_dropped": 0,
+            "source": "SIGNAL LAB",
+            "destination": "BROWSER AUDIO",
+        }
+
+    @staticmethod
+    def _short_text(value: Any, maximum: int = 160) -> str | None:
+        if not isinstance(value, str):
+            return None
+        text = value.strip()
+        return text[:maximum] if text else None
+
+    def _event_locked(self, payload: dict[str, Any]) -> None:
+        self.sequence += 1
+        event = {
+            "v": 1,
+            "type": "event",
+            "event_sequence": self.sequence,
+            "server_time_ms": (time.monotonic() - self.started) * 1000.0,
+            "source": "signal_lab",
+            **payload,
+        }
+        self.store.accept(event)
+
+    def _expire_notes_locked(self, now: float, *, clear_all: bool = False) -> None:
+        expired = [
+            key
+            for key, deadline in self.note_deadlines.items()
+            if clear_all or deadline <= now
+        ]
+        for channel, note in expired:
+            self._event_locked(
+                {
+                    "event": "note_off",
+                    "channel": channel,
+                    "note": note,
+                    "velocity": 0,
+                }
+            )
+            self.note_deadlines.pop((channel, note), None)
+
+    def active(self, now: float | None = None) -> bool:
+        with self.lock:
+            current = time.monotonic() if now is None else now
+            return (
+                self.last_publish is not None
+                and current - self.last_publish <= SIGNAL_LAB_ACTIVE_SECONDS
+            )
+
+    def publish(self, payload: dict[str, Any]) -> dict[str, Any]:
+        if not isinstance(payload, dict):
+            raise ValueError("signal_lab_payload_must_be_an_object")
+        now = time.monotonic()
+        with self.lock:
+            self._expire_notes_locked(now)
+            recording = self._short_text(payload.get("recording"))
+            output = self._short_text(payload.get("output"), 32)
+            progress = finite_number(payload.get("progress"))
+            mapping_count = integer(payload.get("mapping_count"))
+            composite_count = integer(payload.get("composite_count"))
+            if recording is not None:
+                self.metadata["recording"] = recording
+            if output in {"audio", "midi"}:
+                self.metadata["output"] = (
+                    "Hydrasynth MIDI" if output == "midi" else "browser audio"
+                )
+            if progress is not None:
+                self.metadata["progress"] = max(0.0, min(1.0, progress))
+            if mapping_count is not None:
+                self.metadata["mapping_count"] = max(0, min(64, mapping_count))
+            if composite_count is not None:
+                self.metadata["composite_count"] = max(0, min(64, composite_count))
+
+            raw_cc = payload.get("cc")
+            cc_items = raw_cc if isinstance(raw_cc, list) else []
+            if len(cc_items) > SIGNAL_LAB_CC_LIMIT:
+                raise ValueError("too_many_signal_lab_controls")
+            accepted_controls = 0
+            seen_cc: set[int] = set()
+            for item in cc_items:
+                if not isinstance(item, dict):
+                    continue
+                number = integer(item.get("number"))
+                value = integer(item.get("value"))
+                if (
+                    number is None
+                    or value is None
+                    or not 0 <= number <= 127
+                    or not 0 <= value <= 127
+                    or number in seen_cc
+                ):
+                    continue
+                seen_cc.add(number)
+                self._event_locked(
+                    {
+                        "event": "cc",
+                        "channel": 1,
+                        "number": number,
+                        "value": value,
+                    }
+                )
+                accepted_controls += 1
+
+            if payload.get("stop") is True:
+                self._expire_notes_locked(now, clear_all=True)
+
+            note = payload.get("note")
+            if isinstance(note, dict):
+                number = integer(note.get("number"))
+                velocity = integer(note.get("velocity"))
+                duration = finite_number(note.get("duration_ms"))
+                if (
+                    number is not None
+                    and velocity is not None
+                    and duration is not None
+                    and 0 <= number <= 127
+                    and 1 <= velocity <= 127
+                    and 1 <= duration <= 30_000
+                ):
+                    key = (1, number)
+                    if key in self.note_deadlines:
+                        self._event_locked(
+                            {
+                                "event": "note_off",
+                                "channel": 1,
+                                "note": number,
+                                "velocity": 0,
+                            }
+                        )
+                    self._event_locked(
+                        {
+                            "event": "note_on",
+                            "channel": 1,
+                            "note": number,
+                            "velocity": velocity,
+                        }
+                    )
+                    self.note_deadlines[key] = now + duration / 1000.0
+
+            self.last_publish = now
+            destination = str(self.metadata["output"]).upper()
+            with self.store.lock:
+                self.store.ready["connected"] = True
+                self.store.ready["destination"] = destination
+                self.store.status.update(
+                    {
+                        "connected": True,
+                        "active_jobs": 1,
+                        "event_sequence": self.sequence,
+                        "source": "SIGNAL LAB",
+                        "destination": destination,
+                    }
+                )
+                self.store.updated_at = utc_now()
+            return {
+                "ok": True,
+                "event_sequence": self.sequence,
+                "accepted_controls": accepted_controls,
+            }
+
+    def snapshot(self) -> dict[str, Any]:
+        now = time.monotonic()
+        with self.lock:
+            self._expire_notes_locked(now)
+            active = self.active(now)
+            snapshot = self.store.snapshot()
+            age = (
+                None
+                if self.last_publish is None
+                else max(0.0, now - self.last_publish)
+            )
+            destination = str(self.metadata["output"]).upper()
+            snapshot["signal_lab"] = {
+                **copy.deepcopy(self.metadata),
+                "active": active,
+                "last_update_age": age,
+            }
+            snapshot["bridge"].update(
+                {
+                    "mode": "signal-lab",
+                    "service_running": True,
+                    "connected": active,
+                    "input_connected": False,
+                    "endpoint_state": (
+                        "signal_lab_active" if active else "signal_lab_idle"
+                    ),
+                    "destination": destination,
+                    "source": "SIGNAL LAB",
+                }
+            )
+            snapshot["status"].update(
+                {
+                    "connected": active,
+                    "active_jobs": 1 if active else 0,
+                    "event_sequence": self.sequence,
+                    "destination": destination,
+                    "source": "SIGNAL LAB",
+                }
+            )
+            return snapshot
+
+
 def service_error_response(
     caller_id: Any, code: str, message: str
 ) -> dict[str, Any]:
@@ -2447,16 +2702,59 @@ class DashboardHTTPServer(ThreadingHTTPServer):
 
 
 def handler_for(
-    store: SnapshotStore, catalog_payload: bytes | None = None
+    store: SnapshotStore,
+    catalog_payload: bytes | None = None,
+    recording_library: RecordingLibrary | None = None,
+    signal_lab_feed: SignalLabFeed | None = None,
 ) -> type[BaseHTTPRequestHandler]:
     class DashboardHandler(BaseHTTPRequestHandler):
         server_version = "HydraDashboard/1"
 
         def do_GET(self) -> None:  # noqa: N802
-            path = unquote(urlsplit(self.path).path)
+            request_url = urlsplit(self.path)
+            path = unquote(request_url.path)
             if path == "/api/snapshot":
                 payload = json.dumps(
                     store.snapshot(), separators=(",", ":"), allow_nan=False
+                ).encode("utf-8")
+                self._send(200, payload, "application/json; charset=utf-8", "no-store")
+                return
+            if path == "/api/observer/snapshot":
+                requested_source = parse_qs(request_url.query).get(
+                    "source", ["auto"]
+                )[0]
+                if requested_source not in {"auto", "signal-lab"}:
+                    self._json_error(400, "invalid_observer_source")
+                    return
+                use_signal_lab = (
+                    signal_lab_feed is not None
+                    and (
+                        requested_source == "signal-lab"
+                        or signal_lab_feed.active()
+                    )
+                )
+                snapshot = (
+                    signal_lab_feed.snapshot()
+                    if use_signal_lab and signal_lab_feed is not None
+                    else store.snapshot()
+                )
+                snapshot["observer_source"] = {
+                    "requested": requested_source,
+                    "selected": "signal-lab" if use_signal_lab else "telemetry",
+                }
+                payload = json.dumps(
+                    snapshot, separators=(",", ":"), allow_nan=False
+                ).encode("utf-8")
+                self._send(200, payload, "application/json; charset=utf-8", "no-store")
+                return
+            if path == "/api/signal-lab/snapshot":
+                if signal_lab_feed is None:
+                    self._json_error(404, "signal_lab_unavailable")
+                    return
+                payload = json.dumps(
+                    signal_lab_feed.snapshot(),
+                    separators=(",", ":"),
+                    allow_nan=False,
                 ).encode("utf-8")
                 self._send(200, payload, "application/json; charset=utf-8", "no-store")
                 return
@@ -2476,6 +2774,54 @@ def handler_for(
                         "no-cache",
                     )
                 return
+            if path == "/api/recordings":
+                if (
+                    recording_library is not None
+                    and parse_qs(request_url.query).get("refresh") == ["1"]
+                ):
+                    recording_library.refresh()
+                payload = json.dumps(
+                    (
+                        recording_library.summary()
+                        if recording_library is not None
+                        else {"available": False, "directory": None, "recordings": []}
+                    ),
+                    separators=(",", ":"),
+                    allow_nan=False,
+                ).encode("utf-8")
+                self._send(200, payload, "application/json; charset=utf-8", "no-store")
+                return
+            if path.startswith("/api/recordings/") and path.endswith("/series"):
+                recording_id = path[len("/api/recordings/") : -len("/series")].strip("/")
+                if recording_library is None or not recording_id:
+                    self._json_error(404, "recording_not_found")
+                    return
+                parameters = parse_qs(request_url.query)
+                channel = parameters.get("channel", [""])[0]
+                field = parameters.get("field", [""])[0]
+                reducer = parameters.get("reducer", ["mean"])[0]
+                try:
+                    index = int(parameters.get("index", ["0"])[0])
+                    limit = int(parameters.get("limit", ["720"])[0])
+                    series = recording_library.series(
+                        recording_id,
+                        channel,
+                        field,
+                        reducer=reducer,
+                        index=index,
+                        limit=limit,
+                    )
+                except KeyError as error:
+                    self._json_error(404, str(error).strip("'"))
+                    return
+                except (OSError, TypeError, ValueError) as error:
+                    self._json_error(400, str(error) or "invalid_series_request")
+                    return
+                payload = json.dumps(
+                    series, separators=(",", ":"), allow_nan=False
+                ).encode("utf-8")
+                self._send(200, payload, "application/json; charset=utf-8", "no-store")
+                return
             if path == "/favicon.ico":
                 self._send(204, b"", "image/x-icon", "public, max-age=86400")
                 return
@@ -2484,6 +2830,11 @@ def handler_for(
                 "/index.html": "index.html",
                 "/styles.css": "styles.css",
                 "/app.js": "app.js",
+                "/observer": "observer/index.html",
+                "/observer/": "observer/index.html",
+                "/observer/index.html": "observer/index.html",
+                "/observer/styles.css": "observer/styles.css",
+                "/observer/app.js": "observer/app.js",
             }
             filename = static_files.get(path)
             if filename is None:
@@ -2509,11 +2860,46 @@ def handler_for(
             self.do_GET()
 
         def do_POST(self) -> None:  # noqa: N802
+            path = unquote(urlsplit(self.path).path)
+            if path == "/api/signal-lab/events":
+                if signal_lab_feed is None:
+                    self._json_error(404, "signal_lab_unavailable")
+                    return
+                try:
+                    content_length = int(self.headers.get("Content-Length", "0"))
+                except ValueError:
+                    self._json_error(400, "invalid_content_length")
+                    return
+                if not 0 < content_length <= SIGNAL_LAB_REQUEST_LIMIT:
+                    self._json_error(413, "signal_lab_payload_too_large")
+                    return
+                try:
+                    document = json.loads(self.rfile.read(content_length))
+                    response = signal_lab_feed.publish(document)
+                except (json.JSONDecodeError, UnicodeDecodeError):
+                    self._json_error(400, "invalid_signal_lab_json")
+                    return
+                except ValueError as error:
+                    self._json_error(400, str(error) or "invalid_signal_lab_event")
+                    return
+                payload = json.dumps(
+                    response, separators=(",", ":"), allow_nan=False
+                ).encode("utf-8")
+                self._send(202, payload, "application/json; charset=utf-8", "no-store")
+                return
             self._send(
                 405,
                 b'{"error":"read_only"}',
                 "application/json; charset=utf-8",
                 "no-store",
+            )
+
+        def _json_error(self, status: int, code: str) -> None:
+            payload = json.dumps(
+                {"error": code}, separators=(",", ":")
+            ).encode("utf-8")
+            self._send(
+                status, payload, "application/json; charset=utf-8", "no-store"
             )
 
         def _send(
@@ -2533,7 +2919,7 @@ def handler_for(
                 "Content-Security-Policy",
                 "default-src 'self'; img-src 'self' data:; "
                 "style-src 'self'; script-src 'self'; connect-src 'self'; "
-                "object-src 'none'; base-uri 'none'; frame-ancestors 'none'",
+                "object-src 'none'; base-uri 'none'; frame-ancestors 'self'",
             )
             self.end_headers()
             if self.command != "HEAD" and payload:
@@ -3039,7 +3425,25 @@ def run_self_test() -> int:
         if not broker_started:
             broker.token = ""
 
-    assert handler_for(store, b"{}")
+    signal_feed = SignalLabFeed(catalog)
+    published = signal_feed.publish(
+        {
+            "recording": "self-test.jsonl",
+            "output": "audio",
+            "progress": 0.25,
+            "mapping_count": 2,
+            "composite_count": 1,
+            "cc": [{"number": 74, "value": 91}],
+            "note": {"number": 60, "velocity": 96, "duration_ms": 100},
+        }
+    )
+    assert published["accepted_controls"] == 1
+    signal_snapshot = signal_feed.snapshot()
+    assert signal_snapshot["bridge"]["mode"] == "signal-lab"
+    assert signal_snapshot["signal_lab"]["active"] is True
+    assert signal_snapshot["state"]["cc"][0]["value"] == 91
+    assert signal_snapshot["state"]["active_notes"][0]["note"] == 60
+    assert handler_for(store, b"{}", signal_lab_feed=signal_feed)
     print("hydra-dashboard self-test: ok")
     return 0
 
@@ -3055,6 +3459,14 @@ def parse_arguments(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--port", type=int, default=8790)
     parser.add_argument("--allow-remote", action="store_true")
     parser.add_argument("--demo", action="store_true")
+    parser.add_argument(
+        "--recordings-dir",
+        type=Path,
+        help=(
+            "RAPP JSONL recordings directory. Defaults to RAPP_RECORDINGS_DIR "
+            "or a recognised sibling repository."
+        ),
+    )
     parser.add_argument("--hydractl", type=Path, default=DEFAULT_HYDRACTL)
     parser.add_argument("--device")
     parser.add_argument("--channel", type=int, default=1)
@@ -3089,7 +3501,14 @@ def main(argv: list[str] | None = None) -> int:
     except (OSError, ValueError, json.JSONDecodeError) as error:
         catalog = None
         print(f"warning: parameter catalog unavailable: {error}", file=sys.stderr)
+    recordings_directory = (
+        arguments.recordings_dir.expanduser().resolve()
+        if arguments.recordings_dir is not None
+        else default_recordings_directory(PROJECT_ROOT)
+    )
+    recording_library = RecordingLibrary(recordings_directory)
     store = SnapshotStore("demo" if arguments.demo else "live", catalog)
+    signal_lab_feed = SignalLabFeed(catalog)
     service: DemoService | LiveService
     if arguments.demo:
         service = DemoService(store)
@@ -3147,7 +3566,12 @@ def main(argv: list[str] | None = None) -> int:
         )
         server = DashboardHTTPServer(
             (arguments.host, arguments.port),
-            handler_for(store, catalog_payload),
+            handler_for(
+                store,
+                catalog_payload,
+                recording_library,
+                signal_lab_feed,
+            ),
         )
     except OSError as error:
         if broker is not None:
@@ -3161,6 +3585,19 @@ def main(argv: list[str] | None = None) -> int:
         f" ({'demo' if arguments.demo else 'live'})",
         flush=True,
     )
+    if recording_library.available:
+        print(
+            f"RAPP recordings: {recording_library.directory} "
+            f"({len(recording_library.recordings)} files)",
+            flush=True,
+        )
+    else:
+        print(
+            "RAPP recordings: not found; use --recordings-dir or "
+            "RAPP_RECORDINGS_DIR",
+            file=sys.stderr,
+            flush=True,
+        )
     if broker is not None:
         print(
             f"Hydrasynth command broker: {broker.socket_path} "
