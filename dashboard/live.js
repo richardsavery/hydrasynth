@@ -1,0 +1,111 @@
+"use strict";
+
+// RAPP's live bridge and player.py both broadcast one JSON object per message.
+globalThis.HydraLive = (() => {
+  const REDUCERS = ["mean", "rms", "minimum", "maximum", "index"];
+  const MAX_VALUES = 262144;
+  const finite = (value) => typeof value === "number" && Number.isFinite(value);
+  const display = (value) => value.replaceAll("_", " ").replaceAll("-", " ");
+  function flatten(raw) {
+    if (!Array.isArray(raw)) return null;
+    const values = [];
+    const stack = [{ items: raw, index: 0 }];
+    while (stack.length) {
+      const top = stack.at(-1);
+      if (top.index >= top.items.length) { stack.pop(); continue; }
+      const item = top.items[top.index++];
+      if (Array.isArray(item)) {
+        if (stack.length >= 8) return null;
+        stack.push({ items: item, index: 0 });
+      } else values.push(finite(item) ? item : NaN);
+      if (values.length > MAX_VALUES) return null;
+    }
+    return values;
+  }
+  function reduce(values, reducer, index = 0) {
+    if (!values) return null;
+    if (reducer === "index") return finite(values[index]) ? values[index] : null;
+    let count = 0, sum = 0, squares = 0, minimum = Infinity, maximum = -Infinity;
+    for (const value of values) {
+      if (!finite(value)) continue;
+      count++; sum += value; squares += value * value;
+      minimum = Math.min(minimum, value); maximum = Math.max(maximum, value);
+    }
+    if (!count) return null;
+    const value = reducer === "minimum" ? minimum : reducer === "maximum" ? maximum
+      : reducer === "rms" ? Math.sqrt(squares / count) : sum / count;
+    return finite(value) ? value : null;
+  }
+  class Stream {
+    constructor() { this.channels = new Map(); this.fieldIndex = new Map(); this.samples = new Map(); this.lastAt = null; this.frames = 0; this.invalid = 0; }
+    ingest(frame, now) {
+      if (!frame || typeof frame !== "object" || typeof frame.channel !== "string" || frame.channel.length > 160) { this.invalid++; return false; }
+      if (frame.channel === "__status__") return false;
+      const channelId = frame.channel;
+      if (!this.channels.has(channelId) && this.channels.size >= 32) { this.invalid++; return false; }
+      const arrays = new Map();
+      let size = 0;
+      for (const key of ["data", "velocity"]) {
+        if (Array.isArray(frame[key])) { const values = flatten(frame[key]); if (!values) { this.invalid++; return false; } arrays.set(key, values); size += values.length; }
+      }
+      if (frame.tensors && typeof frame.tensors === "object") {
+        for (const [name, tensor] of Object.entries(frame.tensors).slice(0, 256)) {
+          if (name.length > 160 || !Array.isArray(tensor?.data)) continue;
+          const values = flatten(tensor.data);
+          if (!values) { this.invalid++; return false; }
+          arrays.set(`tensor:${name}`, values); size += values.length;
+        }
+      }
+      if (!size || size > MAX_VALUES) { this.invalid++; return false; }
+      const previous = this.channels.get(channelId);
+      const channel = { arrays, at: now, revision: (previous?.revision || 0) + 1 };
+      this.channels.set(channelId, channel); this.lastAt = now; this.frames++;
+      let discovered = false;
+      const add = (fieldId, name, kind, indexed = false) => {
+        const key = `${encodeURIComponent(channelId)}|${encodeURIComponent(fieldId)}`;
+        if (this.fieldIndex.has(key) || this.fieldIndex.size >= 256) return;
+        const reducers = indexed ? ["value"] : REDUCERS;
+        this.fieldIndex.set(key, { key, id: fieldId, fieldId, name, kind, channelId,
+          channelName: display(channelId), optionLabel: name, reducers, default_reducer: reducers[0] });
+        discovered = true;
+      };
+      for (const [key, values] of arrays) {
+        if (["data", "velocity"].includes(key) && Array.isArray(frame.labels) && frame.labels.length === values.length) {
+          values.slice(0, 256).forEach((_, index) => add(`${key}:${index}`, `${String(frame.labels[index]).slice(0, 80)} ${key === "data" ? "position" : "velocity"}`, key === "data" ? "position" : "velocity", true));
+        } else add(key, display(key.replace(/^tensor:/, "")), key.startsWith("tensor:") ? "tensor" : "array");
+      }
+      return discovered;
+    }
+    read(source, now, timeout = 3000) {
+      const field = this.fieldIndex.get(source.sourceKey);
+      const channel = field && this.channels.get(field.channelId);
+      if (!channel || now - channel.at > timeout) return null;
+      const key = `${source.sourceKey}|${source.reducer}|${source.index}`;
+      let sample = this.samples.get(key);
+      if (!sample || sample.revision !== channel.revision) {
+        const indexed = /^(data|velocity):\d+$/.exec(field.fieldId);
+        const base = indexed ? field.fieldId.split(":")[0] : field.fieldId;
+        const index = indexed ? Number(field.fieldId.split(":")[1]) : source.index;
+        const value = reduce(channel.arrays.get(base), indexed ? "index" : source.reducer, index);
+        if (value === null) return null;
+        if (!sample) {
+          if (this.samples.size >= 512) this.samples.delete(this.samples.keys().next().value);
+          sample = { minimum: value, maximum: value, points: [] };
+        }
+        sample = { ...sample, value, revision: channel.revision, at: channel.at,
+          minimum: Math.min(sample.minimum, value), maximum: Math.max(sample.maximum, value) };
+        sample.points.push([now, value]);
+        if (sample.points.length > 256) sample.points.shift();
+        this.samples.set(key, sample);
+      }
+      const minimum = source.rangeMode === "fixed" ? Number(source.inputMin) : sample.minimum;
+      const maximum = source.rangeMode === "fixed" ? Number(source.inputMax) : sample.maximum;
+      if (!finite(minimum) || !finite(maximum) || (source.rangeMode === "fixed" && maximum <= minimum)) return null;
+      const normalized = maximum > minimum ? Math.max(0, Math.min(1, (sample.value - minimum) / (maximum - minimum))) : 0.5;
+      return { ...sample, minimum, maximum, normalized };
+    }
+    resetRanges() { this.samples.clear(); }
+    get fields() { return [...this.fieldIndex.values()]; }
+  }
+  return { Stream, reduce, flatten };
+})();

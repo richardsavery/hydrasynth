@@ -73,7 +73,7 @@ DEMO_CONTROLS = (
     ("delay-mix", 92),
     ("reverb-time", 65),
     ("reverb-tone", 67),
-    ("reverb-mix", 93),
+    ("reverb-mix", 91),
     ("macro1", 16),
     ("macro2", 17),
     ("macro3", 18),
@@ -1671,6 +1671,16 @@ class SignalLabFeed:
     def publish(self, payload: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(payload, dict):
             raise ValueError("signal_lab_payload_must_be_an_object")
+        raw_notes = payload.get("notes", [payload.get("note")])
+        if not isinstance(raw_notes, list) or len(raw_notes) > 8:
+            raise ValueError("signal_lab_requires_at_most_8_notes")
+        raw_cc = payload.get("cc")
+        cc_items = raw_cc if isinstance(raw_cc, list) else []
+        if len(cc_items) > SIGNAL_LAB_CC_LIMIT:
+            raise ValueError("too_many_signal_lab_controls")
+        raw_nrpn = payload.get("nrpn", [])
+        if not isinstance(raw_nrpn, list) or len(raw_nrpn) > 64:
+            raise ValueError("too_many_signal_lab_nrpn_controls")
         now = time.monotonic()
         with self.lock:
             self._expire_notes_locked(now)
@@ -1692,10 +1702,26 @@ class SignalLabFeed:
             if composite_count is not None:
                 self.metadata["composite_count"] = max(0, min(64, composite_count))
 
-            raw_cc = payload.get("cc")
-            cc_items = raw_cc if isinstance(raw_cc, list) else []
-            if len(cc_items) > SIGNAL_LAB_CC_LIMIT:
-                raise ValueError("too_many_signal_lab_controls")
+            destination_count = integer(payload.get("destination_count"))
+            if destination_count is not None:
+                self.metadata["destination_count"] = max(0, min(2048, destination_count))
+            if payload.get("source_mode") in {"live", "recording"}:
+                self.metadata["source_mode"] = payload["source_mode"]
+            if "voice_name" in payload:
+                self.metadata["voice_name"] = self._short_text(payload["voice_name"], 32)
+            patch = payload.get("patch")
+            if isinstance(patch, dict) and output == "midi":
+                bank = patch.get("bank")
+                number = integer(patch.get("number"))
+                if isinstance(bank, str) and bank in tuple("ABCDEFGH") and number is not None and 1 <= number <= 128:
+                    location = {"bank": bank, "number": number}
+                    if self.store.state.get("patch") != location:
+                        self._expire_notes_locked(now, clear_all=True)
+                        self._event_locked({"event": "patch", **location})
+            elif "patch" in payload and patch is None:
+                with self.store.lock:
+                    self.store.state["patch"] = {"bank": "?", "number": None}
+
             accepted_controls = 0
             seen_cc: set[int] = set()
             for item in cc_items:
@@ -1722,11 +1748,26 @@ class SignalLabFeed:
                 )
                 accepted_controls += 1
 
+            # Keep selector-bearing updates even when they share an NRPN address.
+            for item in raw_nrpn:
+                if not isinstance(item, dict):
+                    continue
+                parameter = integer(item.get("number"))
+                value = integer(item.get("value"))
+                if parameter is None or value is None or not 0 <= parameter <= 16383 or not 0 <= value <= 16383:
+                    continue
+                self._event_locked({"event": "nrpn", "channel": 1, "parameter": parameter,
+                                    "value": value, "resolution_bits": 14})
+                accepted_controls += 1
+
             if payload.get("stop") is True:
                 self._expire_notes_locked(now, clear_all=True)
 
-            note = payload.get("note")
-            if isinstance(note, dict):
+            accepted_notes = 0
+            seen_notes: set[int] = set()
+            for note in raw_notes:
+                if not isinstance(note, dict) or payload.get("stop") is True:
+                    continue
                 number = integer(note.get("number"))
                 velocity = integer(note.get("velocity"))
                 duration = finite_number(note.get("duration_ms"))
@@ -1735,9 +1776,12 @@ class SignalLabFeed:
                     and velocity is not None
                     and duration is not None
                     and 0 <= number <= 127
+                    and number not in seen_notes
                     and 1 <= velocity <= 127
                     and 1 <= duration <= 30_000
                 ):
+                    seen_notes.add(number)
+                    accepted_notes += 1
                     key = (1, number)
                     if key in self.note_deadlines:
                         self._event_locked(
@@ -1777,6 +1821,7 @@ class SignalLabFeed:
                 "ok": True,
                 "event_sequence": self.sequence,
                 "accepted_controls": accepted_controls,
+                "accepted_notes": accepted_notes,
             }
 
     def snapshot(self) -> dict[str, Any]:
@@ -2791,8 +2836,9 @@ def handler_for(
                 ).encode("utf-8")
                 self._send(200, payload, "application/json; charset=utf-8", "no-store")
                 return
-            if path.startswith("/api/recordings/") and path.endswith("/series"):
-                recording_id = path[len("/api/recordings/") : -len("/series")].strip("/")
+            if path.startswith("/api/recordings/") and path.endswith(("/series", "/series-batch")):
+                suffix = "/series-batch" if path.endswith("/series-batch") else "/series"
+                recording_id = path[len("/api/recordings/") : -len(suffix)].strip("/")
                 if recording_library is None or not recording_id:
                     self._json_error(404, "recording_not_found")
                     return
@@ -2801,16 +2847,15 @@ def handler_for(
                 field = parameters.get("field", [""])[0]
                 reducer = parameters.get("reducer", ["mean"])[0]
                 try:
-                    index = int(parameters.get("index", ["0"])[0])
-                    limit = int(parameters.get("limit", ["720"])[0])
-                    series = recording_library.series(
-                        recording_id,
-                        channel,
-                        field,
-                        reducer=reducer,
-                        index=index,
-                        limit=limit,
-                    )
+                    if suffix == "/series-batch":
+                        sources = json.loads(parameters.get("sources", ["[]"])[0])
+                        series = {"series": recording_library.series_batch(recording_id, sources)}
+                    else:
+                        index = int(parameters.get("index", ["0"])[0])
+                        limit = int(parameters.get("limit", ["720"])[0])
+                        series = recording_library.series(
+                            recording_id, channel, field, reducer=reducer, index=index, limit=limit,
+                        )
                 except KeyError as error:
                     self._json_error(404, str(error).strip("'"))
                     return
@@ -2830,6 +2875,9 @@ def handler_for(
                 "/index.html": "index.html",
                 "/styles.css": "styles.css",
                 "/app.js": "app.js",
+                "/sonification.js": "sonification.js",
+                "/parameters.js": "parameters.js",
+                "/live.js": "live.js",
                 "/observer": "observer/index.html",
                 "/observer/": "observer/index.html",
                 "/observer/index.html": "observer/index.html",
@@ -2918,7 +2966,7 @@ def handler_for(
             self.send_header(
                 "Content-Security-Policy",
                 "default-src 'self'; img-src 'self' data:; "
-                "style-src 'self'; script-src 'self'; connect-src 'self'; "
+                "style-src 'self'; script-src 'self'; connect-src 'self' ws: wss:; "
                 "object-src 'none'; base-uri 'none'; frame-ancestors 'self'",
             )
             self.end_headers()
@@ -3443,6 +3491,36 @@ def run_self_test() -> int:
     assert signal_snapshot["signal_lab"]["active"] is True
     assert signal_snapshot["state"]["cc"][0]["value"] == 91
     assert signal_snapshot["state"]["active_notes"][0]["note"] == 60
+    chord = [{"number": note, "velocity": 96, "duration_ms": 5000} for note in (60, 64, 67)]
+    published = signal_feed.publish({"output": "midi", "patch": {"bank": "B", "number": 17},
+                                     "notes": chord, "cc": [{"number": 74, "value": 72}]})
+    assert published["accepted_notes"] == 3
+    signal_snapshot = signal_feed.snapshot()
+    assert signal_snapshot["state"]["patch"] == {"bank": "B", "number": 17}
+    assert {item["note"] for item in signal_snapshot["state"]["active_notes"]} == {60, 64, 67}
+    signal_feed.publish({"output": "midi", "patch": {"bank": "B", "number": 17}})
+    assert signal_feed.snapshot()["state"]["cc"][0]["value"] == 72, "same patch must preserve parameter state"
+    try:
+        signal_feed.publish({"notes": chord * 3})
+        raise AssertionError("oversized chords must be rejected")
+    except ValueError:
+        pass
+    signal_feed.publish({"stop": True, "notes": chord})
+    assert not signal_feed.snapshot()["state"]["active_notes"]
+    signal_feed.publish({"output": "audio", "patch": None, "voice_name": "Bell", "notes": chord})
+    assert signal_feed.snapshot()["signal_lab"]["voice_name"] == "Bell"
+    assert signal_feed.snapshot()["state"]["patch"]["number"] is None
+    published = signal_feed.publish({"nrpn": [{"number": 8097, "value": 1}, {"number": 8097, "value": 130},
+                                               {"number": 99999, "value": 0}],
+                                     "destination_count": 256, "source_mode": "live"})
+    assert published["accepted_controls"] == 2
+    assert signal_feed.snapshot()["state"]["nrpn"][-1]["value"] == 130
+    assert signal_feed.snapshot()["signal_lab"]["destination_count"] == 256
+    try:
+        signal_feed.publish({"nrpn": [{}] * 65})
+        raise AssertionError("oversized parameter batches must be rejected")
+    except ValueError:
+        pass
     assert handler_for(store, b"{}", signal_lab_feed=signal_feed)
     print("hydra-dashboard self-test: ok")
     return 0

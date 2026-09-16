@@ -43,6 +43,12 @@ dashboard-test:
 	$(PYTHON) -B tools/validate_parameters.py
 	$(PYTHON) -B tools/validate_parameters.py --self-test
 	$(NODE) --check dashboard/app.js
+	$(NODE) --check dashboard/sonification.js
+	$(NODE) --check dashboard/parameters.js
+	$(NODE) --check dashboard/live.js
+	$(NODE) tools/test_parameters_live.js
+	$(NODE) tools/test_sonification.js
+	$(NODE) tools/test_sonification_player.js
 	$(NODE) tools/test_dashboard_semantics.js
 	$(NODE) --check dashboard/observer/app.js
 	$(NODE) tools/test_observer_semantics.js

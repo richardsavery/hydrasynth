@@ -40,28 +40,178 @@ folder takes priority over the bundled copies.
 
 The working surface lets you:
 
-- choose any recording and inspect its discovered JSON channels;
+- keep up to 12 named mapping tabs for each recording, with separate voice,
+  scale, tempo and rhythm settings; audition one tab at a time;
+- save named presets, open them in new tabs, and export/import a JSON preset
+  library;
+- generate small musical sets or 64, 128, 256 and larger Hydrasynth parameter sets
+  in a new tab, with Balanced, Rhythmic or Wild character;
+- choose a recording or connect directly to the live RAPP WebSocket stream;
 - use direct joint position/velocity values or reduce tensor fields by mean,
   RMS energy, minimum, maximum, or one flattened index;
 - combine up to six robot fields in one mapping using average, weighted average,
   sum, difference, minimum, or maximum before shaping the output;
-- map signals to pitch, velocity, gate length, note probability, Hydrasynth
-  filter/effect controls, or any of the eight macros;
+- map signals to pitch, velocity, tempo, rhythmic hit density, pattern rotation,
+  note repeats, swing, accents, gate length, note probability, Hydrasynth
+  filter/effect controls, any of the eight macros, chord voices/inversion/spread,
+  or sound palette position;
 - adjust input curves, output ranges, tempo, rhythmic resolution, scale, and
   preview voice; and
 - audition the result through browser audio now, then choose a Web MIDI output
-  and send the same note and CC mapping to the Hydrasynth later.
+  and send notes plus catalog-based CC/NRPN mappings to the Hydrasynth later.
 
-For MIDI output, connect and power on the synth, set `PARAM RX` to `CC`, click
+For MIDI output, connect and power on the synth, set `PARAM RX` to `NRPN`
+(the dashboard’s default format), click
 **Connect MIDI device**, grant browser MIDI access, and select the Hydrasynth.
 The dashboard sends on MIDI channel 1 and provides a dedicated all-notes-off
-control. Mapping choices are saved locally in the browser for each recording.
+control. Mapping tabs save automatically in browser storage for each recording.
+Existing saved mappings migrate to an **Original** tab, including their sound
+settings. Browser storage is specific to the browser and page origin; use
+**Export** to move saved presets to another browser or machine.
 
-RAPP's existing live and replay servers already broadcast the same message
-schema over WebSocket. The planned live-source integration and its acceptance
-criteria are recorded in [docs/live_streaming.md](docs/live_streaming.md); it
-will reuse the mapping and sonification engine rather than introduce another
-data format.
+### Mapping tabs and presets
+
+Use **New tab** for an empty set, **Duplicate** to vary an existing idea, and
+the **Tab name** field to name it. Switching tabs stops playback and cancels
+queued repeats and active notes. **Remove tab** has an **Undo remove** action
+until another tab is removed or a different recording is selected.
+
+**Save preset** captures the current tab's mappings and musical settings as a
+separate snapshot. Saving again creates another snapshot, so editing a working
+tab never overwrites a preset. Choose a saved preset and **Open in new tab** to
+restore it. A preset can be reused on recordings with matching channel and field
+identifiers. Incompatible recipes are omitted with an explicit count; their
+saved definitions are preserved. The library holds up to 64 presets, and each
+tab supports up to 32 input recipes, each with up to 64 destinations.
+
+For an immediate starting point, choose **Rhythmic**, **18** mappings, then
+**Generate tab** and **Preview**. Generation keeps previous tabs and uses
+distinct destinations, varied signal combinations and wide output ranges.
+The server extracts uncached signals together in a single recording scan.
+**Stepped** and **Switch** curves produce more pronounced changes than smooth
+continuous movement. Generated tabs use three base voices and enable sound changes
+(following the sound mapping when present, otherwise cycling the palette).
+If enabled mappings share a parameter, the last destination in row order
+supplies its value, including CC aliases of the same NRPN parameter.
+
+### Rhythm and preview sound
+
+The 16-step rhythm view shows hits and rests. **Hits / 16** distributes the
+selected number of hits across that pattern, **Rotate** shifts it, and
+**Repeats** divides a hit into one to four shorter notes. **Swing** alternates
+long and short steps; **Accent** reduces offbeat and repeated-note velocities.
+Every one of these settings, plus **Tempo**, **Gate length** and **Note chance**,
+can be driven by a signal mapping. Green base-setting labels indicate mapped
+controls. A mapped value overrides its base setting during playback. Enable
+**Loop recording** for repeated playback; Stop also cancels future repeats.
+
+Browser audio and Web MIDI use the same rhythm plan. The browser voice has a
+filter, saturation/drive, tempo-related delay and convolution reverb, with
+bounded voices and an output compressor. Its eight macros control brightness,
+resonance, harmonics, detune, attack, release, echo and space respectively.
+The Reverb destination sends CC 91 (reverb dry/wet); CC 93 controls pre-effects
+mix on the Hydrasynth. Hydrasynth macros retain the meanings assigned by its current patch; the
+browser voice is an audition instrument, not an emulation of that patch.
+
+### Harmony and changing sounds
+
+Each rhythm hit now plays a scale-based chord, with **Voices** from 1–8 (default
+3), **Scale thirds**, **Scale fourths** or **Octaves** voicings, **Inversion**, and
+**Spread**. Voices, inversion and spread can also be mapped to recording signals.
+Thirds/fourths count degrees in the selected scale, including pentatonic scales.
+The player keeps notes distinct and within MIDI range; browser chords have
+compensated levels to avoid a large volume jump when adding voices. The observer
+shows all notes in the chord. MIDI chords use channel 1; the synth patch must be
+configured for polyphonic playing.
+
+The browser **Sound** menu provides Glass, Pluck, Warm pad, Reed, Bell and Soft
+bass. Wave/envelope/brightness edits return to Custom. **Sound changes** can
+keep the selected sound, cycle, choose randomly without immediately repeating,
+or **Follow mapping** using the **Sound palette position** destination (0–100%).
+Changes are sampled at the start of playback and every 16, 32, 64 or 128 steps.
+A mapping alone does not enable patch changes; select Follow mapping to use it.
+
+For MIDI output, the default **All banks A–H** palette explores all 1,024
+locations. **My shortlist** optionally narrows that to 1–32 locations such as
+`A001, B017, H128`. The manual **Bank** and
+**Patch** selectors and **Send bank / patch** button select a specific location
+and stop playback. Selecting a patch replaces any unsaved edit-buffer sound on
+the synth. Automatic changes release active notes, send bank MSB/LSB and Program
+Change with the same 20 ms gaps as the native driver, and wait 100 ms before
+resuming notes. Changes are at least two seconds apart; Stop, tab changes and
+output changes cancel pending sends. The observer reports the location *sent*,
+not an acknowledgement from the hardware or a known patch name.
+
+Browser automation uses the six preview sounds; MIDI automation uses instrument
+patch locations. Their timbres are independent. Harmony and sound-change settings,
+including the MIDI shortlist, are stored with mapping tabs and presets. Existing
+tabs default to keeping the current sound until automation is enabled.
+
+Recording samples advance at the musical clock's pace, not their original
+timestamps. Mapping source edits reload the affected playing series; switching
+recordings or tabs cancels an unfinished playback preparation.
+
+### Full Hydrasynth parameter mappings
+
+Click **+ Destinations** in a mapping row to search the catalog, filter by group,
+and select several targets at once. Each target has an enable switch, its own
+curve, and independent From/To values. This allows one joint angle, for example,
+to move filter cutoff, invert a mutant depth, change oscillator wave selection,
+and increase rhythmic density together. A recipe can also combine up to six
+input signals before sending the result to its destinations.
+
+The picker exposes **1,039 usable hardware destinations**, including **929 NRPN
+parameters**: oscillators, mutants, filters, envelopes, LFOs and steps, mixer,
+effects, arpeggiator, voice settings, macros and modulation routing. CC entries
+are often aliases of these parameters, so this count is not 1,039 independent
+synthesis controls. Another 110 reference entries remain visible but disabled
+because their ranges are missing, addresses conflict, or they use reserved MIDI
+control numbers. The catalog is based on ASM's legacy v1.5 MIDI specification;
+behavior on the connected instrument's firmware still needs hardware checking.
+
+Choose **Full Hydrasynth engine** in the generator for large sets. **All
+generatable** uses every eligible distinct NRPN destination plus musical
+controls; raw modulation routing indices, unresolved entries and alternate
+BPM-sync-on variants are excluded from random generation. Routing indices are
+available for deliberate manual mapping. Some parameters only affect sound when
+the patch enables their oscillator mode, modulation route or BPM-sync setting.
+
+Match **Parameter format** to the synth's `PARAM RX`. NRPN mode converts the
+small preview palette's CC controls to their catalog NRPN equivalents. CC mode
+sends CC targets and leaves explicit NRPN targets inactive. Browser audio plays
+the musical and preview controls; it does not emulate the full Hydrasynth engine.
+
+Updates use a latest-value queue at **25, 50 or 100 parameter changes/second**
+(default 50), with complete NRPN transactions and unchanged values skipped.
+Large sets therefore evolve more slowly: 256 changing parameters need roughly
+five seconds per pass at the default rate. Patch changes pause the queue and
+reapply mapped values to the new patch. Stopping, changing tabs or losing the
+output cancels pending updates and releases active notes.
+
+### Live RAPP input
+
+The **Live RAPP** card connects directly to the robot or the supplied replay
+server, using the protocol in the
+[RAPP student pack](https://github.com/maleenj/RAPP-Realtime-Viz/tree/main/viz_student_pack).
+Enter the server's `ws://` or `wss://` address, click **Connect live**, then
+**Preview**. The default is `ws://localhost:8765`; replace localhost with the
+robot or workshop server's address when needed. Allow local-network access if
+the browser requests it. An HTTPS-hosted dashboard requires a `wss://` stream.
+
+Joint positions, velocities, numeric arrays and named tensors appear as they
+arrive. The musical clock samples their latest values for rhythm and notes;
+MIDI parameters update independently at the selected rate. **Input range** on
+each source lets you choose learned minimum/maximum or a fixed physical range,
+for example −3.14 to 3.14 radians. **Reset learned ranges** recalibrates the live
+session. Live tabs are saved per stream URL, and presets can reuse matching
+channel/field names from recordings.
+
+Missing or stale mapped data silences playback after three seconds. A closed
+connection immediately releases notes and retries with bounded backoff when
+**Reconnect automatically** is enabled. Press **Preview** again after a
+reconnection. Clicking a recording returns to file playback. See
+[docs/live_streaming.md](docs/live_streaming.md) for replay setup and protocol
+limits.
 
 ## First connection
 

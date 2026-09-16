@@ -7,8 +7,9 @@ import gzip
 import json
 from pathlib import Path
 import tempfile
+from unittest.mock import patch
 
-from recording_library import RecordingLibrary
+from recording_library import RecordingLibrary, open_recording
 
 
 def main() -> int:
@@ -84,6 +85,27 @@ def main() -> int:
             limit=32,
         )
         assert [point[1] for point in compressed_energy["points"]] == [3.5, 6.0]
+
+        library.series_cache.clear()
+        sources = [
+            {"channel": "robot_joint_states", "field": "data:1", "reducer": "value"},
+            {"channel": "activation_energy", "field": "tensor:encoder_out_norm", "reducer": "mean"},
+        ]
+        with patch("recording_library.open_recording", wraps=open_recording) as opener:
+            batch = library.series_batch("compressed", sources + [sources[0]])
+            assert opener.call_count == 1, "a complete mapping set should scan the recording once"
+            assert batch[0]["points"][0][1] == 2.0
+            assert [point[1] for point in batch[1]["points"]] == [3.5, 6.0]
+            assert batch[0] is batch[2]
+            assert library.series_batch("compressed", sources)[0] is batch[0]
+            assert opener.call_count == 1, "cached batch requests should not reread the recording"
+        for invalid in ([], [sources[0]] * 193, [None], [{**sources[0], "index": float("inf")}], [{**sources[0], "channel": []}]):
+            try:
+                library.series_batch("compressed", invalid)
+            except ValueError:
+                pass
+            else:
+                raise AssertionError("invalid series batch was accepted")
     print("recording library tests: ok")
     return 0
 

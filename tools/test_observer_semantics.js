@@ -24,7 +24,7 @@ globalThis.__dashboardTests = {
   semanticParameterValue,
   parameterSurfaceSignature,
   snapshotEndpoint,
-  state
+  state, dom, renderPatch
 };`,
   context,
   { filename: "dashboard/observer/app.js" }
@@ -224,3 +224,20 @@ assert.notEqual(
 );
 
 console.log("observer dashboard semantic tests: ok");
+
+const patchDom = context.__dashboardTests.dom;
+for (const id of ["patch-bank", "patch-number", "patch-bank-label", "patch-number-label", "device-name", "midi-route"]) {
+  patchDom[id] = { textContent: "", classList: { toggle() {} } };
+}
+context.__dashboardTests.renderPatch({ state: { patch: { bank: "H", number: 128 } }, signal_lab: { output: "Hydrasynth MIDI" } });
+assert.equal(patchDom["patch-bank"].textContent, "H");
+assert.equal(patchDom["patch-number"].textContent, "128");
+assert.ok(patchDom["midi-route"].textContent.includes("sent"));
+context.__dashboardTests.renderPatch({ signal_lab: { output: "browser audio", voice_name: "Warm pad" } });
+assert.equal(patchDom["patch-number"].textContent, "Warm pad");
+assert.equal(patchDom["patch-number-label"].textContent, "VOICE");
+context.__dashboardTests.renderPatch({ state: { patch: { bank: "A", number: 1 } } });
+assert.equal(patchDom["patch-bank"].textContent, "A");
+assert.equal(patchDom["patch-number"].textContent, "001");
+assert.equal(patchDom["patch-number-label"].textContent, "PROGRAM");
+console.log("observer chord sound display tests: ok");

@@ -52,6 +52,16 @@
         <small id="source-field">—</small>
       </div>
       <p id="recordings-path" class="recordings-path" title=""></p>
+      <div class="live-card">
+        <h2>Live RAPP</h2>
+        <p class="output-note">Connect to the robot or RAPP's replay server. Both use the same stream.</p>
+        <label>Stream address<input id="live-url" type="url" value="ws://localhost:8765" spellcheck="false"></label>
+        <div class="live-actions"><button id="live-connect" class="small-button" type="button" disabled>Connect live</button><button id="live-disconnect" class="small-button" type="button" disabled>Disconnect</button></div>
+        <label class="live-reconnect"><input id="live-reconnect" type="checkbox" checked> Reconnect automatically</label>
+        <p id="live-status" class="sound-status" role="status">Not connected</p>
+        <button id="live-reset-ranges" class="small-button" type="button">Reset learned ranges</button>
+        <p class="output-note">Connect first, then press Preview. Incoming values drive the musical clock. Missing data silences playback after 3 seconds; choose a recording to return to file playback.</p>
+      </div>
     </aside>
 
     <section id="stage" class="stage" aria-label="Sonification workspace">
@@ -64,11 +74,41 @@
         <div class="transport-cluster">
           <label>Tempo <input id="tempo" type="number" min="20" max="240" value="96" inputmode="numeric"> BPM</label>
           <label>Steps / beat
-            <select id="steps-per-beat"><option value="1">1</option><option value="2" selected>2</option><option value="4">4</option></select>
+            <select id="steps-per-beat"><option value="1">1</option><option value="2" selected>2</option><option value="4">4</option><option value="8">8</option></select>
           </label>
           <button id="preview-button" class="play-button" type="button" disabled><span>▶</span> Preview</button>
         </div>
       </div>
+
+      <section class="mapping-workspace" aria-label="Mapping tabs and saved presets">
+        <div class="tabs-heading">
+          <div id="mapping-tabs" class="mapping-tabs" role="tablist" aria-label="Mapping sets"></div>
+          <button id="new-tab" class="small-button" type="button">+ New tab</button>
+        </div>
+        <div class="set-toolbar">
+          <label class="set-name">Tab name <input id="tab-name" maxlength="60" value="Original"></label>
+          <button id="duplicate-tab" class="small-button" type="button">Duplicate</button>
+          <button id="remove-tab" class="small-button" type="button">Remove tab</button>
+          <button id="undo-tab" class="small-button" type="button" hidden>Undo remove</button>
+        </div>
+        <div class="preset-toolbar">
+          <button id="save-preset" class="small-button" type="button">Save preset</button>
+          <label class="preset-picker"><span class="sr-only">Saved presets</span><select id="saved-presets"><option value="">Saved presets…</option></select></label>
+          <button id="load-preset" class="small-button" type="button" disabled>Open in new tab</button>
+          <button id="delete-preset" class="small-button" type="button" disabled>Delete preset</button>
+          <button id="export-presets" class="small-button" type="button">Export</button>
+          <button id="import-presets" class="small-button" type="button">Import</button>
+          <input id="preset-file" type="file" accept=".json,application/json" hidden>
+        </div>
+        <div class="generator-toolbar">
+          <div><b>Find a new sound</b><small>Generate a full set in a new tab.</small></div>
+          <label>Destinations <select id="random-count"><option value="8">8</option><option value="12" selected>12</option><option value="18">18</option><option value="27">27</option><option value="64">64</option><option value="128">128</option><option value="256">256</option><option value="all">All generatable</option></select></label>
+          <label>Palette <select id="random-palette"><option value="preview">Preview + rhythm</option><option value="engine">Full Hydrasynth engine</option></select></label>
+          <label>Character <select id="random-style"><option value="balanced">Balanced</option><option value="rhythmic">Rhythmic</option><option value="wild">Wild</option></select></label>
+          <button id="randomize-mappings" class="generate-button" type="button">↗ Generate tab</button>
+        </div>
+        <p id="workspace-status" class="workspace-status" role="status">Tabs save automatically in this browser. Presets keep named snapshots of mappings and sound settings.</p>
+      </section>
 
       <section class="signal-panel" aria-labelledby="signal-title">
         <div class="panel-meta">
@@ -87,17 +127,32 @@
         </div>
       </section>
 
-      <section class="mapping-panel" aria-labelledby="mapping-title">
+      <section class="rhythm-panel" aria-labelledby="rhythm-title">
+        <div class="panel-meta"><div><span class="eyebrow">PULSE / 16 STEPS</span><b id="rhythm-title">Shape the rhythm</b></div><label class="loop-control"><input id="loop" type="checkbox"> Loop recording</label></div>
+        <div id="rhythm-pattern" class="rhythm-pattern" role="img" aria-label="16 hits in 16 steps"></div>
+        <div class="rhythm-controls">
+          <label>Hits / 16 <input id="density" type="number" min="0" max="16" value="16"></label>
+          <label>Rotate <input id="rotation" type="number" min="0" max="15" value="0"></label>
+          <label>Repeats <input id="ratchet" type="number" min="1" max="4" value="1"></label>
+          <label>Swing % <input id="swing" type="number" min="0" max="65" value="0"></label>
+          <label>Accent % <input id="accent" type="number" min="0" max="100" value="35"></label>
+        </div>
+        <p id="rhythm-readout" class="workspace-status">Map a signal to any rhythm destination below. Mappings override these base settings.</p>
+        <details class="rhythm-explainer"><summary>How is the rhythm made?</summary><p>A musical clock repeats 16 steps. Hits / 16 spreads hits across them; 4 hits gives a hit every fourth step. Tempo and Steps / beat set the speed. Rotate moves the hits, Repeats subdivides them, Swing alternates long and short steps, and Accent changes their emphasis. Gate controls note length and Note chance adds rests.</p><p>Your signals change those settings as the recording advances. The rhythm is generated from the data, rather than detected from recorded beats. At 120 BPM and 4 steps per beat, the pattern lasts two seconds.</p></details>
+      </section>
+
+      <section id="mapping-panel" class="mapping-panel" role="tabpanel" aria-labelledby="mapping-title">
         <div class="panel-meta mapping-heading">
           <div><span class="eyebrow">MAPPING MATRIX</span><b id="mapping-title">What the data controls</b></div>
           <button id="add-mapping" class="text-button" type="button" disabled>+ Add mapping</button>
         </div>
-        <div class="mapping-labels" aria-hidden="true"><span>Input recipe</span><span>Curve</span><span>Destination</span><span>Output range</span><span></span></div>
+        <div class="mapping-labels" aria-hidden="true"><span>Input recipe</span><span>Destinations · one signal to many</span><span></span></div>
         <div id="mapping-rows" class="mapping-rows">
           <div class="mapping-placeholder">Mappings are created after a recording is selected.</div>
         </div>
       </section>
-      <p id="mapping-help" class="mapping-help">Combine up to six robot signals in each recipe. Composite inputs are normalized before average, weighted, sum, difference, minimum or maximum operations.</p>
+      <p id="catalog-status" class="workspace-status" role="status">Loading Hydrasynth parameters…</p>
+      <p id="mapping-help" class="mapping-help">Combine up to six signals per recipe, then drive up to 64 destinations with independent ranges and curves. Search or select a whole parameter group. The last enabled destination for a parameter wins.</p>
     </section>
 
     <aside class="rail output-rail" aria-labelledby="output-title">
@@ -110,6 +165,7 @@
 
       <div class="mini-synth">
         <div class="mini-synth-head"><span>Preview voice</span><b id="voice-name">GLASS / 01</b></div>
+        <label>Sound<select id="preview-voice"><option value="custom">Custom</option><option value="glass">Glass</option><option value="pluck">Pluck</option><option value="warm">Warm pad</option><option value="reed">Reed</option><option value="bell">Bell</option><option value="bass">Soft bass</option></select></label>
         <label>Wave
           <select id="wave-type"><option value="sine">Sine</option><option value="triangle" selected>Triangle</option><option value="sawtooth">Saw</option><option value="square">Square</option></select>
         </label>
@@ -125,16 +181,48 @@
           <label>Scale<select id="scale-name"><option value="minor-pentatonic">Minor pentatonic</option><option value="major-pentatonic">Major pentatonic</option><option value="minor">Natural minor</option><option value="major">Major</option><option value="chromatic">Chromatic</option></select></label>
         </div>
         <div id="piano-roll" class="piano-roll" aria-hidden="true"></div>
+        <div class="harmony-controls">
+          <label>Voices<input id="voices" type="number" min="1" max="8" value="3"></label>
+          <label>Voicing<select id="voicing"><option value="thirds">Scale thirds</option><option value="fourths">Scale fourths</option><option value="octaves">Octaves</option></select></label>
+          <label>Inversion<input id="inversion" type="number" min="0" max="7" value="0"></label>
+          <label>Spread<select id="spread"><option value="0">Close</option><option value="1">Open · 1 octave</option><option value="2">Wide · 2 octaves</option></select></label>
+        </div>
+        <p class="output-note">Each rhythm hit plays a chord in the selected scale. Map voices, inversion and spread to change the harmony.</p>
+        <p id="harmony-readout" class="sound-status" role="status">3 voices · scale thirds</p>
+      </div>
+
+      <div class="sound-card">
+        <b>Sound changes</b>
+        <div class="harmony-controls">
+          <label>Mode<select id="sound-mode"><option value="off">Keep current</option><option value="cycle">Cycle palette</option><option value="random">Random palette</option><option value="mapped">Follow mapping</option></select></label>
+          <label>Change every<select id="sound-every"><option value="16">16 steps</option><option value="32" selected>32 steps</option><option value="64">64 steps</option><option value="128">128 steps</option></select></label>
+        </div>
+        <p id="sound-help" class="output-note">Browser audio explores six preview sounds. Follow mapping uses the Sound palette position destination.</p>
+        <p id="sound-status" class="sound-status" role="status">Keeping current sound</p>
+        <div id="patch-controls" hidden>
+          <label>Patch palette<select id="patch-pool"><option value="all">All banks A–H</option><option value="shortlist">My shortlist</option></select></label>
+          <label>Shortlist<input id="patch-list" type="text" value="A001, A017, B001, C001" maxlength="512" spellcheck="false" aria-describedby="patch-help"></label>
+          <p id="patch-help" class="output-note">1–32 locations, separated by commas. A–H, patches 001–128. Patch names depend on your instrument.</p>
+          <div class="harmony-controls">
+            <label>Bank<select id="patch-bank"><option>A</option><option>B</option><option>C</option><option>D</option><option>E</option><option>F</option><option>G</option><option>H</option></select></label>
+            <label>Patch<input id="patch-number" type="number" min="1" max="128" value="1"></label>
+          </div>
+          <button id="apply-patch" class="connect-button" type="button">Send bank / patch <span>→</span></button>
+          <p class="output-note">Selecting a patch replaces the current unsaved sound on the synth. Automatic changes pause notes briefly; patches must allow polyphony to play chords.</p>
+        </div>
       </div>
 
       <div id="midi-panel" class="midi-panel" hidden>
         <label for="midi-output">MIDI destination</label>
         <select id="midi-output"><option value="">No device selected</option></select>
+        <div class="harmony-controls"><label>PARAM RX mode<select id="midi-format"><option value="nrpn">NRPN · full engine</option><option value="cc">CC · compatibility</option></select></label><label>Updates / second<select id="midi-rate"><option value="25">25</option><option value="50" selected>50</option><option value="100">100</option></select></label></div>
+        <p>Set PARAM RX on the synth to match. Full engine parameters require NRPN. Enable PGM CHG RX for patch changes.</p>
+        <p id="midi-parameter-status" role="status">No parameter updates queued</p>
         <p id="midi-status">Connect the Hydrasynth, then grant browser MIDI access.</p>
       </div>
       <button id="connect-midi" class="connect-button" type="button">Connect MIDI device <span>→</span></button>
       <button id="panic-button" class="panic-button" type="button" hidden>Stop all MIDI notes</button>
-      <p class="output-note">No keyboard is needed to audition a mapping. Browser preview follows the same pitch, velocity, gate and CC rules as MIDI output.</p>
+      <p class="output-note">Browser preview and MIDI share the same notes and rhythms. Preview includes drive, delay and reverb. Its macros control brightness, resonance, harmonics, detune, attack, release, echo and space; Hydrasynth macros follow the selected patch.</p>
     </aside>
   </main>
 
@@ -153,9 +241,10 @@
         </div>
         <div class="mapping-sources" data-role="sources"></div>
       </div>
-      <label><span class="sr-only">Curve</span><select data-role="curve"><option value="linear">Linear ↗</option><option value="smooth">Soft S</option><option value="exponential">Exponential</option><option value="inverse">Inverted ↘</option></select></label>
-      <label><span class="sr-only">Destination</span><select data-role="destination"></select></label>
-      <div class="range-inputs"><label><span>From</span><input data-role="minimum" type="number"></label><i>→</i><label><span>To</span><input data-role="maximum" type="number"></label></div>
+      <div class="target-builder">
+        <div class="target-toolbar"><b data-role="target-count">1 destination</b><button class="small-button" type="button" data-role="add-targets">+ Destinations</button></div>
+        <div data-role="targets" class="mapping-targets"></div>
+      </div>
       <button class="row-menu" type="button" data-role="remove" aria-label="Remove mapping">×</button>
     </div>
   </template>
@@ -167,9 +256,20 @@
       <label class="reducer-control"><span class="sr-only">Reduction</span><select data-role="reducer"></select></label>
       <label class="weight-control" hidden><span>Weight</span><input data-role="weight" type="number" min="0" max="10" step="0.1" value="1"></label>
       <button class="remove-source-button" type="button" data-role="remove-source" aria-label="Remove source">−</button>
+      <details class="source-range"><summary>Input range</summary><label>Normalize<select data-role="range-mode"><option value="auto">Learn from data</option><option value="fixed">Fixed range</option></select></label><label>From<input data-role="input-min" type="number" step="any" value="-1"></label><label>To<input data-role="input-max" type="number" step="any" value="1"></label></details>
       <label class="index-control" hidden>Flattened index <input data-role="index" type="number" min="0" value="0"></label>
     </div>
   </template>
+
+  <dialog id="parameter-picker" class="parameter-picker" aria-labelledby="picker-title">
+    <div class="picker-heading"><div><h2 id="picker-title">Choose destinations</h2><p id="picker-description">One input can shape many parameters.</p></div><button id="picker-close" class="small-button" type="button" aria-label="Close destination picker">Close</button></div>
+    <div class="picker-filters"><label>Search<input id="picker-search" type="search" placeholder="Mutant, envelope, cutoff, LFO…"></label><label>Group<select id="picker-group"><option value="">All groups</option></select></label></div>
+    <div class="picker-actions"><button id="picker-select-page" class="small-button" type="button">Select this page</button><button id="picker-select-group" class="small-button" type="button">Select matching group</button><button id="picker-clear" class="small-button" type="button">Clear selection</button></div>
+    <div id="picker-results" class="picker-results"></div>
+    <div class="picker-actions"><button id="picker-prev" class="small-button" type="button">Previous</button><span id="picker-page"></span><button id="picker-next" class="small-button" type="button">Next</button></div>
+    <p id="picker-status" class="workspace-status" role="status"></p>
+    <button id="picker-add" class="generate-button" type="button">Add selected destinations</button>
+  </dialog>
 
   <section id="observer-overlay" class="observer-overlay" aria-label="Hydrasynth Observer" hidden>
     <div class="observer-overlay-toolbar">
@@ -180,6 +280,9 @@
   </section>
 
   <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+  <script src="sonification.js" defer></script>
+  <script src="parameters.js" defer></script>
+  <script src="live.js" defer></script>
   <script src="app.js" defer></script>
 </body>
 </html>

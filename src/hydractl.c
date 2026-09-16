@@ -220,7 +220,7 @@ static const TimbreControl TIMBRE_CONTROLS[] = {
     {"osc2-level", 46},
     {"osc3-level", 48},
     {"resonance", 71},
-    {"reverb-mix", 93},
+    {"reverb-mix", 91},
     {"reverb-time", 65},
     {"reverb-tone", 67},
     {"ringmod-level", 9},
@@ -240,7 +240,7 @@ static const RandomControl RANDOM_CONTROLS[] = {
     {"delay-mix", 92, 0, 64},
     {"reverb-time", 65, 20, 112},
     {"reverb-tone", 67, 16, 112},
-    {"reverb-mix", 93, 0, 68},
+    {"reverb-mix", 91, 0, 68},
     {"macro1", 16, 0, 127},
     {"macro2", 17, 0, 127},
     {"macro3", 18, 0, 127},
@@ -3960,6 +3960,10 @@ static int run_server(
 }
 
 static int self_test(void) {
+    if (find_timbre_cc("reverb-mix") != 91 || find_timbre_cc("delay-mix") != 92) {
+        fputs("self-test failed: Hydrasynth effect mix CC assignments\n", stderr);
+        return 1;
+    }
     struct {
         const char *text;
         int expected;

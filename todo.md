@@ -296,9 +296,21 @@ the user can understand what the synth, the user, and the agent are doing.
   audio or Hydrasynth Web MIDI controls.
 - [x] Bundle portable gzip-compressed recordings so a fresh macOS clone can run
   `make dashboard-sonify` without a second repository.
-- [ ] Add a browser WebSocket source for the existing RAPP protocol, using
-  bounded rolling reductions and the recorded-mode mapping engine. See
-  `docs/live_streaming.md`.
+- [x] Add named mapping tabs, saved preset snapshots, and JSON export/import,
+  preserving existing browser-saved mappings.
+- [x] Generate full mapping sets with varied sources, rhythm destinations and
+  selectable character while retaining previous tabs.
+- [x] Map tempo, hit density, rotation, repeats, swing and accents to signals;
+  share the rhythm plan between browser audio and MIDI.
+- [x] Make drive, delay, reverb and all eight macros audible in the browser
+  preview, with active-voice and scheduled-repeat cleanup.
+- [x] Add a browser WebSocket source for the existing RAPP protocol, with
+  bounded reductions, learned/fixed ranges, stale-data silence and reconnect.
+  Verified with upstream `player.py`; see `docs/live_streaming.md`.
+- [x] Expose 929 usable catalog NRPN parameters and CC aliases in a searchable
+  destination picker, with up to 64 independently shaped targets per recipe.
+- [x] Generate large engine mapping sets, encode selector/signed/discrete values,
+  and pace latest-value MIDI updates without interleaving NRPN transactions.
 
 - [x] Show the selected device endpoints, MIDI channel, active patch, and
   conservative service/transport health.
@@ -474,3 +486,9 @@ Remaining presentation/detail work:
 7. Audio recording, metadata alignment, and deeper analysis.
 8. Safe SysEx patch read/backup, followed later by optional writes.
 9. MPE, polyphonic aftertouch, microtuning, and an MCP/agent tool adapter.
+
+- [x] Add 1–8-note scale voicings with mapped voice count, inversion and spread.
+- [x] Add six browser sounds and phrase-based cycling, random and mapped sound selection.
+- [x] Add Hydrasynth bank/patch selection and editable or full-bank palettes with cancellable MIDI sends.
+- [x] Show chord notes and selected browser sounds or sent MIDI patches in the observer.
+- [x] Correct Reverb mix to CC 91 across browser mappings, native aliases, randomization and observer metadata (CC 93 is pre-effects mix).

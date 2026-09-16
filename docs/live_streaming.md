@@ -1,58 +1,90 @@
 # Live sonification input
 
-## Existing transport
+Signal Lab connects directly from the browser to RAPP's WebSocket server. The
+Python dashboard does not need an extra WebSocket dependency or a proxy. Both
+the robot bridge and `viz_student_pack/player.py` broadcast the same protocol.
 
-RAPP Realtime already exposes the right live transport. Its bridge and replay
-player broadcast one JSON object per WebSocket message, normally on:
+## Try the supplied replay server
 
-```text
-ws://localhost:8765
+From a checkout of [RAPP-Realtime-Viz](https://github.com/maleenj/RAPP-Realtime-Viz),
+run:
+
+```sh
+cd viz_student_pack
+python3 -m pip install websockets
+python3 player.py recordings/enact_viz_01.jsonl.txt --loop
 ```
 
-The live robot and `viz_student_pack/player.py` use the same message shapes as
-the JSONL recordings. A connection may first receive a status message:
+The checked-in recordings currently have `.jsonl.txt` names; use the actual
+filename in your checkout. `--host 127.0.0.1 --port 8765` restricts playback to the
+local machine. In Signal Lab, enter `ws://localhost:8765` under **Live RAPP**,
+click **Connect live**, and press **Preview** once sources appear. For the robot,
+use the address supplied by the workshop, such as `ws://192.168.1.50:8765`.
+Browser local-network permission and network access to that host/port are needed.
+A dashboard served over HTTPS requires a secure `wss://` endpoint.
+
+## Protocol
+
+Each text message contains one JSON object. No subscription message is needed.
+The optional greeting is ignored for sonification:
 
 ```json
 {"channel":"__status__","msg":"connected","server":"vam_player"}
 ```
 
-All other messages identify their stream with `channel`; numeric content is
-either a labelled top-level `data`/`velocity` array or named arrays under
-`tensors`. The replay server is latest-frame-wins per channel, so a slow client
-does not accumulate an unbounded backlog.
+Labelled joint positions and optional velocities become individual sources:
 
-## Dashboard integration
+```json
+{"channel":"robot_joint_states","shape":[2],"labels":["joint_1","joint_2"],"data":[0.1,-1.57],"velocity":[0.02,0.01]}
+```
 
-The dashboard should add **Live WebSocket** beside the recorded-file source.
-This can be implemented directly in the browser, so the local Python dashboard
-does not need a WebSocket dependency or proxy.
+Unlabelled arrays and named tensors support mean, RMS, minimum, maximum and one
+flattened index:
 
-1. Default the address to `ws://localhost:8765`, while allowing a workshop host
-   address on the local network.
-2. Validate each received JSON object and pass it through the same field
-   discovery and tensor-reduction rules used for recordings.
-3. Keep a bounded rolling buffer per mapped signal (720 reduced values is
-   consistent with the recorded view). Never retain full activation tensors.
-4. Let the musical clock sample the latest reduced values at the selected tempo.
-   Do not generate one note per network frame; channel rates differ and may be
-   much faster than a useful musical pulse.
-5. Normalise against a rolling window, with a short warm-up state before notes
-   begin. Preserve the user's curve and output-range settings.
-6. Reconnect with bounded backoff, show `connecting`, `live`, `stale`, and
-   `disconnected` states, and send MIDI all-notes-off if the stream disappears.
-7. Ignore `__status__` for sonification but surface its message in connection
-   status. Bound message size and reject malformed channels or non-finite data.
+```json
+{"channel":"activations","tensors":{"hidden":{"shape":[2,2],"data":[1,2,3,4]}}}
+```
 
-## Acceptance criteria
+Nested arrays are accepted too. `shape`, timestamps and other metadata do not
+control the musical clock. Invalid numbers are excluded from aggregate reducers;
+an invalid indexed element is treated as missing, without shifting indices.
 
-- The dashboard can connect to the real robot stream and to `player.py` without
-  changing mappings.
-- Newly observed channels and fields become available without a page reload.
-- The rolling waveform and values update while the stream is live.
-- Browser preview and Hydrasynth MIDI use the same live mappings.
-- Disconnecting or changing source cannot leave a held MIDI note.
-- A high-rate activation stream cannot grow browser memory without bound.
+## Timing, ranges and disconnection
 
-This is deliberately the next feature rather than a second transport: recorded
-and live modes will share one message schema, one reduction layer, and one
-sonification engine.
+The musical clock samples the latest values at the chosen tempo. It does not
+play one note per network frame. MIDI parameter updates run independently at
+25, 50 or 100 changes/second and replace queued values with the newest values.
+Each source can learn minimum/maximum from samples read during this connection,
+or use a fixed physical range. Constant learned signals map to the midpoint.
+Use **Reset learned ranges** to recalibrate; learned ranges persist across an
+automatic reconnect but start fresh on a new connection.
+
+Every enabled recipe requires fresh data for all its inputs. A missing source
+or a channel older than three seconds silences notes and parameter output;
+other active channels cannot conceal its loss. Fresh data resumes playback if
+the connection remained open. A socket closure stops playback immediately;
+automatic reconnect waits 1, 2, 4, 8, then at most 10 seconds between attempts.
+Press **Preview** after reconnection. Switching sources, disconnecting and
+stopping release notes and cancel queued MIDI/patch actions.
+
+Live workspaces save tabs per URL. Missing sources remain in a saved live recipe
+until their channels arrive, rather than silently changing its inputs.
+
+## Bounds and implementation
+
+- At most 32 channels and 256 discovered fields per connection.
+- Latest arrays only: at most 262,144 numeric positions per channel/frame.
+- At most 512 reduced source histories, each with 256 samples.
+- At most 8 MiB of JSON text per message and eight nested array levels.
+- Up to 32 input recipes × 64 destinations; input recipes support six sources.
+
+`dashboard/live.js` owns frame validation, discovery, reduction and range
+learning. `dashboard/parameters.js` owns catalog values, MIDI encoding and the
+bounded latest-value queue. `dashboard/app.js` connects these to the shared
+mapping, rhythm, chord and sound-palette engine.
+
+Automated tests cover stale channels, tensor/joint reduction, malformed and large
+frames, fixed ranges, parameter encoding, queue fairness and preset round trips.
+Browser integration was exercised against the repository's actual `player.py`
+with simulated MIDI output. Physical robot networking and Hydrasynth sound
+response require checking on the connected hardware.

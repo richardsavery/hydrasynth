@@ -1869,3 +1869,5 @@ footer {
     transition-duration: 0.001ms !important;
   }
 }
+
+.patch-display strong.is-preview-voice { font-size: clamp(18px, 2.5vw, 34px); letter-spacing: -0.02em; overflow-wrap: anywhere; }

@@ -27,6 +27,7 @@ MAX_RECORDINGS = 100
 MAX_FIELDS_PER_CHANNEL = 256
 MAX_SERIES_POINTS = 4000
 SERIES_CACHE_LIMIT = 48
+MAX_BATCH_SERIES = 192
 
 
 def finite_number(value: Any) -> float | None:
@@ -324,63 +325,94 @@ class RecordingLibrary:
         index: int = 0,
         limit: int = 720,
     ) -> dict[str, Any]:
-        limit = max(32, min(MAX_SERIES_POINTS, int(limit)))
-        index = max(0, min(1_000_000, int(index)))
+        return self.series_batch(recording_id, [{
+            "channel": channel_id, "field": field_id, "reducer": reducer,
+            "index": index, "limit": limit,
+        }])[0]
+
+    def series_batch(
+        self, recording_id: str, requests: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        """Extract a mapping set in one scan, retaining the single-series cache."""
+        if not isinstance(requests, list) or not 1 <= len(requests) <= MAX_BATCH_SERIES:
+            raise ValueError("batch_requires_1_to_192_sources")
+        keys: list[tuple[Any, ...]] = []
+        results: dict[tuple[Any, ...], dict[str, Any]] = {}
+        pending: dict[tuple[Any, ...], list[tuple[float, float]]] = {}
+        by_channel: dict[str, list[tuple[Any, ...]]] = {}
         with self.lock:
             metadata = self.recordings.get(recording_id)
             if metadata is None:
                 raise KeyError("recording_not_found")
-            field = next(
-                (
-                    candidate
-                    for channel in metadata["channels"]
-                    if channel["id"] == channel_id
-                    for candidate in channel["fields"]
-                    if candidate["id"] == field_id
-                ),
-                None,
-            )
-            if field is None:
-                raise KeyError("field_not_found")
-            allowed_reducers = field.get("reducers", [])
-            if reducer not in allowed_reducers:
-                raise ValueError("unsupported_reducer")
-            cache_key = (
-                recording_id,
-                metadata["modified_ns"],
-                channel_id,
-                field_id,
-                reducer,
-                index,
-                limit,
-            )
-            cached = self.series_cache.get(cache_key)
-            if cached is not None:
-                self.series_cache.move_to_end(cache_key)
-                return cached
+            fields = {(channel["id"], field["id"]): field
+                      for channel in metadata["channels"] for field in channel["fields"]}
             path = metadata["path"]
-
-        values: list[tuple[float, float]] = []
-        ordinal = 0.0
-        with open_recording(path) as stream:
-            for raw_line in stream:
+            for request in requests:
+                if not isinstance(request, dict):
+                    raise ValueError("invalid_series_source")
+                channel = request.get("channel")
+                field_id = request.get("field")
+                if not isinstance(channel, str) or not isinstance(field_id, str):
+                    raise ValueError("invalid_series_source")
+                field = fields.get((channel, field_id))
+                if field is None:
+                    raise KeyError("field_not_found")
+                reducer = request.get("reducer", "mean")
+                if reducer not in field.get("reducers", []):
+                    raise ValueError("unsupported_reducer")
                 try:
-                    message = json.loads(raw_line)
-                except json.JSONDecodeError:
-                    continue
-                if not isinstance(message, dict) or message.get("channel") != channel_id:
-                    continue
-                value = self._extract_value(message, field_id, reducer, index)
-                if value is None:
-                    continue
-                timestamp = finite_number(message.get("t_recv"))
-                if timestamp is None:
-                    timestamp = finite_number(message.get("stamp"))
-                if timestamp is None:
-                    timestamp = ordinal
-                ordinal += 1.0
-                values.append((timestamp, value))
+                    index = max(0, min(1_000_000, int(request.get("index", 0))))
+                    limit = max(32, min(MAX_SERIES_POINTS, int(request.get("limit", 720))))
+                except (TypeError, ValueError, OverflowError) as error:
+                    raise ValueError("invalid_series_bounds") from error
+                key = (recording_id, metadata["modified_ns"], channel, field_id, reducer, index, limit)
+                keys.append(key)
+                cached = self.series_cache.get(key)
+                if cached is not None:
+                    self.series_cache.move_to_end(key)
+                    results[key] = cached
+                elif key not in pending:
+                    pending[key] = []
+                    by_channel.setdefault(channel, []).append(key)
 
+        if pending:
+            with open_recording(path) as stream:
+                for raw_line in stream:
+                    try:
+                        message = json.loads(raw_line)
+                    except json.JSONDecodeError:
+                        continue
+                    if not isinstance(message, dict):
+                        continue
+                    channel = message.get("channel")
+                    if not isinstance(channel, str):
+                        continue
+                    for key in by_channel.get(channel, []):
+                        _recording, _modified, _channel, field_id, reducer, index, _limit = key
+                        value = self._extract_value(message, field_id, reducer, index)
+                        if value is None:
+                            continue
+                        timestamp = finite_number(message.get("t_recv"))
+                        if timestamp is None:
+                            timestamp = finite_number(message.get("stamp"))
+                        if timestamp is None:
+                            timestamp = float(len(pending[key]))
+                        pending[key].append((timestamp, value))
+            for key, values in pending.items():
+                _recording, _modified, channel, field_id, reducer, index, limit = key
+                results[key] = self._series_result(recording_id, channel, field_id, reducer, index, limit, values)
+            with self.lock:
+                for key in pending:
+                    self.series_cache[key] = results[key]
+                    self.series_cache.move_to_end(key)
+                while len(self.series_cache) > SERIES_CACHE_LIMIT:
+                    self.series_cache.popitem(last=False)
+        return [results[key] for key in keys]
+
+    def _series_result(
+        self, recording_id: str, channel_id: str, field_id: str,
+        reducer: str, index: int, limit: int, values: list[tuple[float, float]],
+    ) -> dict[str, Any]:
         if not values:
             raise ValueError("series_empty")
         minimum = min(value for _timestamp, value in values)
@@ -412,11 +444,6 @@ class RecordingLibrary:
             "duration_seconds": duration,
             "points": points,
         }
-        with self.lock:
-            self.series_cache[cache_key] = result
-            self.series_cache.move_to_end(cache_key)
-            while len(self.series_cache) > SERIES_CACHE_LIMIT:
-                self.series_cache.popitem(last=False)
         return result
 
     @staticmethod

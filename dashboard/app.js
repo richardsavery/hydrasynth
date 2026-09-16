@@ -8,44 +8,45 @@ const COMBINE_OPERATORS = new Set([
   "direct", "average", "weighted", "sum", "difference", "minimum", "maximum"
 ]);
 
-const DESTINATIONS = [
-  { id: "pitch", label: "Pitch", group: "Notes", min: 24, max: 96, from: 48, to: 84 },
-  { id: "velocity", label: "Velocity", group: "Notes", min: 1, max: 127, from: 48, to: 116 },
-  { id: "gate", label: "Gate length", group: "Rhythm", min: 5, max: 100, from: 30, to: 88 },
-  { id: "chance", label: "Note chance", group: "Rhythm", min: 0, max: 100, from: 45, to: 100 },
-  { id: "cutoff", label: "Filter cutoff", group: "Hydrasynth timbre", cc: 74, min: 0, max: 127, from: 18, to: 110 },
-  { id: "resonance", label: "Filter resonance", group: "Hydrasynth timbre", cc: 71, min: 0, max: 127, from: 5, to: 88 },
-  { id: "drive", label: "Filter drive", group: "Hydrasynth timbre", cc: 50, min: 0, max: 127, from: 0, to: 72 },
-  { id: "delay", label: "Delay mix", group: "Hydrasynth effects", cc: 92, min: 0, max: 127, from: 0, to: 70 },
-  { id: "reverb", label: "Reverb mix", group: "Hydrasynth effects", cc: 93, min: 0, max: 127, from: 8, to: 82 },
-  ...Array.from({ length: 8 }, (_value, index) => ({
-    id: `macro${index + 1}`,
-    label: `Macro ${index + 1}`,
-    group: "Hydrasynth macros",
-    cc: 16 + index,
-    min: 0,
-    max: 127,
-    from: 0,
-    to: 127
-  }))
-];
+const Music = globalThis.HydraSonification;
+const { DESTINATIONS, MAX_MAPPINGS, MAX_TARGETS, MAX_TABS, MAX_PRESETS } = Music;
+const Parameters = globalThis.HydraParameters;
+const Live = globalThis.HydraLive;
 
-const SCALE_INTERVALS = {
-  "minor-pentatonic": [0, 3, 5, 7, 10],
-  "major-pentatonic": [0, 2, 4, 7, 9],
-  minor: [0, 2, 3, 5, 7, 8, 10],
-  major: [0, 2, 4, 5, 7, 9, 11],
-  chromatic: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
-};
+const SCALE_INTERVALS = Music.SCALE_INTERVALS;
 
 const NOTE_NAMES = ["C", "C♯", "D", "D♯", "E", "F", "F♯", "G", "G♯", "A", "A♯", "B"];
 
 const state = {
   library: null,
+  sourceMode: "recording",
+  live: null, liveSocket: null, liveGeneration: 0, liveRetry: null, liveWanted: false,
+  liveRenderTimer: null, liveNeedsDefaults: false, liveDiscoveryPending: false,
+  liveStatus: "Not connected", liveLastDraw: 0,
+  catalogReady: false, catalogSummary: null,
+  picker: null, expandedTargets: new Set(),
+  midiPacer: Parameters ? new Parameters.Pacer() : null, parameterTimer: null, parameterCarry: 0,
+  patchChanging: false, currentParameterCommands: [],
   recording: null,
   fields: [],
   fieldIndex: new Map(),
   mappings: [],
+  tabs: [],
+  activeTabId: null,
+  removedTab: null,
+  selectedPreset: "",
+  preparing: false,
+  playbackGeneration: 0,
+  selectionGeneration: 0,
+  seriesRevision: 0,
+  rhythmStep: 0,
+  noteTimers: new Set(),
+  patchTimers: new Map(),
+  currentPatch: null,
+  currentPreviewVoice: null,
+  lastSoundChange: -Infinity,
+  activeVoices: new Set(),
+  nextTickAt: 0,
   nextMappingId: 1,
   seriesCache: new Map(),
   focusedMappingId: null,
@@ -68,12 +69,19 @@ const dom = {};
 document.addEventListener("DOMContentLoaded", () => {
   cacheDom();
   bindInterface();
+  bindWorkspaces();
+  bindParameterPicker();
+  bindLiveInput();
   bindDashboardSwitcher();
   applySavedControls();
   renderScale();
+  renderRhythm();
   updateClock();
   window.setInterval(updateClock, 1000);
-  loadRecordings(false);
+  loadParameterCatalog().then(() => loadRecordings(false)).catch((error) => {
+    setEngineState("error", "Catalog unavailable", error.message);
+    dom["catalog-status"].textContent = `${error.message} Use Refresh to retry.`;
+  });
 });
 
 function bindDashboardSwitcher() {
@@ -118,22 +126,38 @@ function cacheDom() {
     "brightness-output", "scale-copy", "scale-root", "scale-name", "piano-roll",
     "midi-panel", "midi-output", "midi-status", "midi-choice-detail",
     "connect-midi", "panic-button", "recording-link-status", "footer-clock",
-    "session-state", "mapping-template", "mapping-source-template", "toast"
+    "session-state", "mapping-template", "mapping-source-template", "toast",
+    "mapping-tabs", "tab-name", "new-tab", "duplicate-tab", "remove-tab", "undo-tab",
+    "save-preset", "saved-presets", "load-preset", "delete-preset", "export-presets",
+    "import-presets", "preset-file", "random-count", "random-style", "randomize-mappings",
+    "workspace-status", "rhythm-pattern", "rhythm-readout", "density", "rotation",
+    "ratchet", "swing", "accent", "loop", "mapping-panel",
+    "voices", "voicing", "inversion", "spread", "harmony-readout", "preview-voice",
+    "sound-mode", "sound-every", "sound-help", "sound-status", "patch-controls",
+    "patch-pool", "patch-list", "patch-bank", "patch-number", "apply-patch",
+    "random-palette", "catalog-status", "midi-format", "midi-rate", "midi-parameter-status",
+    "parameter-picker", "picker-close", "picker-search", "picker-group", "picker-results", "picker-prev", "picker-next",
+    "picker-page", "picker-status", "picker-add", "picker-select-page", "picker-select-group", "picker-clear", "picker-description",
+    "live-url", "live-connect", "live-disconnect", "live-reconnect", "live-status", "live-reset-ranges"
   ].forEach((id) => { dom[id] = document.getElementById(id); });
   dom.outputButtons = Array.from(document.querySelectorAll("[data-output]"));
 }
 
 function bindInterface() {
-  dom["refresh-recordings"].addEventListener("click", () => loadRecordings(true));
+  dom["refresh-recordings"].addEventListener("click", async () => {
+    try { if (!state.catalogReady) await loadParameterCatalog(); await loadRecordings(true); }
+    catch (error) { showToast(error.message); }
+  });
   dom["preview-button"].addEventListener("click", togglePlayback);
   dom["add-mapping"].addEventListener("click", () => {
-    if (!state.fields.length) return;
-    const usedDestinations = new Set(state.mappings.map((mapping) => mapping.destination));
+    if (!state.fields.length || state.mappings.length >= MAX_MAPPINGS) return;
+    const usedDestinations = new Set(state.mappings.flatMap((mapping) => Music.mappingTargets(mapping).map((target) => target.destination)));
     const destination = DESTINATIONS.find((item) => !usedDestinations.has(item.id)) || DESTINATIONS[0];
     state.mappings.push(createMapping(state.fields[state.mappings.length % state.fields.length], destination.id));
     state.focusedMappingId = state.mappings[state.mappings.length - 1].id;
     renderMappings();
     loadFocusedSeries();
+    refreshPlaybackSeries();
     saveSettings();
   });
   dom.outputButtons.forEach((button) => button.addEventListener("click", () => setOutput(button.dataset.output)));
@@ -144,19 +168,29 @@ function bindInterface() {
     panicMidi();
     showToast("All MIDI notes stopped");
   });
-  ["tempo", "steps-per-beat", "wave-type", "attack", "release", "brightness", "scale-root", "scale-name"].forEach((id) => {
+  dom["apply-patch"].addEventListener("click", applyMidiPatch);
+  Object.values(CONTROL_IDS).forEach((id) => {
     dom[id].addEventListener("input", () => {
+      if (["sound-mode", "sound-every", "patch-pool", "patch-list", "midi-format", "midi-rate"].includes(id)) stopPlayback();
+      if (["wave-type", "attack", "release", "brightness"].includes(id)) {
+        dom["preview-voice"].value = "custom";
+        state.currentPreviewVoice = null;
+      }
+      if (id === "preview-voice") {
+        const voice = Music.VOICES.find((item) => item.id === dom[id].value);
+        if (voice) for (const key of ["waveType", "attack", "release", "brightness"]) dom[CONTROL_IDS[key]].value = voice[key];
+        state.currentPreviewVoice = null;
+      }
       updateControlReadouts();
       renderScale();
+      renderRhythm();
       saveSettings();
-      if (state.playing && ["tempo", "steps-per-beat"].includes(id)) {
-        window.clearTimeout(state.playTimer);
-        scheduleNextTick();
-      }
+
     });
   });
   dom["waveform"].addEventListener("pointerdown", seekFromPointer);
   dom["waveform"].addEventListener("keydown", (event) => {
+    if (state.sourceMode === "live") return;
     if (!state.recording) return;
     if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
       event.preventDefault();
@@ -165,13 +199,13 @@ function bindInterface() {
     }
   });
   document.addEventListener("keydown", (event) => {
-    if (event.key === "Escape" && state.playing) stopPlayback();
+    if (event.key === "Escape" && (state.playing || state.preparing)) stopPlayback();
     if (event.code === "Space" && !isEditable(event.target)) {
       event.preventDefault();
       togglePlayback();
     }
   });
-  window.addEventListener("beforeunload", () => panicMidi());
+  window.addEventListener("beforeunload", () => { disconnectLive(); stopPlayback(); panicMidi(); });
 }
 
 async function loadRecordings(refresh) {
@@ -186,6 +220,7 @@ async function loadRecordings(refresh) {
       setEngineState("warning", "Preview engine ready", "Link a recordings folder to begin");
       return;
     }
+    if (state.sourceMode === "live") return;
     const preferredId = state.recording?.id || state.saved.lastRecording || state.library.recordings[0].id;
     const preferred = state.library.recordings.find((item) => item.id === preferredId) || state.library.recordings[0];
     await selectRecording(preferred.id);
@@ -235,17 +270,27 @@ function renderRecordingError(message) {
 }
 
 async function selectRecording(recordingId) {
-  if (state.playing) stopPlayback();
+  stopPlayback();
+  saveSettings();
+  if (state.sourceMode === "live") disconnectLive();
+  state.sourceMode = "recording";
+  state.selectionGeneration += 1;
   const recording = state.library?.recordings.find((item) => item.id === recordingId);
   if (!recording) return;
   state.recording = recording;
   state.cursor = 0;
   state.fields = fieldsForRecording(recording);
   state.fieldIndex = new Map(state.fields.map((field) => [field.key, field]));
-  state.seriesCache.clear();
+  state.seriesCache = new Map();
   state.saved.lastRecording = recording.id;
-  state.mappings = restoreMappings(recording.id) || createDefaultMappings();
+  const workspace = Music.restoreWorkspace(state.saved, recording.id, state.fields, () => state.nextMappingId++, createDefaultMappings);
+  state.tabs = workspace.tabs;
+  state.activeTabId = state.tabs[workspace.activeIndex].id;
+  state.mappings = activeTab().mappings;
+  applyMusicalControls(activeTab().controls);
   state.focusedMappingId = state.mappings[0]?.id || null;
+  state.removedTab = null;
+  renderWorkspaces();
   dom["recording-title"].textContent = recording.name;
   dom["recording-detail"].textContent = `${formatInteger(recording.frames)} JSON frames · ${recording.channels.length} channels · ${formatBytes(recording.size_bytes)}`;
   dom["preview-button"].disabled = !state.fields.length;
@@ -256,52 +301,264 @@ async function selectRecording(recordingId) {
   await loadFocusedSeries();
 }
 
-function restoreMappings(recordingId) {
-  const savedMappings = state.saved.mappingsByRecording?.[recordingId];
-  if (!Array.isArray(savedMappings)) return null;
-  const restored = savedMappings
-    .filter((mapping) => mapping && destinationFor(mapping.destination))
-    .slice(0, 12)
-    .map((mapping) => {
-      const destination = destinationFor(mapping.destination);
-      const rawSources = Array.isArray(mapping.sources)
-        ? mapping.sources
-        : [{
-            sourceKey: mapping.sourceKey,
-            reducer: mapping.reducer,
-            index: mapping.index,
-            weight: 1
-          }];
-      const sources = rawSources
-        .filter((source) => source && state.fieldIndex.has(source.sourceKey))
-        .slice(0, MAX_MAPPING_SOURCES)
-        .map((source) => restoreMappingSource(source));
-      if (!sources.length) return null;
-      const requestedOperator = COMBINE_OPERATORS.has(mapping.operator)
-        ? mapping.operator
-        : sources.length > 1 ? "average" : "direct";
-      return {
-        id: state.nextMappingId++,
-        sources,
-        operator: sources.length === 1 ? "direct" : requestedOperator,
-        curve: ["linear", "smooth", "exponential", "inverse"].includes(mapping.curve) ? mapping.curve : "linear",
-        destination: destination.id,
-        minimum: clamp(Number(mapping.minimum), destination.min, destination.max),
-        maximum: clamp(Number(mapping.maximum), destination.min, destination.max)
-      };
-    })
-    .filter(Boolean);
-  return restored.length ? restored : null;
+
+const CONTROL_IDS = {
+  tempo: "tempo", stepsPerBeat: "steps-per-beat", waveType: "wave-type", attack: "attack",
+  release: "release", brightness: "brightness", scaleRoot: "scale-root", scaleName: "scale-name",
+  density: "density", rotation: "rotation", ratchet: "ratchet", swing: "swing", accent: "accent", loop: "loop",
+  voices: "voices", voicing: "voicing", inversion: "inversion", spread: "spread", previewVoice: "preview-voice",
+  soundMode: "sound-mode", soundEvery: "sound-every", patchPool: "patch-pool", patchList: "patch-list",
+  patchBank: "patch-bank", patchNumber: "patch-number", midiFormat: "midi-format", midiRate: "midi-rate"
+};
+
+function readMusicalControls() {
+  return Music.controls(Object.fromEntries(Object.entries(CONTROL_IDS).map(([key, id]) =>
+    [key, key === "loop" ? dom[id].checked : dom[id].value])));
 }
 
-function restoreMappingSource(source) {
-  const field = state.fieldIndex.get(source.sourceKey);
-  return {
-    sourceKey: field.key,
-    reducer: field.reducers.includes(source.reducer) ? source.reducer : field.default_reducer,
-    index: clamp(Number(source.index) || 0, 0, 1_000_000),
-    weight: clamp(Number(source.weight) || 1, 0, 10)
+function applyMusicalControls(raw) {
+  state.currentPreviewVoice = null;
+  const controls = Music.controls(raw);
+  Object.entries(CONTROL_IDS).forEach(([key, id]) => {
+    if (key === "loop") dom[id].checked = controls[key];
+    else dom[id].value = String(controls[key]);
+  });
+  updateControlReadouts();
+  renderScale();
+  renderRhythm();
+}
+
+function activeTab() {
+  return state.tabs.find((tab) => tab.id === state.activeTabId);
+}
+
+function commitActiveTab() {
+  const tab = activeTab();
+  if (tab) { tab.mappings = state.mappings; tab.controls = readMusicalControls(); }
+}
+
+function activateTab(id) {
+  const tab = state.tabs.find((candidate) => candidate.id === id);
+  if (!tab) return;
+  commitActiveTab();
+  stopPlayback();
+  state.selectionGeneration += 1;
+  state.activeTabId = id;
+  state.mappings = tab.mappings;
+  state.focusedMappingId = state.mappings[0]?.id || null;
+  state.cursor = 0;
+  applyMusicalControls(tab.controls);
+  renderWorkspaces();
+  renderMappings();
+  loadFocusedSeries();
+  saveSettings();
+}
+
+function addTab(name, mappings = [], controls = readMusicalControls()) {
+  if (!state.recording) return false;
+  if (state.tabs.length >= MAX_TABS) {
+    showToast(`Keep up to ${MAX_TABS} tabs per recording. Save a preset before removing a tab.`);
+    return false;
+  }
+  const tab = { id: state.nextMappingId++, name: String(name).slice(0, 60), controls: Music.controls(controls),
+    mappings: Music.restoreMappings(mappings, state.fields, () => state.nextMappingId++, { allowMissing: state.sourceMode === "live" }) };
+  state.tabs.push(tab);
+  activateTab(tab.id);
+  return true;
+}
+
+function presetLibrary() {
+  if (!Array.isArray(state.saved.presets)) state.saved.presets = [];
+  state.saved.presets = state.saved.presets.filter((preset) => preset && typeof preset.id === "string" && Array.isArray(preset.mappings)).slice(0, MAX_PRESETS);
+  return state.saved.presets;
+}
+
+function renderWorkspaces() {
+  const current = activeTab();
+  dom["mapping-tabs"].replaceChildren(...state.tabs.map((tab) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.id = `mapping-tab-${tab.id}`;
+    button.className = "mapping-tab";
+    button.setAttribute("role", "tab");
+    button.setAttribute("aria-controls", "mapping-panel");
+    button.setAttribute("aria-selected", String(tab.id === state.activeTabId));
+    button.tabIndex = tab.id === state.activeTabId ? 0 : -1;
+    button.textContent = tab.name;
+    button.title = `${tab.name} · ${tab.mappings.length} mappings`;
+    button.addEventListener("click", () => activateTab(tab.id));
+    button.addEventListener("keydown", (event) => {
+      if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+      event.preventDefault();
+      const index = state.tabs.indexOf(tab);
+      const nextIndex = event.key === "Home" ? 0 : event.key === "End" ? state.tabs.length - 1
+        : (index + (event.key === "ArrowLeft" ? -1 : 1) + state.tabs.length) % state.tabs.length;
+      activateTab(state.tabs[nextIndex].id);
+      document.getElementById(`mapping-tab-${state.activeTabId}`).focus();
+    });
+    return button;
+  }));
+  dom["tab-name"].value = current?.name || "";
+  dom["tab-name"].disabled = !current;
+  dom["mapping-panel"].setAttribute("aria-labelledby", current ? `mapping-tab-${current.id}` : "mapping-title");
+  ["new-tab", "duplicate-tab", "randomize-mappings"].forEach((id) => {
+    dom[id].disabled = !state.fields.length || state.tabs.length >= MAX_TABS;
+  });
+  dom["remove-tab"].disabled = state.tabs.length <= 1;
+  dom["undo-tab"].hidden = !state.removedTab;
+  dom["undo-tab"].disabled = state.tabs.length >= MAX_TABS;
+  dom["save-preset"].disabled = !current || presetLibrary().length >= MAX_PRESETS;
+  const picker = dom["saved-presets"];
+  picker.replaceChildren(new Option("Saved presets…", ""));
+  presetLibrary().forEach((preset) => picker.add(new Option(`${preset.name} · ${preset.recording}`, preset.id)));
+  picker.value = state.selectedPreset;
+  dom["load-preset"].disabled = !picker.value || !state.recording || state.tabs.length >= MAX_TABS;
+  dom["delete-preset"].disabled = !picker.value;
+  dom["export-presets"].disabled = !presetLibrary().length;
+}
+
+function bindWorkspaces() {
+  dom["new-tab"].addEventListener("click", () => addTab(`Idea ${state.tabs.length + 1}`));
+  dom["duplicate-tab"].addEventListener("click", () => {
+    commitActiveTab();
+    const tab = activeTab();
+    if (tab) addTab(`${tab.name} copy`, tab.mappings, tab.controls);
+  });
+  dom["tab-name"].addEventListener("change", () => {
+    const tab = activeTab();
+    if (!tab) return;
+    tab.name = dom["tab-name"].value.trim().slice(0, 60) || "Untitled";
+    saveSettings();
+    renderWorkspaces();
+  });
+  dom["remove-tab"].addEventListener("click", () => {
+    if (state.tabs.length <= 1) return;
+    commitActiveTab();
+    state.removedTab = Music.serializeTab(activeTab());
+    state.tabs = state.tabs.filter((tab) => tab.id !== state.activeTabId);
+    activateTab(state.tabs[0].id);
+  });
+  dom["undo-tab"].addEventListener("click", () => {
+    if (!state.removedTab) return;
+    const tab = state.removedTab;
+    if (addTab(tab.name, tab.mappings, tab.controls)) state.removedTab = null;
+    renderWorkspaces();
+  });
+  const updateGeneratorCounts = () => {
+    const fullEngine = dom["random-palette"].value === "engine";
+    for (const option of dom["random-count"].options) option.disabled = !fullEngine && Number(option.value) > 27;
+    if (!fullEngine && Number(dom["random-count"].value) > 27) dom["random-count"].value = "27";
   };
+  dom["random-palette"].addEventListener("change", updateGeneratorCounts);
+  updateGeneratorCounts();
+  dom["randomize-mappings"].addEventListener("click", () => {
+    const style = dom["random-style"].value;
+    const fullEngine = dom["random-palette"].value === "engine";
+    const count = dom["random-count"].value === "all" ? (fullEngine ? 2048 : 27) : Number(dom["random-count"].value);
+    const mappings = fullEngine ? generateEngineMappings(count, style) : Music.randomMappings(state.fields, count, style);
+    const voice = { ...readMusicalControls(), waveType: style === "wild" ? "sawtooth" : "triangle",
+      stepsPerBeat: style === "rhythmic" ? 4 : 2, attack: 2, release: style === "rhythmic" ? 12 : 32,
+      voices: 3, previewVoice: "custom", midiFormat: fullEngine ? "nrpn" : readMusicalControls().midiFormat,
+      soundMode: mappings.some((mapping) => Music.mappingTargets(mapping).some((target) => target.destination === "sound")) ? "mapped" : "cycle" };
+    if (addTab(`${style[0].toUpperCase()}${style.slice(1)} ${state.tabs.length + 1}`, mappings, voice)) {
+      dom["workspace-status"].textContent = `${Music.targetCount(mappings)} destinations across ${mappings.length} input recipes. ${fullEngine ? "Full engine targets play through Hydrasynth MIDI with PARAM RX = NRPN." : "Press Preview to hear this tab."}`;
+    }
+  });
+  dom["save-preset"].addEventListener("click", savePreset);
+  dom["saved-presets"].addEventListener("change", () => {
+    state.selectedPreset = dom["saved-presets"].value;
+    renderWorkspaces();
+  });
+  dom["load-preset"].addEventListener("click", () => {
+    const preset = presetLibrary().find((item) => item.id === state.selectedPreset);
+    if (!preset) return;
+    const mappings = Music.restoreMappings(preset.mappings, state.fields, () => state.nextMappingId++, { allowMissing: state.sourceMode === "live" });
+    if (preset.mappings.length && !mappings.length) {
+      dom["workspace-status"].textContent = `This preset needs fields from ${preset.recording}. Select a compatible recording first.`;
+      return;
+    }
+    if (addTab(preset.name, mappings, preset.controls)) {
+      const omitted = preset.mappings.length - mappings.length;
+      dom["workspace-status"].textContent = omitted
+        ? `Opened ${mappings.length} mappings. ${omitted} recipes need fields absent from this recording and were omitted. The saved preset is unchanged.`
+        : `Opened “${preset.name}” in a new tab.`;
+    }
+  });
+  dom["delete-preset"].addEventListener("click", () => {
+    state.saved.presets = presetLibrary().filter((item) => item.id !== state.selectedPreset);
+    state.selectedPreset = "";
+    saveSettings();
+    renderWorkspaces();
+  });
+  dom["export-presets"].addEventListener("click", () => {
+    const data = JSON.stringify({ format: "hydra-signal-lab-presets", version: 1,
+      presets: presetLibrary().map(({ id, ...preset }) => preset) }, null, 2);
+    const url = URL.createObjectURL(new Blob([data], { type: "application/json" }));
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = "hydra-signal-lab-presets.json";
+    link.click();
+    window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+  });
+  dom["import-presets"].addEventListener("click", () => dom["preset-file"].click());
+  dom["preset-file"].addEventListener("change", importPresets);
+  renderWorkspaces();
+}
+
+function savePreset() {
+  commitActiveTab();
+  const tab = activeTab();
+  if (!tab || presetLibrary().length >= MAX_PRESETS) return;
+  const preset = { ...Music.serializeTab(tab), id: `preset-${Date.now()}-${state.nextMappingId++}`,
+    recording: state.recording.name };
+  const names = new Set(presetLibrary().map((item) => item.name));
+  let suffix = 2;
+  while (names.has(preset.name)) preset.name = `${tab.name} (${suffix++})`;
+  state.saved.presets.push(preset);
+  state.selectedPreset = preset.id;
+  if (saveSettings()) dom["workspace-status"].textContent = `Saved “${preset.name}” in this browser. Export presets to keep a portable copy.`;
+  renderWorkspaces();
+}
+
+async function importPresets() {
+  const file = dom["preset-file"].files[0];
+  dom["preset-file"].value = "";
+  if (!file) return;
+  try {
+    if (file.size > 32 * 1024 * 1024) throw new Error("Choose a preset file smaller than 32 MB.");
+    const presets = Music.parsePresetFile(JSON.parse(await file.text()));
+    if (presetLibrary().length + presets.length > MAX_PRESETS) throw new Error(`Keep up to ${MAX_PRESETS} saved presets; export and remove some first.`);
+    state.saved.presets.push(...presets.map((preset) => ({ ...preset, id: `preset-${Date.now()}-${state.nextMappingId++}` })));
+    if (saveSettings()) dom["workspace-status"].textContent = `Imported ${presets.length} presets. Choose one to open in a new tab.`;
+    renderWorkspaces();
+  } catch (error) {
+    dom["workspace-status"].textContent = error.message || "Could not read the preset file.";
+  }
+}
+
+function renderRhythm(values = readMusicalControls(), currentStep = -1) {
+  const pattern = Music.rhythmPattern(values.density, values.rotation);
+  if (!dom["rhythm-pattern"].children.length) {
+    dom["rhythm-pattern"].replaceChildren(...pattern.map((_, index) => {
+      const cell = document.createElement("span");
+      cell.className = "rhythm-step";
+      cell.textContent = String(index + 1);
+      return cell;
+    }));
+  }
+  Array.from(dom["rhythm-pattern"].children).forEach((cell, index) => {
+    cell.classList.toggle("is-hit", pattern[index]);
+    cell.classList.toggle("is-current", index === currentStep % 16);
+  });
+  dom["rhythm-pattern"].setAttribute("aria-label", `${pattern.filter(Boolean).length} hits in 16 steps, rotation ${Math.round(values.rotation)}`);
+  ["density", "rotation", "ratchet", "swing", "accent"].forEach((id) => {
+    const mapped = state.mappings.some((mapping) => Music.mappingTargets(mapping).some((target) => target.enabled !== false && target.destination === id));
+    dom[id].parentElement.classList.toggle("is-mapped", mapped);
+    dom[id].title = mapped ? "A signal mapping overrides this base value during playback." : "Base rhythm setting";
+  });
+  dom["rhythm-readout"].textContent = state.playing
+    ? `${Math.round(values.tempo)} BPM · ${Math.round(values.density)} hits · ${Math.round(values.ratchet)} repeats · ${Math.round(values.swing)}% swing`
+    : "Map signals to rhythm destinations below. Green labels have mappings that override their base settings.";
 }
 
 function fieldsForRecording(recording) {
@@ -311,7 +568,7 @@ function fieldsForRecording(recording) {
     channelId: channel.id,
     channelName: channel.name,
     fieldId: field.id,
-    optionLabel: `${channel.name} / ${field.name}`
+    optionLabel: field.name
   })));
 }
 
@@ -354,8 +611,14 @@ function createMappingSource(field) {
 }
 
 function renderMappings() {
+  dom["add-mapping"].disabled = !state.fields.length || state.mappings.length >= MAX_MAPPINGS;
+  dom["preview-button"].disabled = !state.recording || !state.mappings.length;
+  renderRhythm();
+  renderHarmony();
+  renderSoundControls();
   dom["mapping-rows"].replaceChildren();
   if (!state.mappings.length) {
+    if (state.playing || state.preparing) stopPlayback();
     const placeholder = document.createElement("div");
     placeholder.className = "mapping-placeholder";
     placeholder.textContent = "Add a mapping to turn a signal into sound.";
@@ -369,24 +632,31 @@ function renderMappings() {
     const sourcesContainer = fragment.querySelector('[data-role="sources"]');
     const operatorSelect = fragment.querySelector('[data-role="operator"]');
     const addSourceButton = fragment.querySelector('[data-role="add-source"]');
-    const curveSelect = fragment.querySelector('[data-role="curve"]');
-    const destinationSelect = fragment.querySelector('[data-role="destination"]');
-    const minimumInput = fragment.querySelector('[data-role="minimum"]');
-    const maximumInput = fragment.querySelector('[data-role="maximum"]');
+    const targetsContainer = fragment.querySelector('[data-role="targets"]');
+    const targets = ensureTargets(mapping);
+    fragment.querySelector('[data-role="target-count"]').textContent = `${targets.length} destination${targets.length === 1 ? "" : "s"}`;
+    fragment.querySelector('[data-role="add-targets"]').addEventListener("click", () => openParameterPicker(mapping.id));
+    const visible = state.expandedTargets.has(mapping.id) ? targets : targets.slice(0, 3);
+    visible.forEach((target, index) => targetsContainer.append(renderMappingTarget(mapping, target, index)));
+    if (targets.length > 3) {
+      const more = document.createElement("button"); more.type = "button"; more.className = "small-button target-more";
+      more.textContent = state.expandedTargets.has(mapping.id) ? "Show fewer" : `Show ${targets.length - 3} more destinations`;
+      more.addEventListener("click", () => {
+        if (state.expandedTargets.has(mapping.id)) state.expandedTargets.delete(mapping.id);
+        else state.expandedTargets.add(mapping.id);
+        renderMappings();
+      });
+      targetsContainer.append(more);
+    }
     const removeButton = fragment.querySelector('[data-role="remove"]');
     row.dataset.mappingId = String(mapping.id);
     row.classList.toggle("is-focused", mapping.id === state.focusedMappingId);
     operatorSelect.value = mapping.sources.length === 1 ? "direct" : mapping.operator;
     operatorSelect.disabled = mapping.sources.length === 1;
-    addSourceButton.disabled = mapping.sources.length >= MAX_MAPPING_SOURCES;
+    addSourceButton.disabled = !state.fields.length || mapping.sources.length >= MAX_MAPPING_SOURCES;
     mapping.sources.forEach((source, sourceIndex) => {
       sourcesContainer.append(renderMappingSource(mapping, source, sourceIndex));
     });
-    curveSelect.value = mapping.curve;
-    appendGroupedOptions(destinationSelect, DESTINATIONS, "group", "id", "label");
-    destinationSelect.value = mapping.destination;
-    configureRangeInput(minimumInput, mapping, "minimum");
-    configureRangeInput(maximumInput, mapping, "maximum");
 
     row.addEventListener("pointerdown", () => focusMapping(mapping.id));
     operatorSelect.addEventListener("change", () => {
@@ -396,32 +666,11 @@ function renderMappings() {
       mappingChanged(mapping, true);
     });
     addSourceButton.addEventListener("click", () => {
-      if (mapping.sources.length >= MAX_MAPPING_SOURCES) return;
+      if (!state.fields.length || mapping.sources.length >= MAX_MAPPING_SOURCES) return;
       const field = state.fields[(mapping.sources.length + state.mappings.indexOf(mapping)) % state.fields.length];
       mapping.sources.push(createMappingSource(field));
       if (mapping.operator === "direct") mapping.operator = "average";
       mappingChanged(mapping, true);
-    });
-    curveSelect.addEventListener("change", () => {
-      mapping.curve = curveSelect.value;
-      mappingChanged(mapping, false);
-    });
-    destinationSelect.addEventListener("change", () => {
-      mapping.destination = destinationSelect.value;
-      const destination = destinationFor(mapping.destination);
-      mapping.minimum = destination.from;
-      mapping.maximum = destination.to;
-      mappingChanged(mapping, false);
-    });
-    minimumInput.addEventListener("change", () => {
-      const destination = destinationFor(mapping.destination);
-      mapping.minimum = clamp(Number(minimumInput.value), destination.min, destination.max);
-      mappingChanged(mapping, false);
-    });
-    maximumInput.addEventListener("change", () => {
-      const destination = destinationFor(mapping.destination);
-      mapping.maximum = clamp(Number(maximumInput.value), destination.min, destination.max);
-      mappingChanged(mapping, false);
     });
     removeButton.addEventListener("click", (event) => {
       event.stopPropagation();
@@ -429,6 +678,7 @@ function renderMappings() {
       if (state.focusedMappingId === mapping.id) state.focusedMappingId = state.mappings[0]?.id || null;
       renderMappings();
       loadFocusedSeries();
+      refreshPlaybackSeries();
       saveSettings();
     });
     dom["mapping-rows"].append(fragment);
@@ -448,8 +698,9 @@ function renderMappingSource(mapping, source, sourceIndex) {
   const removeSourceButton = fragment.querySelector('[data-role="remove-source"]');
   sourceNumber.textContent = String(sourceIndex + 1);
   appendGroupedOptions(sourceSelect, state.fields, "channelName", "key", "optionLabel");
+  if (!state.fieldIndex.has(source.sourceKey)) sourceSelect.add(new Option(`Waiting for ${source.sourceKey}`, source.sourceKey));
   sourceSelect.value = source.sourceKey;
-  const field = state.fieldIndex.get(source.sourceKey) || state.fields[0];
+  const field = state.fieldIndex.get(source.sourceKey) || { reducers: ["value", "mean", "rms", "minimum", "maximum", "index"] };
   field.reducers.forEach((reducer) => reducerSelect.add(new Option(reducerLabel(reducer), reducer)));
   reducerSelect.value = source.reducer;
   indexControl.hidden = source.reducer !== "index";
@@ -474,11 +725,11 @@ function renderMappingSource(mapping, source, sourceIndex) {
     mappingChanged(mapping, true);
   });
   indexInput.addEventListener("change", () => {
-    source.index = clamp(Number(indexInput.value) || 0, 0, 1_000_000);
+    source.index = Math.round(clamp(Number(indexInput.value) || 0, 0, 1_000_000));
     mappingChanged(mapping, true);
   });
   weightInput.addEventListener("change", () => {
-    source.weight = clamp(Number(weightInput.value) || 1, 0, 10);
+    source.weight = clamp(Number(weightInput.value) || 0, 0, 10);
     mappingChanged(mapping, true);
   });
   removeSourceButton.addEventListener("click", (event) => {
@@ -488,10 +739,30 @@ function renderMappingSource(mapping, source, sourceIndex) {
     if (mapping.sources.length === 1) mapping.operator = "direct";
     mappingChanged(mapping, true);
   });
+  const rangeMode = fragment.querySelector('[data-role="range-mode"]');
+  const inputMin = fragment.querySelector('[data-role="input-min"]');
+  const inputMax = fragment.querySelector('[data-role="input-max"]');
+  rangeMode.value = source.rangeMode || "auto";
+  inputMin.value = source.inputMin ?? -1; inputMax.value = source.inputMax ?? 1;
+  inputMin.disabled = inputMax.disabled = rangeMode.value !== "fixed";
+  rangeMode.addEventListener("change", () => {
+    source.rangeMode = rangeMode.value;
+    source.inputMin = Number(inputMin.value); source.inputMax = Number(inputMax.value);
+    mappingChanged(mapping, true);
+  });
+  [inputMin, inputMax].forEach((input) => input.addEventListener("change", () => {
+    const minimum = Number(inputMin.value), maximum = Number(inputMax.value);
+    if (!Number.isFinite(minimum) || !Number.isFinite(maximum) || maximum <= minimum) {
+      showToast("Input range To must be greater than From."); renderMappings(); return;
+    }
+    source.inputMin = minimum; source.inputMax = maximum; mappingChanged(mapping, true);
+  }));
   return sourceRow;
 }
 
 function mappingChanged(mapping, signalChanged) {
+  syncPrimaryTarget(mapping);
+  if (signalChanged) { state.livePlot?.delete(mapping.id); refreshPlaybackSeries(); }
   state.focusedMappingId = mapping.id;
   renderMappings();
   if (signalChanged) loadFocusedSeries();
@@ -509,6 +780,7 @@ function focusMapping(mappingId) {
 }
 
 async function loadFocusedSeries() {
+  if (state.sourceMode === "live") { updateSourceSummary(); drawLiveWaveform(); return; }
   const mapping = state.mappings.find((candidate) => candidate.id === state.focusedMappingId);
   if (!mapping) {
     clearWaveform();
@@ -517,18 +789,58 @@ async function loadFocusedSeries() {
   updateSourceSummary();
   dom["wave-empty"].hidden = false;
   dom["wave-empty"].textContent = "Reducing the selected JSON signal…";
+  const generation = state.selectionGeneration;
+  const revision = ++state.seriesRevision;
   try {
     const series = await loadSeries(mapping);
-    if (mapping.id !== state.focusedMappingId) return;
+    if (generation !== state.selectionGeneration || revision !== state.seriesRevision || mapping.id !== state.focusedMappingId) return;
     renderWaveform(series);
   } catch (error) {
+    if (generation !== state.selectionGeneration || revision !== state.seriesRevision) return;
     clearWaveform(error instanceof Error ? error.message : "Signal unavailable");
   }
 }
 
 async function loadSeries(mapping) {
-  const series = await Promise.all(mapping.sources.map(loadSourceSeries));
-  return combineSeries(series, mapping.operator, mapping.sources.map((source) => source.weight));
+  const series = await Promise.all(mapping.sources.map(async (source) => {
+    const loaded = await loadSourceSeries(source);
+    return source.rangeMode === "fixed" && source.inputMax > source.inputMin
+      ? { ...loaded, minimum: source.inputMin, maximum: source.inputMax } : loaded;
+  }));
+  return combineSeries(series, mapping.operator, mapping.sources.map((source) => source.weight),
+    mapping.sources.some((source) => source.rangeMode === "fixed"));
+}
+
+async function loadMappingSet(mappings) {
+  const cache = state.seriesCache;
+  const requested = new Map();
+  for (const mapping of mappings) {
+    for (const source of mapping.sources) {
+      const field = state.fieldIndex.get(source.sourceKey);
+      if (!field) throw new Error("Source field unavailable");
+      const key = [state.recording.id, field.channelId, field.fieldId, source.reducer, source.index].join("|");
+      if (!cache.has(key)) requested.set(key, {
+        channel: field.channelId, field: field.fieldId, reducer: source.reducer, index: source.index, limit: SERIES_LIMIT
+      });
+    }
+  }
+  if (requested.size) {
+    const query = new URLSearchParams({ sources: JSON.stringify([...requested.values()]) });
+    const request = fetch(`/api/recordings/${encodeURIComponent(state.recording.id)}/series-batch?${query}`, { cache: "no-store" })
+      .then(async (response) => {
+        const payload = await response.json();
+        if (!response.ok) throw new Error(humanizeError(payload.error));
+        if (!Array.isArray(payload.series) || payload.series.length !== requested.size) throw new Error("Incomplete recording series");
+        return payload.series;
+      });
+    [...requested.keys()].forEach((key, index) => {
+      cache.set(key, request.then((series) => series[index]));
+    });
+    // Every cached promise is consumed below, including batch failures.
+  }
+  const loads = mappings.map(async (mapping) => [mapping.id, await loadSeries(mapping)]);
+  try { return await Promise.all(loads); }
+  catch (error) { requested.forEach((_source, key) => cache.delete(key)); throw error; }
 }
 
 async function loadSourceSeries(source) {
@@ -543,14 +855,19 @@ async function loadSourceSeries(source) {
     index: String(source.index),
     limit: String(SERIES_LIMIT)
   });
-  const response = await fetch(`/api/recordings/${encodeURIComponent(state.recording.id)}/series?${query}`, { cache: "no-store" });
-  const payload = await response.json();
-  if (!response.ok) throw new Error(humanizeError(payload.error));
-  state.seriesCache.set(cacheKey, payload);
-  return payload;
+  const cache = state.seriesCache;
+  const request = fetch(`/api/recordings/${encodeURIComponent(state.recording.id)}/series?${query}`, { cache: "no-store" })
+    .then(async (response) => {
+      const payload = await response.json();
+      if (!response.ok) throw new Error(humanizeError(payload.error));
+      return payload;
+    });
+  cache.set(cacheKey, request);
+  try { return await request; }
+  catch (error) { cache.delete(cacheKey); throw error; }
 }
 
-function combineSeries(seriesList, operator = "direct", weights = []) {
+function combineSeries(seriesList, operator = "direct", weights = [], preserveInputRange = false) {
   const usable = seriesList.filter((series) => Array.isArray(series?.points) && series.points.length);
   if (!usable.length) return { points: [], minimum: 0, maximum: 0, composite: true };
   if (usable.length === 1 || operator === "direct") return usable[0];
@@ -573,8 +890,8 @@ function combineSeries(seriesList, operator = "direct", weights = []) {
   const values = points.map((point) => point[1]);
   return {
     points,
-    minimum: Math.min(...values),
-    maximum: Math.max(...values),
+    minimum: preserveInputRange ? (operator === "difference" ? -1 : 0) : Math.min(...values),
+    maximum: preserveInputRange ? (operator === "sum" ? usable.length : 1) : Math.max(...values),
     composite: true,
     source_count: usable.length,
     operator
@@ -616,7 +933,7 @@ function renderWaveform(series) {
   dom["signal-min"].textContent = `MIN ${formatNumber(series.minimum)}`;
   dom["signal-max"].textContent = `MAX ${formatNumber(series.maximum)}`;
   dom["wave-empty"].hidden = true;
-  state.maxSteps = Math.max(2, points.length);
+  if (!state.playing && !state.preparing) state.maxSteps = Math.max(2, points.length);
   state.cursor = clamp(state.cursor, 0, state.maxSteps - 1);
   updatePlayhead();
 }
@@ -657,100 +974,349 @@ function updateSourceSummary() {
 }
 
 async function togglePlayback() {
-  if (dom["preview-button"].disabled) return;
-  if (state.playing) {
-    stopPlayback();
+  if (state.playing || state.preparing) { stopPlayback(); return; }
+  if (!state.recording || !state.mappings.length) {
+    showToast("Add mappings or generate a tab first.");
     return;
   }
+  const generation = ++state.playbackGeneration;
+  state.preparing = true;
+  dom["preview-button"].innerHTML = "<span>■</span> Cancel";
+  dom["session-state"].textContent = "PREPARING MAPPINGS";
   try {
-    dom["preview-button"].disabled = true;
-    dom["preview-button"].innerHTML = "<span>···</span> Preparing";
-    const loaded = await Promise.all(state.mappings.map(async (mapping) => [mapping.id, await loadSeries(mapping)]));
+    // Ask for audio/MIDI access in the user's click, before fetching recordings.
+    if (state.output === "audio") await ensureAudioEngine();
+    else if (!state.midiOutput) await connectMidi();
+    if (generation !== state.playbackGeneration) return;
+    if (state.output === "midi" && !state.midiOutput) throw new Error("Choose a MIDI destination before playing");
+    const settings = readMusicalControls();
+    if (state.output === "midi" && settings.soundMode !== "off") Music.patchPool(settings);
+    if (state.sourceMode === "live" && state.liveSocket?.readyState !== 1) throw new Error("Connect a live stream before playing");
+    const loaded = state.sourceMode === "live" ? [] : await loadMappingSet(state.mappings);
+    if (generation !== state.playbackGeneration) return;
     state.playSeries = new Map(loaded);
     state.maxSteps = Math.max(...loaded.map(([_id, series]) => series.points.length), 2);
-    if (state.output === "audio") await ensureAudioEngine();
-    if (state.output === "midi" && !state.midiOutput) {
-      await connectMidi();
-      if (!state.midiOutput) throw new Error("Choose a MIDI destination before playing");
-    }
+    state.cursor = clamp(state.cursor, 0, state.maxSteps - 1);
+    state.preparing = false;
     state.playing = true;
+    state.rhythmStep = 0;
+    state.currentPreviewVoice = null;
+    state.lastSoundChange = -Infinity;
+    state.nextTickAt = performance.now();
     dom["preview-button"].classList.add("is-playing");
     dom["preview-button"].innerHTML = "<span>■</span> Stop";
     dom["session-state"].textContent = state.output === "midi" ? "PLAYING · HYDRASYNTH MIDI" : "PLAYING · BROWSER AUDIO";
+    startParameterPump();
     runPlaybackTick();
   } catch (error) {
-    showToast(error instanceof Error ? error.message : "Could not start playback");
-  } finally {
-    dom["preview-button"].disabled = !state.recording;
-  }
-}
-
-function runPlaybackTick() {
-  if (!state.playing) return;
-  const progress = state.maxSteps > 1 ? state.cursor / (state.maxSteps - 1) : 0;
-  const controls = controlsAt(progress);
-  let noteActivity = null;
-  if (Math.random() * 100 <= controls.chance) {
-    const note = quantizeNote(controls.pitch);
-    const interval = playbackInterval();
-    const duration = clamp(interval * controls.gate / 100, 25, interval * 0.96);
-    noteActivity = { number: note, velocity: controls.velocity, duration_ms: duration };
-    if (state.output === "midi") playMidiNote(note, controls.velocity, duration, controls.cc);
-    else playAudioNote(note, controls.velocity, duration, controls.cc);
-  } else if (state.output === "midi") {
-    sendMidiCc(controls.cc);
-  }
-  publishSignalLabActivity({
-    progress,
-    cc: Array.from(controls.cc, ([number, value]) => ({ number, value })),
-    note: noteActivity
-  });
-  updatePlayhead();
-  state.cursor += 1;
-  if (state.cursor >= state.maxSteps) {
-    state.cursor = 0;
+    if (generation !== state.playbackGeneration) return;
     stopPlayback();
-    return;
+    showToast(error instanceof Error ? error.message : "Could not start playback");
   }
-  scheduleNextTick();
 }
 
-function scheduleNextTick() {
+async function refreshPlaybackSeries() {
+  if (state.sourceMode === "live") return;
+  if (state.preparing) { stopPlayback(); return; }
+  if (!state.playing) return;
+  const generation = state.playbackGeneration;
+  const revision = (refreshPlaybackSeries.revision || 0) + 1;
+  refreshPlaybackSeries.revision = revision;
+  try {
+    const loaded = await loadMappingSet(state.mappings);
+    if (generation !== state.playbackGeneration || revision !== refreshPlaybackSeries.revision) return;
+    state.playSeries = new Map(loaded);
+  } catch (error) {
+    if (generation !== state.playbackGeneration || revision !== refreshPlaybackSeries.revision) return;
+    stopPlayback();
+    showToast(error.message || "Could not update the playing mappings");
+  }
+}
+
+async function runPlaybackTick() {
+  if (!state.playing) return;
+  const generation = state.playbackGeneration;
+  try {
+    const progress = state.maxSteps > 1 ? state.cursor / (state.maxSteps - 1) : 0;
+    const controls = controlsAt(progress);
+    state.currentParameterCommands = controls.parameters;
+    if (!controls.valid) {
+      silenceStaleInput();
+      scheduleNextTick(100);
+      return;
+    }
+    if (state.liveSilenced && state.output === "audio") await ensureAudioEngine();
+    if (generation !== state.playbackGeneration) return;
+    state.liveSilenced = false;
+    dom["session-state"].textContent = state.output === "midi" ? "PLAYING · HYDRASYNTH MIDI" : "PLAYING · BROWSER AUDIO";
+    const change = changeSoundAtBoundary(controls);
+    if (change) {
+      if (!await change || !state.playing || generation !== state.playbackGeneration) return;
+      state.nextTickAt = performance.now();
+    }
+    const plan = Music.rhythmStep(controls, state.rhythmStep);
+    const notes = Music.chordNotes(controls.pitch, controls);
+    renderHarmony(controls, notes);
+    if (state.output === "audio") updateAudioEffects(controls.cc, plan.interval);
+    publishSignalLabActivity({ progress, ...(state.output === "audio" ? { cc: Array.from(controls.cc, ([number, value]) => ({ number, value })) } : {}) });
+    plan.notes.forEach((hit) => {
+      if (!state.playing || generation !== state.playbackGeneration) return;
+      const sound = () => {
+        if (!state.playing || generation !== state.playbackGeneration) return;
+        if (state.sourceMode === "live" && !controlsAt(0).valid) { silenceStaleInput(); return; }
+        try {
+          notes.forEach((note) => {
+            if (state.output === "midi") playMidiNote(note, hit.velocity, hit.duration);
+            else playAudioNote(note, hit.velocity, hit.duration, controls.cc, 1 / Math.sqrt(notes.length));
+          });
+          publishSignalLabActivity({ progress, notes: notes.map((number) => ({ number, velocity: hit.velocity, duration_ms: hit.duration })) });
+        } catch (error) {
+          stopPlayback();
+          showToast(error.message || "The audio or MIDI output became unavailable");
+        }
+      };
+      if (hit.offset === 0) sound();
+      else {
+        const timer = window.setTimeout(() => { state.noteTimers.delete(timer); sound(); }, hit.offset);
+        state.noteTimers.add(timer);
+      }
+    });
+    if (!state.playing || generation !== state.playbackGeneration) return;
+    renderRhythm(controls, state.rhythmStep);
+    updatePlayhead();
+    state.rhythmStep += 1;
+    state.cursor += 1;
+    scheduleNextTick(plan.interval);
+  } catch (error) {
+    if (generation !== state.playbackGeneration) return;
+    stopPlayback();
+    showToast(error.message || "Could not play the next step");
+  }
+}
+
+function effectivePreviewVoice() {
+  if (state.currentPreviewVoice) return state.currentPreviewVoice;
+  const preset = Music.VOICES.find((voice) => voice.id === dom["preview-voice"].value);
+  return { ...preset, name: preset?.name || "Custom", waveType: dom["wave-type"].value,
+    attack: Number(dom.attack.value), release: Number(dom.release.value), brightness: Number(dom.brightness.value) };
+}
+
+function renderHarmony(settings = readMusicalControls(), notes = Music.chordNotes(60, settings)) {
+  if (!dom["harmony-readout"]) return;
+  for (const id of ["voices", "inversion", "spread"]) {
+    const mapped = state.mappings.some((mapping) => Music.mappingTargets(mapping).some((target) => target.enabled !== false && target.destination === id));
+    dom[id].parentElement.classList.toggle("is-mapped", mapped);
+    dom[id].title = mapped ? "A signal mapping overrides this base value during playback." : "Base harmony setting";
+  }
+  dom["harmony-readout"].textContent = `${notes.length} voice${notes.length === 1 ? "" : "s"} · ${notes.map((note) => NOTE_NAMES[note % 12] + (Math.floor(note / 12) - 1)).join(" · ")}`;
+}
+
+const patchLabel = (patch) => `${patch.bank}${String(patch.number).padStart(3, "0")}`;
+
+function renderSoundControls() {
+  if (!dom["sound-status"]) return;
+  const midi = state.output === "midi";
+  const settings = readMusicalControls();
+  dom["patch-controls"].hidden = !midi;
+  dom["patch-list"].disabled = settings.patchPool === "all";
+  dom["sound-every"].disabled = settings.soundMode === "off";
+  dom["sound-help"].textContent = midi
+    ? "MIDI changes use the patch palette below. Changes wait at least two seconds and pause notes briefly. Follow mapping uses Sound palette position."
+    : "Browser audio explores six preview sounds. Follow mapping uses the Sound palette position destination.";
+  const selected = midi ? state.currentPatch ? `Sent ${patchLabel(state.currentPatch)}` : "Current synth patch"
+    : effectivePreviewVoice().name;
+  const mode = settings.soundMode === "off" ? "Keeping sound"
+    : `${settings.soundMode === "mapped" ? "Following mapping" : settings.soundMode === "cycle" ? "Cycling" : "Random selection"} / ${settings.soundEvery} steps`;
+  dom["sound-status"].textContent = `${selected} · ${mode}`;
+  if (settings.soundMode === "mapped" && !state.mappings.some((mapping) => Music.mappingTargets(mapping).some((target) => target.enabled !== false && target.destination === "sound"))) {
+    dom["sound-status"].textContent += " · Add a Sound palette position mapping to vary the sound";
+  }
+  dom["voice-name"].textContent = effectivePreviewVoice().name.toUpperCase();
+}
+
+function changeSoundAtBoundary(settings) {
+  if (settings.soundMode === "off" || state.rhythmStep % settings.soundEvery !== 0) return null;
+  if (state.output === "audio") {
+    const previous = Music.VOICES.findIndex((voice) => voice.id === (state.currentPreviewVoice?.id || settings.previewVoice));
+    state.currentPreviewVoice = Music.VOICES[Music.soundIndex(settings.soundMode, Music.VOICES.length, previous, settings.sound)];
+    renderSoundControls();
+    return null;
+  }
+  if (performance.now() - state.lastSoundChange < 2000) return null;
+  const pool = Music.patchPool(settings);
+  const previous = state.currentPatch ? pool.findIndex((patch) => patchLabel(patch) === patchLabel(state.currentPatch)) : -1;
+  const patch = pool[Music.soundIndex(settings.soundMode, pool.length, previous, settings.sound)];
+  if (state.currentPatch && patchLabel(patch) === patchLabel(state.currentPatch)) return null;
+  return sendMidiPatch(patch, state.playbackGeneration);
+}
+
+function waitForPatch(milliseconds, generation, output) {
+  return new Promise((resolve) => {
+    const timer = window.setTimeout(() => {
+      state.patchTimers.delete(timer);
+      resolve(generation === state.playbackGeneration && output === state.midiOutput);
+    }, milliseconds);
+    state.patchTimers.set(timer, resolve);
+  });
+}
+
+async function sendMidiPatch(patch, generation) {
+  const output = state.midiOutput;
+  if (!output || generation !== state.playbackGeneration) return false;
+  state.patchChanging = true;
+  state.midiPacer?.reset();
+  stopActiveMidiNotes();
+  state.noteTimers.forEach((timer) => window.clearTimeout(timer));
+  state.noteTimers.clear();
+  // Match the native driver's bank-select sequence, with cancellable gaps.
+  output.send([0xB0 | MIDI_CHANNEL, 0, 0]);
+  if (!await waitForPatch(20, generation, output)) return false;
+  output.send([0xB0 | MIDI_CHANNEL, 32, "ABCDEFGH".indexOf(patch.bank)]);
+  if (!await waitForPatch(20, generation, output)) return false;
+  output.send([0xC0 | MIDI_CHANNEL, patch.number - 1]);
+  state.currentPatch = { ...patch };
+  state.lastSoundChange = performance.now();
+  renderSoundControls();
+  publishSignalLabActivity({ stop: true });
+  const ready = await waitForPatch(100, generation, output);
+  if (generation === state.playbackGeneration) state.patchChanging = false;
+  return ready;
+}
+
+async function applyMidiPatch() {
+  stopPlayback();
+  if (!state.midiOutput) { showToast("Connect and select a MIDI output first."); return; }
+  const generation = state.playbackGeneration;
+  const settings = readMusicalControls();
+  state.preparing = true;
+  dom["apply-patch"].disabled = true;
+  dom["preview-button"].innerHTML = "<span>■</span> Cancel";
+  dom["session-state"].textContent = "SELECTING PATCH";
+  try {
+    if (await sendMidiPatch({ bank: settings.patchBank, number: Math.round(settings.patchNumber) }, generation)) {
+      showToast(`Sent patch ${patchLabel(state.currentPatch)}`);
+    }
+  } catch (error) {
+    if (generation === state.playbackGeneration) showToast(error.message || "Could not select the MIDI patch");
+  } finally {
+    if (generation === state.playbackGeneration) stopPlayback();
+  }
+}
+
+function scheduleNextTick(interval) {
   if (!state.playing) return;
   window.clearTimeout(state.playTimer);
-  state.playTimer = window.setTimeout(runPlaybackTick, playbackInterval());
+  const now = performance.now();
+  state.nextTickAt = Math.max(state.nextTickAt + interval, now);
+  state.playTimer = window.setTimeout(() => {
+    if (state.sourceMode !== "live" && state.cursor >= state.maxSteps) {
+      state.cursor = 0;
+      if (!dom.loop.checked) { stopPlayback(); return; }
+    }
+    runPlaybackTick();
+  }, Math.max(0, state.nextTickAt - now));
 }
 
 function controlsAt(progress) {
-  const controls = { pitch: 60, velocity: 96, gate: 66, chance: 100, cc: new Map() };
+  const controls = { ...readMusicalControls(), pitch: 60, velocity: 96, gate: 66, chance: 100, sound: 0, cc: new Map(), valid: true };
+  const parameters = new Map();
   state.mappings.forEach((mapping) => {
-    const series = state.playSeries.get(mapping.id);
-    if (!series?.points?.length) return;
-    const index = Math.round(progress * (series.points.length - 1));
-    const value = series.points[index][1];
-    const span = series.maximum - series.minimum;
-    let normalized = span > 0 ? (value - series.minimum) / span : 0.5;
-    normalized = applyCurve(clamp(normalized, 0, 1), mapping.curve);
-    const output = mapping.minimum + normalized * (mapping.maximum - mapping.minimum);
-    const destination = destinationFor(mapping.destination);
-    if (destination.cc !== undefined) controls.cc.set(destination.cc, clamp(Math.round(output), 0, 127));
-    else controls[destination.id] = output;
+    if (!Music.mappingTargets(mapping).some((target) => target.enabled !== false)) return;
+    let normalized;
+    if (state.sourceMode === "live") {
+      normalized = liveMappingValue(mapping, performance.now());
+      if (normalized === null) { controls.valid = false; return; }
+    } else {
+      const series = state.playSeries.get(mapping.id);
+      if (!series?.points?.length) return;
+      const index = Math.round(clamp(progress, 0, 1) * (series.points.length - 1));
+      const span = series.maximum - series.minimum;
+      normalized = span > 0 ? (series.points[index][1] - series.minimum) / span : 0.5;
+    }
+    for (const target of Music.mappingTargets(mapping)) {
+      const destination = destinationFor(target.destination);
+      if (target.enabled === false || !destination || destination.unavailable) continue;
+      const curved = applyCurve(clamp(normalized, 0, 1), target.curve);
+      const output = target.minimum + curved * (target.maximum - target.minimum);
+      if (destination.cc !== undefined) controls.cc.set(destination.cc, clamp(Math.round(output), 0, 127));
+      else if (!destination.hardware) controls[destination.id] = output;
+      const command = Parameters?.command(destination, output, controls.midiFormat);
+      if (command) parameters.set(command.key, command);
+    }
   });
+  controls.parameters = [...parameters.values()];
   controls.velocity = clamp(Math.round(controls.velocity), 1, 127);
   controls.gate = clamp(controls.gate, 5, 100);
   controls.chance = clamp(controls.chance, 0, 100);
   return controls;
 }
 
+function silenceStaleInput() {
+  state.currentParameterCommands = [];
+  state.midiPacer?.reset();
+  if (!state.liveSilenced) {
+    state.liveSilenced = true;
+    state.noteTimers.forEach((timer) => window.clearTimeout(timer));
+    state.noteTimers.clear();
+    stopActiveMidiNotes();
+    stopAudioVoices();
+    publishSignalLabActivity({ stop: true });
+  }
+  dom["session-state"].textContent = "WAITING FOR FRESH LIVE DATA";
+}
+
+function startParameterPump() {
+  window.clearTimeout(state.parameterTimer);
+  state.midiPacer?.reset();
+  state.parameterCarry = 0;
+  const generation = state.playbackGeneration;
+  const pump = () => {
+    if (!state.playing || generation !== state.playbackGeneration) return;
+    try {
+      const controls = state.sourceMode === "live" ? controlsAt(0) : null;
+      if (controls && !controls.valid) silenceStaleInput();
+      else if (state.output === "midi" && state.midiOutput && !state.patchChanging) {
+        const settings = controls || readMusicalControls();
+        state.midiPacer.update(controls ? controls.parameters : state.currentParameterCommands);
+        state.parameterCarry += settings.midiRate / 50;
+        const limit = Math.floor(state.parameterCarry);
+        state.parameterCarry -= limit;
+        const emitted = state.midiPacer.flush((bytes) => state.midiOutput.send(bytes), limit);
+        if (emitted.length) publishSignalLabActivity({
+          cc: emitted.filter((item) => item.kind === "cc"), nrpn: emitted.filter((item) => item.kind === "nrpn")
+        });
+        if (dom["midi-parameter-status"]) dom["midi-parameter-status"].textContent =
+          `${settings.midiFormat.toUpperCase()} · ${state.midiPacer.pending.size} waiting · up to ${settings.midiRate} parameter changes/sec`;
+      }
+    } catch (error) { stopPlayback(); showToast(error.message || "MIDI output disconnected"); return; }
+    state.parameterTimer = window.setTimeout(pump, 20);
+  };
+  state.parameterTimer = window.setTimeout(pump, 20);
+}
+
 function publishSignalLabActivity(activity = {}) {
-  const compositeCount = state.mappings.filter((mapping) => mapping.sources.length > 1).length;
+  const compositeCount = state.mappings.filter((mapping) => mapping.sources?.length > 1).length;
+  const queued = state.activityQueued;
   state.activityQueued = {
     recording: state.recording?.name || state.recording?.id || null,
     output: state.output,
     mapping_count: state.mappings.length,
+    destination_count: Music.targetCount(state.mappings),
+    source_mode: state.sourceMode,
     composite_count: compositeCount,
+    patch: state.output === "midi" ? state.currentPatch : null,
+    voice_name: state.output === "audio" ? effectivePreviewVoice().name || "Custom" : null,
     ...activity
   };
+  // Preserve emitted parameter changes while the previous HTTP request is in flight.
+  if (queued && !activity.stop) {
+    for (const kind of ["cc", "nrpn"]) {
+      const merged = new Map([...(queued[kind] || []), ...(activity[kind] || [])].map((item) => [item.key || item.number, item]));
+      if (merged.size) state.activityQueued[kind] = [...merged.values()].slice(-64);
+    }
+    if (!activity.notes && queued.notes && !queued.stop) state.activityQueued.notes = queued.notes;
+    if (queued.stop && !activity.notes) state.activityQueued.stop = true;
+  }
   flushSignalLabActivity();
 }
 
@@ -778,16 +1344,31 @@ async function flushSignalLabActivity() {
 }
 
 function stopPlayback() {
-  const wasPlaying = state.playing;
+  const wasPlaying = state.playing || state.preparing;
   state.playing = false;
+  state.preparing = false;
+  state.playbackGeneration += 1;
   window.clearTimeout(state.playTimer);
   state.playTimer = null;
+  window.clearTimeout(state.parameterTimer);
+  state.parameterTimer = null;
+  state.midiPacer?.reset();
+  state.currentParameterCommands = [];
+  state.patchChanging = false;
+  state.liveSilenced = false;
+  state.noteTimers.forEach((timer) => window.clearTimeout(timer));
+  state.noteTimers.clear();
+  state.patchTimers.forEach((resolve, timer) => { window.clearTimeout(timer); resolve(false); });
+  state.patchTimers.clear();
+  if (dom["apply-patch"]) dom["apply-patch"].disabled = false;
+  stopActiveMidiNotes();
+  stopAudioVoices();
   dom["preview-button"].classList.remove("is-playing");
   dom["preview-button"].innerHTML = "<span>▶</span> Preview";
   dom["session-state"].textContent = "LOCAL SESSION · READY";
-  stopActiveMidiNotes();
   updatePlayhead();
-  if (wasPlaying) publishSignalLabActivity({ stop: true, progress: 0 });
+  renderRhythm();
+  if (wasPlaying) publishSignalLabActivity({ stop: true });
 }
 
 async function ensureAudioEngine() {
@@ -796,73 +1377,141 @@ async function ensureAudioEngine() {
   if (!state.audio) {
     const context = new AudioContext();
     const master = context.createGain();
-    const delay = context.createDelay(1);
+    const compressor = context.createDynamicsCompressor();
+    const delayInput = context.createGain();
+    const delay = context.createDelay(2);
     const feedback = context.createGain();
-    master.gain.value = 0.55;
-    delay.delayTime.value = 0.19;
-    feedback.gain.value = 0.22;
+    const delayReturn = context.createGain();
+    const reverbInput = context.createGain();
+    const reverb = context.createConvolver();
+    const impulse = context.createBuffer(2, Math.round(context.sampleRate * 1.8), context.sampleRate);
+    for (let channel = 0; channel < 2; channel += 1) {
+      const samples = impulse.getChannelData(channel);
+      for (let i = 0; i < samples.length; i += 1) samples[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / samples.length, 2.5);
+    }
+    reverb.buffer = impulse;
+    master.gain.value = 0.5;
+    compressor.threshold.value = -16;
+    compressor.knee.value = 16;
+    compressor.ratio.value = 5;
+    compressor.attack.value = 0.004;
+    compressor.release.value = 0.12;
+    delayInput.gain.value = 0;
+    reverbInput.gain.value = 0;
+    delay.delayTime.value = 0.25;
+    feedback.gain.value = 0.36;
+    delayReturn.gain.value = 0.7;
+    delayInput.connect(delay);
     delay.connect(feedback);
     feedback.connect(delay);
-    delay.connect(master);
-    master.connect(context.destination);
-    state.audio = { context, master, delay };
+    delay.connect(delayReturn);
+    delayReturn.connect(master);
+    reverbInput.connect(reverb);
+    reverb.connect(master);
+    master.connect(compressor);
+    compressor.connect(context.destination);
+    state.audio = { context, master, delay, delayInput, reverbInput, driveCurves: new Map() };
   }
-  await state.audio.context.resume();
+  const { context, master } = state.audio;
+  master.gain.cancelScheduledValues(context.currentTime);
+  master.gain.setTargetAtTime(0.5, context.currentTime, 0.015);
+  await context.resume();
 }
 
-function playAudioNote(note, velocity, durationMs, ccValues) {
+function updateAudioEffects(cc, interval) {
   if (!state.audio) return;
-  const { context, master, delay } = state.audio;
+  const { context, delay, delayInput, reverbInput } = state.audio;
+  const echo = Math.max((cc.get(92) ?? 0) / 127, (cc.get(22) ?? 0) / 127);
+  const space = Math.max((cc.get(91) ?? 16) / 127, (cc.get(23) ?? 0) / 127);
+  delayInput.gain.setTargetAtTime(echo * 0.8, context.currentTime, 0.02);
+  reverbInput.gain.setTargetAtTime(space * 0.9, context.currentTime, 0.02);
+  delay.delayTime.setTargetAtTime(clamp(interval / 1000 * 1.5, 0.06, 1.5), context.currentTime, 0.1);
+}
+
+function stopAudioVoices() {
+  if (!state.audio) return;
+  const now = state.audio.context.currentTime;
+  state.audio.master.gain.cancelScheduledValues(now);
+  state.audio.master.gain.setTargetAtTime(0, now, 0.008);
+  for (const voice of [...state.activeVoices]) voice.stop();
+}
+
+function playAudioNote(note, velocity, durationMs, cc, level = 1) {
+  if (!state.audio) return;
+  const { context, master, delayInput, reverbInput, driveCurves } = state.audio;
+  while (state.activeVoices.size >= 48) state.activeVoices.values().next().value.stop();
   const now = context.currentTime;
-  const attack = Math.min(
-    Number(dom.attack.value) / 100,
-    durationMs / 1000 * 0.8
-  );
-  const release = 0.05 + Number(dom.release.value) / 100 * 1.2;
+  const sound = effectivePreviewVoice();
+  const attackValue = cc.has(20) ? 0.002 + cc.get(20) / 127 * 0.4 : sound.attack / 100;
+  const attack = Math.max(0.001, Math.min(attackValue, durationMs / 1000 * 0.7));
+  const release = cc.has(21) ? 0.025 + cc.get(21) / 127 * 1.6 : 0.05 + sound.release / 100 * 1.2;
   const end = now + durationMs / 1000;
   const gain = context.createGain();
   const filter = context.createBiquadFilter();
-  const wet = context.createGain();
+  const drive = context.createWaveShaper();
   const oscillator = context.createOscillator();
   const harmonic = context.createOscillator();
   const harmonicGain = context.createGain();
-  const cutoffValue = ccValues.get(74) ?? Math.round(Number(dom.brightness.value) * 1.27);
-  const resonanceValue = ccValues.get(71) ?? 18;
-  const reverbValue = ccValues.get(93) ?? 16;
-  const frequency = 440 * Math.pow(2, (note - 69) / 12);
-  oscillator.type = dom["wave-type"].value;
+  const cutoffValue = cc.get(74) ?? Math.round(sound.brightness * 1.27);
+  const macroBrightness = cc.has(16) ? Math.pow(2, (cc.get(16) / 127 - 0.5) * 5) : 1;
+  const resonance = (cc.get(71) ?? 12) / 127 * 12 + (cc.get(17) ?? 0) / 127 * 10;
+  const driveValue = cc.get(50) ?? 0;
+  if (!driveCurves.has(driveValue)) {
+    const curve = new Float32Array(257);
+    const amount = 1 + driveValue / 127 * 45;
+    for (let i = 0; i < curve.length; i += 1) {
+      const x = i * 2 / (curve.length - 1) - 1;
+      curve[i] = driveValue === 0 ? x : Math.tanh(x * amount) / Math.tanh(amount);
+    }
+    driveCurves.set(driveValue, curve);
+  }
+  drive.curve = driveCurves.get(driveValue);
+  drive.oversample = "2x";
+  const frequency = 440 * Math.pow(2, (note + (sound.octave || 0) * 12 - 69) / 12);
+  oscillator.type = sound.waveType;
   harmonic.type = "sine";
   oscillator.frequency.value = frequency;
-  harmonic.frequency.value = frequency * 2;
-  harmonic.detune.value = 5;
-  harmonicGain.gain.value = 0.12;
+  harmonic.frequency.value = frequency * (cc.has(18) ? cc.get(18) > 80 ? 3 : 2 : sound.ratio || 2);
+  const detune = (cc.get(19) ?? 12) / 127 * 45;
+  oscillator.detune.value = -detune / 2;
+  harmonic.detune.value = detune;
+  harmonicGain.gain.value = cc.has(18) ? 0.04 + cc.get(18) / 127 * 0.55 : sound.harmonic ?? 0.12;
   filter.type = "lowpass";
-  filter.frequency.value = 90 * Math.pow(120, cutoffValue / 127);
-  filter.Q.value = 0.4 + resonanceValue / 127 * 14;
-  wet.gain.value = reverbValue / 127 * 0.38;
-  const peak = velocity / 127 * 0.23;
+  filter.frequency.value = clamp(55 * Math.pow(260, cutoffValue / 127) * macroBrightness, 40, Math.min(18000, context.sampleRate * 0.45));
+  filter.Q.value = 0.4 + resonance;
+  const peak = velocity / 127 * 0.2 * level;
   gain.gain.setValueAtTime(0.0001, now);
-  gain.gain.exponentialRampToValueAtTime(Math.max(0.001, peak), now + Math.max(0.008, attack));
-  gain.gain.setValueAtTime(Math.max(0.001, peak), end);
+  gain.gain.exponentialRampToValueAtTime(Math.max(0.001, peak), now + attack);
+  if (sound.decay) gain.gain.exponentialRampToValueAtTime(Math.max(0.001, peak * 0.2), end);
+  else gain.gain.setValueAtTime(Math.max(0.001, peak), end);
   gain.gain.exponentialRampToValueAtTime(0.0001, end + release);
-  oscillator.connect(gain);
+  oscillator.connect(drive);
   harmonic.connect(harmonicGain);
-  harmonicGain.connect(gain);
-  gain.connect(filter);
-  filter.connect(master);
-  filter.connect(wet);
-  wet.connect(delay);
+  harmonicGain.connect(drive);
+  drive.connect(filter);
+  filter.connect(gain);
+  gain.connect(master);
+  gain.connect(delayInput);
+  gain.connect(reverbInput);
+  const nodes = [oscillator, harmonic, harmonicGain, drive, filter, gain];
+  let stopped = false;
+  const voice = { stop() {
+    if (stopped) return;
+    stopped = true;
+    state.activeVoices.delete(voice);
+    gain.gain.cancelScheduledValues(context.currentTime);
+    gain.gain.setTargetAtTime(0.0001, context.currentTime, 0.004);
+    oscillator.stop(context.currentTime + 0.025);
+    harmonic.stop(context.currentTime + 0.025);
+  } };
+  state.activeVoices.add(voice);
   oscillator.start(now);
   harmonic.start(now);
   oscillator.stop(end + release + 0.03);
   harmonic.stop(end + release + 0.03);
   oscillator.addEventListener("ended", () => {
-    oscillator.disconnect();
-    harmonic.disconnect();
-    harmonicGain.disconnect();
-    gain.disconnect();
-    filter.disconnect();
-    wet.disconnect();
+    state.activeVoices.delete(voice);
+    nodes.forEach((node) => node.disconnect());
   }, { once: true });
 }
 
@@ -877,7 +1526,7 @@ async function connectMidi() {
     renderMidiOutputs();
     dom["midi-panel"].hidden = false;
     dom["panic-button"].hidden = false;
-    if (state.midiOutput) setOutput("midi");
+    if (state.midiOutput && state.output !== "midi") setOutput("midi");
   } catch (error) {
     showToast(error instanceof Error ? error.message : "MIDI permission was not granted");
   }
@@ -891,16 +1540,23 @@ function renderMidiOutputs() {
   const hydra = outputs.find((output) => /hydra/i.test(output.name || ""));
   const selected = outputs.find((output) => output.id === previousId) || hydra || null;
   dom["midi-output"].value = selected?.id || "";
+  if (state.midiOutput?.id !== selected?.id) {
+    if (state.midiOutput) stopPlayback();
+    state.currentPatch = null;
+  }
   state.midiOutput = selected;
   updateMidiStatus();
 }
 
 function selectMidiOutput() {
+  stopPlayback();
+  state.currentPatch = null;
   state.midiOutput = state.midiAccess?.outputs.get(dom["midi-output"].value) || null;
   updateMidiStatus();
 }
 
 function updateMidiStatus() {
+  renderSoundControls();
   if (state.midiOutput) {
     dom["midi-status"].textContent = `${state.midiOutput.name} is ready on channel ${MIDI_CHANNEL + 1}.`;
     dom["midi-choice-detail"].textContent = state.midiOutput.name;
@@ -913,20 +1569,21 @@ function updateMidiStatus() {
   }
 }
 
-function playMidiNote(note, velocity, durationMs, ccValues) {
-  if (!state.midiOutput) return;
-  sendMidiCc(ccValues);
+function playMidiNote(note, velocity, durationMs) {
+  const output = state.midiOutput;
+  if (!output) return;
   const existing = state.midiNoteTimers.get(note);
   if (existing) {
-    window.clearTimeout(existing);
-    state.midiOutput.send([0x80 | MIDI_CHANNEL, note, 0]);
+    window.clearTimeout(existing.timer);
+    existing.output.send([0x80 | MIDI_CHANNEL, note, 0]);
   }
-  state.midiOutput.send([0x90 | MIDI_CHANNEL, note, velocity]);
+  output.send([0x90 | MIDI_CHANNEL, note, velocity]);
   const timer = window.setTimeout(() => {
-    state.midiOutput?.send([0x80 | MIDI_CHANNEL, note, 0]);
     state.midiNoteTimers.delete(note);
+    try { output.send([0x80 | MIDI_CHANNEL, note, 0]); }
+    catch (error) { stopPlayback(); showToast(error.message || "MIDI output disconnected"); }
   }, durationMs);
-  state.midiNoteTimers.set(note, timer);
+  state.midiNoteTimers.set(note, { timer, output });
 }
 
 function sendMidiCc(ccValues) {
@@ -935,9 +1592,10 @@ function sendMidiCc(ccValues) {
 }
 
 function stopActiveMidiNotes() {
-  state.midiNoteTimers.forEach((timer, note) => {
+  state.midiNoteTimers.forEach(({ timer, output }, note) => {
     window.clearTimeout(timer);
-    state.midiOutput?.send([0x80 | MIDI_CHANNEL, note, 0]);
+    try { output.send([0x80 | MIDI_CHANNEL, note, 0]); }
+    catch (_error) { /* The original output may already have disconnected. */ }
   });
   state.midiNoteTimers.clear();
 }
@@ -950,8 +1608,10 @@ function panicMidi() {
 
 function setOutput(output) {
   if (!['audio', 'midi'].includes(output)) return;
-  if (state.playing) stopPlayback();
+  if (state.playing || state.preparing) stopPlayback();
   state.output = output;
+  state.midiPacer?.reset();
+  renderSoundControls();
   dom.outputButtons.forEach((button) => {
     const selected = button.dataset.output === output;
     button.classList.toggle("is-selected", selected);
@@ -964,7 +1624,7 @@ function setOutput(output) {
 }
 
 function seekFromPointer(event) {
-  if (!state.recording) return;
+  if (!state.recording || state.sourceMode === "live") return;
   const bounds = dom["waveform"].getBoundingClientRect();
   const progress = clamp((event.clientX - bounds.left) / bounds.width, 0, 1);
   state.cursor = Math.round(progress * (state.maxSteps - 1));
@@ -972,6 +1632,13 @@ function seekFromPointer(event) {
 }
 
 function updatePlayhead() {
+  if (state.sourceMode === "live") {
+    dom.playhead.setAttribute("d", "");
+    dom["wave-progress"].textContent = "LIVE";
+    dom.waveform.setAttribute("aria-valuetext", "Live stream; seeking is unavailable");
+    return;
+  }
+  dom.waveform.removeAttribute?.("aria-valuetext");
   const progress = state.maxSteps > 1 ? clamp(state.cursor / (state.maxSteps - 1), 0, 1) : 0;
   dom.playhead.setAttribute("d", `M${(progress * 900).toFixed(2)} 0v190`);
   dom["wave-progress"].textContent = `${Math.round(progress * 100)}%`;
@@ -993,85 +1660,51 @@ function renderScale() {
   dom["scale-copy"].textContent = `${NOTE_NAMES[root]} ${scaleLabel}`;
 }
 
-function quantizeNote(value) {
-  const target = clamp(Math.round(value), 0, 127);
-  const root = dom["scale-root"].selectedIndex;
-  const intervals = SCALE_INTERVALS[dom["scale-name"].value] || SCALE_INTERVALS.chromatic;
-  let best = target;
-  let bestDistance = Infinity;
-  for (let candidate = Math.max(0, target - 12); candidate <= Math.min(127, target + 12); candidate += 1) {
-    const relative = (candidate - root + 120) % 12;
-    if (!intervals.includes(relative)) continue;
-    const distance = Math.abs(candidate - target);
-    if (distance < bestDistance) {
-      best = candidate;
-      bestDistance = distance;
-    }
-  }
-  return best;
-}
-
 function updateControlReadouts() {
   dom["attack-output"].textContent = `${(Number(dom.attack.value) / 100).toFixed(2)}s`;
   dom["release-output"].textContent = `${(0.05 + Number(dom.release.value) / 100 * 1.2).toFixed(2)}s`;
   dom["brightness-output"].textContent = `${dom.brightness.value}%`;
-  dom["voice-name"].textContent = `${dom["wave-type"].selectedOptions[0].textContent.toUpperCase()} / 01`;
+  renderHarmony();
+  renderSoundControls();
 }
 
 function applySavedControls() {
-  const controls = state.saved.controls || {};
-  const values = {
-    tempo: controls.tempo ?? 96,
-    "steps-per-beat": controls.stepsPerBeat ?? 2,
-    "wave-type": controls.waveType ?? "triangle",
-    attack: controls.attack ?? 8,
-    release: controls.release ?? 38,
-    brightness: controls.brightness ?? 64,
-    "scale-root": controls.scaleRoot ?? "C",
-    "scale-name": controls.scaleName ?? "minor-pentatonic"
-  };
-  Object.entries(values).forEach(([id, value]) => {
-    if (dom[id]) dom[id].value = String(value);
-  });
-  state.output = controls.output === "midi" ? "midi" : "audio";
+  applyMusicalControls(state.saved.controls);
+  state.output = state.saved.controls?.output === "midi" ? "midi" : "audio";
+  renderSoundControls();
   dom.outputButtons.forEach((button) => {
     const selected = button.dataset.output === state.output;
     button.classList.toggle("is-selected", selected);
     button.setAttribute("aria-checked", String(selected));
   });
-  updateControlReadouts();
 }
 
 function loadSavedSettings() {
   try {
     const parsed = JSON.parse(localStorage.getItem(SETTINGS_KEY) || "{}");
-    return parsed && typeof parsed === "object" ? parsed : {};
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
   } catch (_error) {
     return {};
   }
 }
 
 function saveSettings() {
-  state.saved.controls = {
-    tempo: Number(dom.tempo.value),
-    stepsPerBeat: Number(dom["steps-per-beat"].value),
-    waveType: dom["wave-type"].value,
-    attack: Number(dom.attack.value),
-    release: Number(dom.release.value),
-    brightness: Number(dom.brightness.value),
-    scaleRoot: dom["scale-root"].value,
-    scaleName: dom["scale-name"].value,
-    output: state.output
-  };
+  commitActiveTab();
+  state.saved.controls = { ...readMusicalControls(), output: state.output };
   if (state.recording) {
-    state.saved.lastRecording = state.recording.id;
-    state.saved.mappingsByRecording = state.saved.mappingsByRecording || {};
-    state.saved.mappingsByRecording[state.recording.id] = state.mappings.map(({ id: _id, ...mapping }) => mapping);
+    if (state.sourceMode !== "live") state.saved.lastRecording = state.recording.id;
+    if (!state.saved.workspaces || typeof state.saved.workspaces !== "object" || Array.isArray(state.saved.workspaces)) state.saved.workspaces = {};
+    state.saved.workspaces[state.recording.id] = {
+      activeIndex: Math.max(0, state.tabs.findIndex((tab) => tab.id === state.activeTabId)),
+      tabs: state.tabs.map(Music.serializeTab)
+    };
   }
   try {
     localStorage.setItem(SETTINGS_KEY, JSON.stringify(state.saved));
+    return true;
   } catch (_error) {
-    // Device-local persistence is optional; the live session still works.
+    dom["workspace-status"].textContent = "Browser storage is unavailable or full. This session still works; export presets before closing it.";
+    return false;
   }
 }
 
@@ -1102,16 +1735,12 @@ function destinationFor(identifier) {
   return DESTINATIONS.find((item) => item.id === identifier);
 }
 
-function playbackInterval() {
-  const bpm = clamp(Number(dom.tempo.value) || 96, 20, 240);
-  const steps = clamp(Number(dom["steps-per-beat"].value) || 2, 1, 4);
-  return 60000 / bpm / steps;
-}
-
 function applyCurve(value, curve) {
   if (curve === "inverse") return 1 - value;
   if (curve === "smooth") return value * value * (3 - 2 * value);
   if (curve === "exponential") return value * value;
+  if (curve === "steps") return Math.round(value * 4) / 4;
+  if (curve === "threshold") return value >= 0.5 ? 1 : 0;
   return value;
 }
 
@@ -1190,4 +1819,327 @@ function isEditable(target) {
 
 function escapeHtml(value) {
   return String(value).replace(/[&<>"']/g, (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#039;" })[character]);
+}
+
+async function loadParameterCatalog() {
+  const response = await fetch("/api/catalog", { cache: "no-cache" });
+  if (!response.ok) throw new Error("Could not load the Hydrasynth parameter catalog.");
+  const catalog = await response.json();
+  state.catalogSummary = Parameters.install(catalog);
+  state.catalogReady = true;
+  dom["live-connect"].disabled = false;
+  dom["catalog-status"].textContent = `${state.catalogSummary.available} hardware destinations available, including ${state.catalogSummary.nrpn} NRPN parameters. ${state.catalogSummary.unavailable} reference entries have unsupported ranges or address conflicts. Legacy MIDI reference; verify behavior on your firmware.`;
+}
+
+function ensureTargets(mapping) {
+  if (!Array.isArray(mapping.targets)) mapping.targets = [{ destination: mapping.destination, minimum: mapping.minimum,
+    maximum: mapping.maximum, curve: mapping.curve, enabled: mapping.enabled !== false }];
+  return mapping.targets;
+}
+
+function syncPrimaryTarget(mapping) {
+  if (mapping.targets?.length) Object.assign(mapping, mapping.targets[0]);
+}
+
+function targetLabel(destination, value) {
+  const choice = destination.choices?.find((item) => item.value === Math.round(value));
+  return choice ? `${choice.label} (${choice.value})` : String(Math.round(value * 100) / 100);
+}
+
+function renderMappingTarget(mapping, target, index) {
+  const destination = destinationFor(target.destination);
+  const row = document.createElement("div"); row.className = "mapping-target";
+  const enabled = document.createElement("input"); enabled.type = "checkbox"; enabled.checked = target.enabled !== false;
+  enabled.disabled = Boolean(destination.unavailable); enabled.setAttribute("aria-label", `Enable ${destination.label}`);
+  enabled.addEventListener("change", () => { target.enabled = enabled.checked; mappingChanged(mapping, false); });
+  const name = document.createElement("button"); name.type = "button"; name.className = "target-name";
+  const label = document.createElement("b"); label.textContent = destination.label;
+  const group = document.createElement("small"); group.textContent = destination.group + (destination.hardware ? " · MIDI" : "");
+  name.append(label, group); name.title = destination.unavailable || destination.hint || "Choose a different destination";
+  name.addEventListener("click", () => openParameterPicker(mapping.id, index));
+  const remove = document.createElement("button"); remove.type = "button"; remove.className = "remove-source-button"; remove.textContent = "×";
+  remove.disabled = mapping.targets.length === 1; remove.setAttribute("aria-label", `Remove ${destination.label}`);
+  remove.addEventListener("click", () => { mapping.targets.splice(index, 1); mappingChanged(mapping, false); });
+  const curveLabel = document.createElement("label"); curveLabel.textContent = "Curve";
+  const curve = document.createElement("select"); curve.dataset.role = "target-curve";
+  for (const [value, text] of [["linear", "Linear"], ["smooth", "Soft S"], ["exponential", "Exponential"], ["inverse", "Inverted"], ["steps", "5 levels"], ["threshold", "Switch"]]) curve.add(new Option(text, value));
+  curve.value = target.curve || "linear"; curve.addEventListener("change", () => { target.curve = curve.value; mappingChanged(mapping, false); });
+  curveLabel.append(curve);
+  row.append(enabled, name, remove, curveLabel);
+  for (const key of ["minimum", "maximum"]) {
+    const wrapper = document.createElement("label"); wrapper.textContent = key === "minimum" ? "From" : "To";
+    const input = document.createElement("input"); input.type = "number"; input.min = destination.min; input.max = destination.max;
+    input.step = destination.valueSpec?.kind === "bipolar" ? "0.1" : "1"; input.value = target[key]; input.dataset.role = key;
+    input.title = targetLabel(destination, target[key]);
+    input.addEventListener("change", () => {
+      target[key] = clamp(Number(input.value) || 0, destination.min, destination.max); mappingChanged(mapping, false);
+    });
+    wrapper.append(input); row.append(wrapper);
+  }
+  if (destination.choices || destination.hint || destination.unavailable) {
+    const detail = document.createElement("small"); detail.className = "target-detail";
+    detail.textContent = destination.unavailable || destination.hint || `${targetLabel(destination, target.minimum)} → ${targetLabel(destination, target.maximum)}`;
+    row.append(detail);
+  }
+  row.classList.toggle("is-disabled", target.enabled === false || Boolean(destination.unavailable));
+  return row;
+}
+
+function openParameterPicker(mappingId, targetIndex = null) {
+  state.picker = { mappingId, targetIndex, selected: new Set(), page: 0, filtered: [] };
+  dom["picker-search"].value = "";
+  dom["picker-group"].replaceChildren(new Option("All groups", ""));
+  [...new Set(DESTINATIONS.map((item) => item.group))].forEach((group) => dom["picker-group"].add(new Option(group, group)));
+  dom["picker-description"].textContent = targetIndex === null
+    ? `Each input recipe supports ${MAX_TARGETS} destinations. Select several or add a whole group.` : "Choose a replacement destination.";
+  dom["parameter-picker"].showModal(); renderParameterPicker(); dom["picker-search"].focus();
+}
+
+function bindParameterPicker() {
+  dom["picker-close"].addEventListener("click", () => dom["parameter-picker"].close());
+  for (const id of ["picker-search", "picker-group"]) dom[id].addEventListener("input", () => { state.picker.page = 0; renderParameterPicker(); });
+  dom["picker-prev"].addEventListener("click", () => { state.picker.page--; renderParameterPicker(); });
+  dom["picker-next"].addEventListener("click", () => { state.picker.page++; renderParameterPicker(); });
+  dom["picker-clear"].addEventListener("click", () => { state.picker.selected.clear(); renderParameterPicker(); });
+  for (const [id, all] of [["picker-select-page", false], ["picker-select-group", true]]) {
+    dom[id].addEventListener("click", () => {
+      const picker = state.picker;
+      const mapping = state.mappings.find((item) => item.id === picker.mappingId);
+      const used = new Set(ensureTargets(mapping).map((target) => target.destination));
+      const available = picker.filtered.filter((item) => !item.unavailable && !used.has(item.id));
+      const options = all ? available : picker.filtered.slice(picker.page * 40, picker.page * 40 + 40).filter((item) => !item.unavailable && !used.has(item.id));
+      for (const option of options) {
+        if (picker.selected.size >= MAX_TARGETS - mapping.targets.length) break;
+        picker.selected.add(option.id);
+      }
+      renderParameterPicker();
+    });
+  }
+  dom["picker-add"].addEventListener("click", () => {
+    const picker = state.picker;
+    const mapping = state.mappings.find((item) => item.id === picker.mappingId);
+    if (!mapping) { dom["parameter-picker"].close(); return; }
+    const additions = [...picker.selected].map((id) => destinationFor(id)).filter((item) => item && !item.unavailable).map((item) =>
+      ({ destination: item.id, minimum: item.from, maximum: item.to, curve: "linear", enabled: true }));
+    if (picker.targetIndex !== null && additions.length) mapping.targets[picker.targetIndex] = additions[0];
+    else mapping.targets.push(...additions.slice(0, MAX_TARGETS - mapping.targets.length));
+    mappingChanged(mapping, false); dom["parameter-picker"].close();
+  });
+}
+
+function renderParameterPicker() {
+  const picker = state.picker;
+  if (!picker) return;
+  const mapping = state.mappings.find((item) => item.id === picker.mappingId);
+  if (!mapping) return;
+  const used = new Set(ensureTargets(mapping).filter((_, index) => index !== picker.targetIndex).map((target) => target.destination));
+  const query = dom["picker-search"].value.trim().toLowerCase().replaceAll("mutant", "mutator");
+  const group = dom["picker-group"].value;
+  picker.filtered = DESTINATIONS.filter((item) => (!group || item.group === group)
+    && `${item.label} ${item.group} ${item.id}`.toLowerCase().replaceAll("mutant", "mutator").includes(query));
+  const pages = Math.max(1, Math.ceil(picker.filtered.length / 40));
+  picker.page = clamp(picker.page, 0, pages - 1);
+  dom["picker-results"].replaceChildren(...picker.filtered.slice(picker.page * 40, picker.page * 40 + 40).map((item) => {
+    const row = document.createElement("label"); row.className = "picker-result";
+    const input = document.createElement("input"); input.type = "checkbox"; input.checked = picker.selected.has(item.id);
+    input.disabled = Boolean(item.unavailable) || used.has(item.id);
+    const copy = document.createElement("span"); const label = document.createElement("b"); label.textContent = item.label;
+    const detail = document.createElement("small"); detail.textContent = item.unavailable || `${item.group} · ${item.min} to ${item.max}${used.has(item.id) ? " · already added" : ""}`;
+    copy.append(label, detail); row.append(input, copy);
+    input.addEventListener("change", () => {
+      if (input.checked) {
+        if (picker.targetIndex !== null) picker.selected.clear();
+        else if (picker.selected.size >= MAX_TARGETS - mapping.targets.length) { input.checked = false; return; }
+        picker.selected.add(item.id);
+      } else picker.selected.delete(item.id);
+      renderParameterPicker();
+    });
+    return row;
+  }));
+  dom["picker-page"].textContent = `${picker.page + 1} / ${pages} · ${picker.filtered.length} matches`;
+  dom["picker-prev"].disabled = picker.page === 0; dom["picker-next"].disabled = picker.page >= pages - 1;
+  dom["picker-select-page"].disabled = dom["picker-select-group"].disabled = picker.targetIndex !== null;
+  dom["picker-status"].textContent = `${picker.selected.size} selected · ${picker.targetIndex !== null ? "replacing one destination" : `${MAX_TARGETS - mapping.targets.length - picker.selected.size} spaces left in this recipe`}. Hardware entries require MIDI; browser preview plays the musical and preview controls.`;
+  dom["picker-add"].disabled = !picker.selected.size;
+}
+
+function generateEngineMappings(count, style) {
+  const basics = Music.randomMappings(state.fields, 8, style);
+  const entries = Parameters.entries.filter((entry) => entry.kind === "nrpn" && entry.randomEligible);
+  for (let i = entries.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [entries[i], entries[j]] = [entries[j], entries[i]]; }
+  const used = new Set(basics.map((mapping) => Parameters.command(destinationFor(mapping.destination), mapping.minimum)?.key));
+  const targets = [];
+  for (const entry of entries) {
+    const key = Parameters.encode(entry, entry.min)?.key;
+    if (!key || used.has(key) || targets.length + basics.length >= count) continue;
+    used.add(key);
+    let minimum = entry.min, maximum = entry.max;
+    if (!entry.discrete && style !== "wild") {
+      minimum = entry.min + (entry.max - entry.min) * 0.15;
+      maximum = entry.min + (entry.max - entry.min) * (/Attack|Delay|Hold/.test(entry.label) ? 0.35 : 0.85);
+    }
+    targets.push({ destination: entry.id, minimum: Math.round(minimum), maximum: Math.round(maximum), curve: ["linear", "smooth", "inverse", "steps"][Math.floor(Math.random() * 4)], enabled: true });
+  }
+  const result = basics.map((mapping) => ({ ...mapping, targets: [{ destination: mapping.destination,
+    curve: mapping.curve, minimum: mapping.minimum, maximum: mapping.maximum, enabled: true }] }));
+  for (let i = 0; i < targets.length; i++) {
+    let mapping = result[i % Math.min(16, Math.max(8, Math.ceil((targets.length + 8) / MAX_TARGETS)))];
+    if (!mapping || mapping.targets.length >= MAX_TARGETS) {
+      mapping = { ...Music.randomMappings(state.fields, 4, style)[0], targets: [] };
+      result.push(mapping);
+    }
+    mapping.targets.push(targets[i]);
+  }
+  return result.slice(0, MAX_MAPPINGS).map((mapping) => ({ ...mapping, ...mapping.targets[0] }));
+}
+
+function bindLiveInput() {
+  dom["live-url"].value = state.saved.live?.url || "ws://localhost:8765";
+  dom["live-reconnect"].checked = state.saved.live?.reconnect !== false;
+  dom["live-connect"].addEventListener("click", connectLive);
+  dom["live-disconnect"].addEventListener("click", () => { disconnectLive(); updateLiveStatus(); });
+  dom["live-reset-ranges"].addEventListener("click", () => { state.live?.resetRanges(); state.livePlot?.clear(); showToast("Live input ranges reset"); });
+}
+
+function disconnectLive() {
+  window.clearTimeout(state.liveConnectTimer);
+  state.liveWanted = false;
+  state.liveGeneration++;
+  window.clearTimeout(state.liveRetry); window.clearTimeout(state.liveRenderTimer);
+  state.liveRetry = state.liveRenderTimer = null;
+  const socket = state.liveSocket; state.liveSocket = null;
+  if (socket) { socket.onclose = socket.onmessage = socket.onerror = socket.onopen = null; socket.close(); }
+  if (state.sourceMode === "live") stopPlayback();
+  state.liveStatus = "Disconnected";
+  if (dom["live-disconnect"]) dom["live-disconnect"].disabled = true;
+}
+
+function connectLive() {
+  let url;
+  try {
+    url = new URL(dom["live-url"].value.trim());
+    if (!["ws:", "wss:"].includes(url.protocol) || url.username || url.password || url.hash) throw new Error("Use a ws:// or wss:// stream address.");
+    if (window.location.protocol === "https:" && url.protocol === "ws:") throw new Error("An HTTPS page needs a wss:// stream, or open this dashboard over local HTTP.");
+  } catch (error) { showToast(error.message || "Enter a valid WebSocket address"); return; }
+  stopPlayback(); saveSettings(); disconnectLive();
+  state.sourceMode = "live"; state.live = new Live.Stream(); state.livePlot = new Map(); state.liveWanted = true;
+  state.liveUrl = url.href; state.liveAttempts = 0; state.fields = []; state.fieldIndex = new Map();
+  state.selectionGeneration++; state.seriesCache.clear();
+  state.recording = { id: `live:${url.href}`, name: "Live RAPP", channels: [], frames: 0, size_bytes: 0 };
+  state.liveNeedsDefaults = !state.saved.workspaces?.[state.recording.id];
+  const workspace = Music.restoreWorkspace(state.saved, state.recording.id, [], () => state.nextMappingId++, () => []);
+  state.tabs = workspace.tabs; state.activeTabId = state.tabs[workspace.activeIndex].id;
+  state.mappings = activeTab().mappings; state.focusedMappingId = state.mappings[0]?.id || null;
+  applyMusicalControls(activeTab().controls); state.cursor = 0;
+  dom["recording-title"].textContent = "Live RAPP";
+  dom["recording-detail"].textContent = url.href;
+  state.saved.live = { url: url.href, reconnect: dom["live-reconnect"].checked };
+  renderRecordingsForLive(); renderWorkspaces(); renderMappings(); saveSettings();
+  openLiveSocket(state.liveGeneration);
+  state.liveRenderTimer = window.setTimeout(refreshLiveView, 250);
+}
+
+function renderRecordingsForLive() {
+  dom["recording-list"].querySelectorAll(".recording").forEach((button) => { button.classList.remove("is-selected"); button.setAttribute("aria-selected", "false"); });
+}
+
+function openLiveSocket(generation) {
+  if (!state.liveWanted || generation !== state.liveGeneration) return;
+  state.liveStatus = state.liveAttempts ? "Reconnecting…" : "Connecting…"; updateLiveStatus();
+  let socket;
+  try { socket = new WebSocket(state.liveUrl); }
+  catch (error) { state.liveStatus = error.message; state.liveWanted = false; updateLiveStatus(); return; }
+  state.liveSocket = socket;
+  dom["live-disconnect"].disabled = false;
+  const current = () => generation === state.liveGeneration && socket === state.liveSocket;
+  window.clearTimeout(state.liveConnectTimer);
+  state.liveConnectTimer = window.setTimeout(() => {
+    if (current() && socket.readyState === WebSocket.CONNECTING) {
+      state.liveStatus = "Connection timed out · check address and browser permissions";
+      socket.close(); updateLiveStatus();
+    }
+  }, 10000);
+  socket.onopen = () => {
+    if (!current()) return;
+    window.clearTimeout(state.liveConnectTimer);
+    state.liveAttempts = 0; state.liveStatus = "Connected · waiting for data";
+    dom["live-disconnect"].disabled = false; updateLiveStatus();
+  };
+  socket.onmessage = (event) => {
+    if (!current()) return;
+    if (typeof event.data !== "string" || event.data.length > 8 * 1024 * 1024) { state.live.invalid++; return; }
+    try {
+      const frame = JSON.parse(event.data);
+      state.liveDiscoveryPending = state.live.ingest(frame, performance.now()) || state.liveDiscoveryPending;
+    } catch (_error) { state.live.invalid++; }
+  };
+  socket.onerror = () => { if (current()) { state.liveStatus = "Connection error · check address and network"; updateLiveStatus(); } };
+  socket.onclose = () => {
+    if (!current()) return;
+    window.clearTimeout(state.liveConnectTimer);
+    state.liveSocket = null; stopPlayback();
+    // Old values cannot look fresh after a reconnect, even if it is immediate.
+    for (const channel of state.live.channels.values()) channel.at = -Infinity;
+    state.live.lastAt = null;
+    if (state.liveWanted && dom["live-reconnect"].checked) {
+      const delay = Math.min(10000, 1000 * 2 ** Math.min(state.liveAttempts++, 4));
+      state.liveStatus = `Disconnected · retrying in ${delay / 1000}s`;
+      state.liveRetry = window.setTimeout(() => openLiveSocket(generation), delay);
+    } else state.liveStatus = "Disconnected";
+    updateLiveStatus();
+  };
+}
+
+function updateLiveStatus() {
+  if (!dom["live-status"]) return;
+  let label = state.liveStatus;
+  if (state.liveSocket?.readyState === 1 && state.live?.lastAt !== null) {
+    const age = performance.now() - state.live.lastAt;
+    label = age > 3000 ? "Stream idle · waiting for fresh data" : `${state.live.channels.size} channels · ${state.live.fields.length} fields · ${state.live.frames} frames`;
+  }
+  dom["live-status"].textContent = label + (state.live?.invalid ? ` · ${state.live.invalid} invalid frames ignored` : "");
+}
+
+function refreshLiveView() {
+  if (state.sourceMode !== "live" || !state.liveWanted) return;
+  if (state.liveDiscoveryPending) {
+    state.liveDiscoveryPending = false; state.fields = state.live.fields; state.fieldIndex = new Map(state.fields.map((field) => [field.key, field]));
+    if (state.liveNeedsDefaults && state.fields.length) {
+      state.mappings = createDefaultMappings(); state.focusedMappingId = state.mappings[0]?.id;
+      state.liveNeedsDefaults = false;
+    }
+    renderWorkspaces(); renderMappings(); saveSettings();
+  }
+  dom["recording-detail"].textContent = `${state.liveUrl} · ${state.live?.channels.size || 0} channels · latest values`;
+  updateLiveStatus(); drawLiveWaveform();
+  state.liveRenderTimer = window.setTimeout(refreshLiveView, 250);
+}
+
+function liveMappingValue(mapping, now) {
+  const samples = mapping.sources.map((source) => state.live?.read(source, now));
+  if (!samples.length || samples.some((sample) => !sample)) return null;
+  const values = samples.map((sample) => sample.normalized);
+  let value = combineValues(values, mapping.operator, mapping.sources.map((source) => source.weight));
+  if (mapping.operator === "sum") value /= values.length;
+  if (mapping.operator === "difference") value = (value + 1) / 2;
+  return clamp(value, 0, 1);
+}
+
+function drawLiveWaveform() {
+  if (state.sourceMode !== "live") return;
+  const mapping = state.mappings.find((item) => item.id === state.focusedMappingId);
+  if (!mapping) { clearWaveform("Waiting for RAPP data and mappings."); return; }
+  const now = performance.now();
+  const value = liveMappingValue(mapping, now);
+  if (value === null) { clearWaveform("Waiting for fresh data from every source in this recipe."); return; }
+  state.livePlot ||= new Map();
+  const history = state.livePlot.get(mapping.id) || [];
+  history.push([now, value]);
+  if (history.length > 256) history.shift();
+  if (!state.livePlot.has(mapping.id) && state.livePlot.size >= MAX_MAPPINGS * MAX_TABS) state.livePlot.delete(state.livePlot.keys().next().value);
+  state.livePlot.set(mapping.id, history);
+  const points = history.map((point, index, all) => [index / Math.max(1, all.length - 1), point[1]]);
+  renderWaveform({ points, minimum: 0, maximum: 1 });
+  dom["wave-progress"].textContent = "LIVE";
+  updateSourceSummary();
 }

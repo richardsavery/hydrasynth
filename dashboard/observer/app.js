@@ -40,7 +40,7 @@ const CC_DEFINITIONS = new Map([
   [92, { name: "Delay Mix", short: "DELAY MIX", group: "Effects" }],
   [65, { name: "Reverb Time", short: "REVERB TIME", group: "Effects" }],
   [67, { name: "Reverb Tone", short: "REVERB TONE", group: "Effects" }],
-  [93, { name: "Reverb Mix", short: "REVERB MIX", group: "Effects" }],
+  [91, { name: "Reverb Mix", short: "REVERB MIX", group: "Effects" }],
   [16, { name: "Macro 1", short: "MACRO 1", group: "Macros" }],
   [17, { name: "Macro 2", short: "MACRO 2", group: "Macros" }],
   [18, { name: "Macro 3", short: "MACRO 3", group: "Macros" }],
@@ -117,7 +117,7 @@ function cacheDom() {
   [
     "connection-label", "connection-detail", "connection-light",
     "error-banner", "error-title", "error-message", "mode-badge",
-    "patch-bank", "patch-number", "device-name", "midi-route",
+    "patch-bank", "patch-bank-label", "patch-number-label", "patch-number", "device-name", "midi-route",
     "stream-orbit", "stat-sequence", "stat-queue", "stat-jobs",
     "stat-dropped", "health-fill", "health-caption", "active-note-count",
     "midi-channel", "keyboard", "note-readout", "expression-readout",
@@ -975,6 +975,8 @@ function renderPatch(snapshot) {
   const bridge = objectOrEmpty(snapshot.bridge);
   const connection = objectOrEmpty(snapshot.connection);
   const status = objectOrEmpty(snapshot.status);
+  const signalLab = objectOrEmpty(snapshot.signal_lab);
+  const previewVoice = signalLab.output === "browser audio" ? firstString(signalLab.voice_name) : "";
   const bank = firstString(patch.bank, serverState.bank);
   const number = boundedInteger(patch.number ?? patch.program ?? serverState.program, 0, 9999);
   const device = firstString(
@@ -994,9 +996,12 @@ function renderPatch(snapshot) {
 
   setText(
     dom["patch-bank"],
-    bank && bank !== "?" ? bank.slice(0, 2).toUpperCase() : "—"
+    previewVoice ? "♪" : bank && bank !== "?" ? bank.slice(0, 2).toUpperCase() : "—"
   );
-  setText(dom["patch-number"], number === null ? "---" : String(number).padStart(3, "0"));
+  setText(dom["patch-bank-label"], previewVoice ? "ENGINE" : "BANK");
+  setText(dom["patch-number-label"], previewVoice ? "VOICE" : "PROGRAM");
+  dom["patch-number"].classList.toggle("is-preview-voice", Boolean(previewVoice));
+  setText(dom["patch-number"], previewVoice || (number === null ? "---" : String(number).padStart(3, "0")));
   setText(dom["device-name"], device);
   setText(
     dom["midi-route"],
@@ -1004,6 +1009,9 @@ function renderPatch(snapshot) {
       ? `${source} → ${destination}`
       : source || destination || "MIDI route not reported"
   );
+  if (signalLab.output === "Hydrasynth MIDI" && bank && bank !== "?") {
+    setText(dom["midi-route"], "Signal Lab · bank / patch sent on MIDI channel 1");
+  }
 }
 
 function renderTransport(snapshot) {

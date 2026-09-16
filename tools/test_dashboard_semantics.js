@@ -17,6 +17,7 @@ const context = vm.createContext({
   Element: class Element {}
 });
 
+vm.runInContext(fs.readFileSync(path.join(projectRoot, "dashboard", "sonification.js"), "utf8"), context);
 vm.runInContext(
   `${source}
 globalThis.__dashboardTests = {
@@ -66,8 +67,16 @@ assert.deepEqual(
   ], "average").points, (point) => Array.from(point)),
   [[0, 0.5], [1, 0.5]]
 );
+const fixedComposite = combineSeries([
+  { points: [[0, 25], [1, 50]], minimum: 0, maximum: 100 },
+  { points: [[0, 50], [1, 75]], minimum: 0, maximum: 100 }
+], "average", [], true);
+assert.equal(fixedComposite.minimum, 0);
+assert.equal(fixedComposite.maximum, 1);
+assert.equal(fixedComposite.points[0][1], .375);
+assert.equal(fixedComposite.points[1][1], .625);
 assert.equal(destinationFor("cutoff").cc, 74);
-assert.equal(destinationFor("reverb").cc, 93);
+assert.equal(destinationFor("reverb").cc, 91);
 assert.equal(destinationFor("macro8").cc, 23);
 assert.equal(DESTINATIONS.filter((item) => item.cc !== undefined).length, 13);
 assert.deepEqual(Array.from(SCALE_INTERVALS["minor-pentatonic"]), [0, 3, 5, 7, 10]);
