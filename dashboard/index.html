@@ -6,7 +6,7 @@
   <meta name="color-scheme" content="dark">
   <meta name="theme-color" content="#10110f">
   <title>Hydra Signal Lab</title>
-  <meta name="description" content="Map RAPP JSONL recordings to browser audio and Hydrasynth MIDI parameters.">
+  <meta name="description" content="Turn RAPP movement into electronic drum grooves, browser sound, and Hydrasynth MIDI parameters.">
   <link rel="stylesheet" href="styles.css">
 </head>
 <body>
@@ -59,6 +59,7 @@
         <div class="live-actions"><button id="live-connect" class="small-button" type="button" disabled>Connect live</button><button id="live-disconnect" class="small-button" type="button" disabled>Disconnect</button></div>
         <label class="live-reconnect"><input id="live-reconnect" type="checkbox" checked> Reconnect automatically</label>
         <p id="live-status" class="sound-status" role="status">Not connected</p>
+        <button id="return-to-recording" class="small-button" type="button" hidden>Return to recording</button>
         <button id="live-reset-ranges" class="small-button" type="button">Reset learned ranges</button>
         <p class="output-note">Connect first, then press Preview. Incoming values drive the musical clock. Missing data silences playback after 3 seconds; choose a recording to return to file playback.</p>
       </div>
@@ -72,12 +73,21 @@
           <p id="recording-detail" class="stage-detail">The signal and mappings will appear here.</p>
         </div>
         <div class="transport-cluster">
-          <label>Tempo <input id="tempo" type="number" min="20" max="240" value="96" inputmode="numeric"> BPM</label>
-          <label>Steps / beat
+          <label id="transport-tempo">Tempo <input id="tempo" type="number" min="20" max="240" value="96" inputmode="numeric"> BPM</label>
+          <label id="transport-subdivision">Steps / beat
             <select id="steps-per-beat"><option value="1">1</option><option value="2" selected>2</option><option value="4">4</option><option value="8">8</option></select>
           </label>
-          <button id="preview-button" class="play-button" type="button" disabled><span>▶</span> Preview</button>
+          <label class="loop-control"><input id="loop" type="checkbox"> Loop recording</label>
+          <button id="preview-button" class="play-button" type="button" aria-describedby="playback-help" disabled><span>▶</span> Preview</button>
         </div>
+      </div>
+
+      <p id="playback-help" class="playback-help" role="status">Choose a recording or connect live movement data to enable Preview.</p>
+
+      <div class="output-choice engine-choice" role="radiogroup" aria-label="Sonification output">
+        <button class="is-selected" type="button" role="radio" aria-checked="true" data-output="audio"><span>◉</span><b>Browser preview</b><small>Available now</small></button>
+        <button type="button" role="radio" aria-checked="false" data-output="midi"><span>⌁</span><b>Hydrasynth MIDI</b><small id="midi-choice-detail">Connect when ready</small></button>
+        <button type="button" role="radio" aria-checked="false" data-output="drums"><span aria-hidden="true">▦</span><b>Movement drums</b><small>Electronic kit · no hardware</small></button>
       </div>
 
       <section class="mapping-workspace" aria-label="Mapping tabs and saved presets">
@@ -127,8 +137,54 @@
         </div>
       </section>
 
-      <section class="rhythm-panel" aria-labelledby="rhythm-title">
-        <div class="panel-meta"><div><span class="eyebrow">PULSE / 16 STEPS</span><b id="rhythm-title">Shape the rhythm</b></div><label class="loop-control"><input id="loop" type="checkbox"> Loop recording</label></div>
+      <section id="drum-panel" class="drum-panel" aria-labelledby="drum-title" hidden>
+        <div class="drum-heading">
+          <div><span class="eyebrow">ELECTRONIC DRUMS / 16 STEPS</span><h3 id="drum-title">Movement → groove</h3></div>
+          <span class="drum-engine-badge">BROWSER KIT</span>
+        </div>
+        <p class="drum-intro">The speed and change in your chosen signals become movement activity. Calm movement leaves space; active movement builds a denser, faster groove.</p>
+        <div class="drum-readouts">
+          <div class="drum-activity-card">
+            <div><label for="drum-activity">Movement activity</label><output id="drum-activity-value" for="drum-activity">0%</output></div>
+            <meter id="drum-activity" min="0" max="1" value="0" aria-label="Movement activity">0%</meter>
+            <div class="drum-endpoints"><span>CALM</span><span>ACTIVE</span></div>
+          </div>
+          <div class="drum-stat"><span>Tempo</span><div><output id="drum-tempo-readout">75</output><small>BPM</small></div></div>
+          <div class="drum-stat"><span>Density</span><div><output id="drum-density-readout">10</output><small>%</small></div></div>
+        </div>
+        <div class="drum-pattern-heading"><b>The groove</b><span>1 BAR · 4 BEATS · 6 VOICES</span></div>
+        <div class="drum-grid-scroll" tabindex="0" role="region" aria-label="Drum pattern; scroll horizontally to see all sixteen steps">
+          <div id="drum-grid" class="drum-grid" role="group" aria-label="Six drum voices across sixteen steps. Select a source and press Preview to hear the groove."></div>
+        </div>
+        <p id="drum-status" class="drum-status" role="status">Choose a recording or connect a live stream, then press Preview.</p>
+        <div class="drum-controls">
+          <div class="drum-character-controls">
+            <label>Electronic kit<select id="drum-kit"><option value="electro">Electro</option><option value="warehouse">Warehouse</option><option value="minimal">Minimal</option></select></label>
+            <label>Groove<select id="drum-style"><option value="straight">4 on the floor</option><option value="broken">Broken beat</option><option value="half">Half-time</option></select></label>
+          </div>
+          <div class="drum-response-controls">
+            <fieldset class="drum-response-range"><legend>Tempo range <span>BPM</span></legend><label>Calm<input id="drum-tempo-min" type="number" min="20" max="240" value="75" inputmode="numeric"></label><span class="drum-range-arrow" aria-hidden="true">→</span><label>Active<input id="drum-tempo-max" type="number" min="20" max="240" value="150" inputmode="numeric"></label></fieldset>
+            <fieldset class="drum-response-range"><legend>Rhythm density <span>%</span></legend><label>Calm<input id="drum-density-min" type="number" min="0" max="100" value="10" inputmode="numeric"></label><span class="drum-range-arrow" aria-hidden="true">→</span><label>Active<input id="drum-density-max" type="number" min="0" max="100" value="90" inputmode="numeric"></label></fieldset>
+          </div>
+          <div class="drum-slider-controls">
+            <label><span>Sensitivity <output id="drum-sensitivity-output" for="drum-sensitivity">50%</output></span><input id="drum-sensitivity" type="range" min="0" max="100" value="50" aria-label="Sensitivity"><small>How strongly movement drives the groove</small></label>
+            <label><span>Smoothing <output id="drum-smoothing-output" for="drum-smoothing">65%</output></span><input id="drum-smoothing" type="range" min="0" max="100" value="65" aria-label="Smoothing"><small>Higher values make gentler changes</small></label>
+            <label><span>Swing <output id="drum-swing-output" for="drum-swing">12%</output></span><input id="drum-swing" type="range" min="0" max="65" value="12" aria-label="Swing"><small>Give alternate steps a little delay</small></label>
+            <label><span>Fills <output id="drum-fill-output" for="drum-fill">35%</output></span><input id="drum-fill" type="range" min="0" max="100" value="35" aria-label="Fills"><small>Extra variation as movement builds</small></label>
+            <label><span>Kit volume <output id="drum-volume-output" for="drum-volume">65%</output></span><input id="drum-volume" type="range" min="0" max="100" value="65" aria-label="Kit volume"><small>Listening level, independent of activity</small></label>
+          </div>
+        </div>
+        <details id="drum-source-details" class="drum-source-details">
+          <summary>Choose what counts as movement</summary>
+          <p id="drum-source-summary">Automatic selection uses up to six movement signals.</p>
+          <p class="drum-source-help">Velocity fields measure speed directly. Otherwise, position changes drive activity. Other signals and arrays use their change over time. Choose up to six signals to combine. These choices are separate from your synth mappings, which stay saved for Browser preview and Hydrasynth MIDI.</p>
+          <button id="drum-auto-sources" class="small-button" type="button">Use automatic selection</button>
+          <div id="drum-sources" class="drum-sources" role="group" aria-label="Movement signals; select up to six"></div>
+        </details>
+      </section>
+
+      <section id="melodic-rhythm-panel" class="rhythm-panel" aria-labelledby="rhythm-title">
+        <div class="panel-meta"><div><span class="eyebrow">PULSE / 16 STEPS</span><b id="rhythm-title">Shape the rhythm</b></div></div>
         <div id="rhythm-pattern" class="rhythm-pattern" role="img" aria-label="16 hits in 16 steps"></div>
         <div class="rhythm-controls">
           <label>Hits / 16 <input id="density" type="number" min="0" max="16" value="16"></label>
@@ -157,13 +213,9 @@
 
     <aside class="rail output-rail" aria-labelledby="output-title">
       <span class="eyebrow">03 / OUTPUT</span>
-      <h2 id="output-title">Sound engine</h2>
-      <div class="output-choice" role="radiogroup" aria-label="Sonification output">
-        <button class="is-selected" type="button" role="radio" aria-checked="true" data-output="audio"><span>◉</span><b>Browser preview</b><small>Available now</small></button>
-        <button type="button" role="radio" aria-checked="false" data-output="midi"><span>⌁</span><b>Hydrasynth MIDI</b><small id="midi-choice-detail">Connect when ready</small></button>
-      </div>
+      <h2 id="output-title">Sound settings</h2>
 
-      <div class="mini-synth">
+      <div id="preview-synth" class="mini-synth">
         <div class="mini-synth-head"><span>Preview voice</span><b id="voice-name">GLASS / 01</b></div>
         <label>Sound<select id="preview-voice"><option value="custom">Custom</option><option value="glass">Glass</option><option value="pluck">Pluck</option><option value="warm">Warm pad</option><option value="reed">Reed</option><option value="bell">Bell</option><option value="bass">Soft bass</option></select></label>
         <label>Wave
@@ -174,7 +226,7 @@
         <label>Brightness <input id="brightness" type="range" min="0" max="100" value="64"><output id="brightness-output">64%</output></label>
       </div>
 
-      <div class="scale-card">
+      <div id="harmony-panel" class="scale-card">
         <div><span>Pitch language</span><b id="scale-copy">C minor pentatonic</b></div>
         <div class="scale-controls">
           <label>Root<select id="scale-root"><option>C</option><option>C♯</option><option>D</option><option>D♯</option><option>E</option><option>F</option><option>F♯</option><option>G</option><option>G♯</option><option>A</option><option>A♯</option><option>B</option></select></label>
@@ -191,7 +243,7 @@
         <p id="harmony-readout" class="sound-status" role="status">3 voices · scale thirds</p>
       </div>
 
-      <div class="sound-card">
+      <div id="sound-palette-panel" class="sound-card">
         <b>Sound changes</b>
         <div class="harmony-controls">
           <label>Mode<select id="sound-mode"><option value="off">Keep current</option><option value="cycle">Cycle palette</option><option value="random">Random palette</option><option value="mapped">Follow mapping</option></select></label>
@@ -222,7 +274,8 @@
       </div>
       <button id="connect-midi" class="connect-button" type="button">Connect MIDI device <span>→</span></button>
       <button id="panic-button" class="panic-button" type="button" hidden>Stop all MIDI notes</button>
-      <p class="output-note">Browser preview and MIDI share the same notes and rhythms. Preview includes drive, delay and reverb. Its macros control brightness, resonance, harmonics, detune, attack, release, echo and space; Hydrasynth macros follow the selected patch.</p>
+      <p id="melodic-output-note" class="output-note">Browser preview and MIDI share the same notes and rhythms. Preview includes drive, delay and reverb. Its macros control brightness, resonance, harmonics, detune, attack, release, echo and space; Hydrasynth macros follow the selected patch.</p>
+      <div id="drum-output-note" class="drum-output-note" hidden><b>Your movement. A whole kit.</b><p>A synthesized electronic kit plays in this browser: kick, snare, clap, closed and open hi-hats, and percussion. No synth, samples, or MIDI connection needed.</p><p>Choose movement signals and shape their response in the groove controls. Tap a drum name to mute that voice.</p><a href="#drum-panel">Show groove controls <span aria-hidden="true">↗</span></a></div>
     </aside>
   </main>
 
@@ -280,9 +333,11 @@
   </section>
 
   <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+  <script src="drums.js" defer></script>
   <script src="sonification.js" defer></script>
   <script src="parameters.js" defer></script>
   <script src="live.js" defer></script>
+  <script src="drum-workspace.js" defer></script>
   <script src="app.js" defer></script>
 </body>
 </html>

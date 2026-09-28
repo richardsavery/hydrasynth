@@ -17,7 +17,9 @@ const context = vm.createContext({
   Element: class Element {}
 });
 
-vm.runInContext(fs.readFileSync(path.join(projectRoot, "dashboard", "sonification.js"), "utf8"), context);
+for (const file of ["drums.js", "sonification.js", "drum-workspace.js"]) {
+  vm.runInContext(fs.readFileSync(path.join(projectRoot, "dashboard", file), "utf8"), context);
+}
 vm.runInContext(
   `${source}
 globalThis.__dashboardTests = {

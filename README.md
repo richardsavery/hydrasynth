@@ -13,6 +13,10 @@ dashboard reads the compressed files directly, discovers their channels and
 numeric fields, and reduces large tensors to a bounded series before they reach
 the browser.
 
+Choose **Movement drums** to turn overall motion into the tempo and density of
+an electronic drum groove played in the browser, with no MIDI hardware needed.
+See [Movement drums](docs/movement_drums.md) for sources, kit controls and presets.
+
 On a MacBook, clone the repository and run:
 
 ```sh

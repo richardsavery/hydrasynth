@@ -8,6 +8,10 @@ const CATALOG_DISPLAY_LIMIT = 160;
 const CATALOG_SEARCH_LIMIT = 240;
 const NRPN_TRANSPORT_CCS = new Set([6, 38, 96, 97, 98, 99]);
 const OBSERVER_SOURCE_KEY = "hydra-observer-source-v1";
+const DRUM_NAMES = new Map([
+  [36, "Kick"], [38, "Snare"], [39, "Clap"], [42, "Closed hat"],
+  [45, "Low tom"], [46, "Open hat"], [49, "Crash"], [51, "Ride"], [75, "Percussion"]
+]);
 
 const GROUP_ORDER = [
   "Oscillators",
@@ -121,6 +125,7 @@ function cacheDom() {
     "stream-orbit", "stat-sequence", "stat-queue", "stat-jobs",
     "stat-dropped", "health-fill", "health-caption", "active-note-count",
     "midi-channel", "keyboard", "note-readout", "expression-readout",
+    "performance-title", "performance-unit", "channel-label",
     "parameter-summary", "snapshot-age", "live-pulse", "parameter-search",
     "parameter-filter-form",
     "parameter-loading", "parameter-empty", "parameter-groups",
@@ -909,11 +914,13 @@ function renderConnection(snapshot) {
     const recording = firstString(signalLab.recording, "Signal Lab recording");
     const mappingCount = boundedInteger(signalLab.mapping_count, 0, 64) || 0;
     const compositeCount = boundedInteger(signalLab.composite_count, 0, 64) || 0;
-    setText(dom["connection-label"], "Signal Lab active");
+    const isDrums = signalLab.output === "electronic drums";
+    setText(dom["connection-label"], isDrums ? "Movement drums active" : "Signal Lab active");
     setText(
       dom["connection-detail"],
-      `${recording} · ${mappingCount} mapping${mappingCount === 1 ? "" : "s"}` +
-      (compositeCount ? ` · ${compositeCount} composite` : "")
+      isDrums ? `${recording} · ${drumGrooveDetail(signalLab.drums)}`
+        : `${recording} · ${mappingCount} mapping${mappingCount === 1 ? "" : "s"}` +
+          (compositeCount ? ` · ${compositeCount} composite` : "")
     );
   } else if (isSignalLab) {
     setText(dom["connection-label"], "Waiting for Signal Lab");
@@ -947,6 +954,18 @@ function renderConnection(snapshot) {
   dom["live-pulse"].classList.toggle("is-live", connected || isDemo);
 }
 
+function drumGrooveDetail(value) {
+  const drums = objectOrEmpty(value);
+  const activity = finiteNumber(drums.activity);
+  const tempo = boundedInteger(drums.tempo, 20, 240);
+  const density = boundedInteger(drums.density, 0, 100);
+  const details = [];
+  if (activity !== null && activity >= 0 && activity <= 1) details.push(`${Math.round(activity * 100)}% movement`);
+  if (tempo !== null) details.push(`${tempo} BPM`);
+  if (density !== null) details.push(`${density}% density`);
+  return details.join(" · ") || "Virtual electronic kit";
+}
+
 function connectionDetail(snapshot) {
   const bridge = objectOrEmpty(snapshot.bridge);
   const connection = objectOrEmpty(snapshot.connection);
@@ -976,7 +995,9 @@ function renderPatch(snapshot) {
   const connection = objectOrEmpty(snapshot.connection);
   const status = objectOrEmpty(snapshot.status);
   const signalLab = objectOrEmpty(snapshot.signal_lab);
-  const previewVoice = signalLab.output === "browser audio" ? firstString(signalLab.voice_name) : "";
+  const isDrums = signalLab.output === "electronic drums";
+  const previewVoice = isDrums ? firstString(signalLab.voice_name, "Electronic kit")
+    : signalLab.output === "browser audio" ? firstString(signalLab.voice_name) : "";
   const bank = firstString(patch.bank, serverState.bank);
   const number = boundedInteger(patch.number ?? patch.program ?? serverState.program, 0, 9999);
   const device = firstString(
@@ -999,17 +1020,19 @@ function renderPatch(snapshot) {
     previewVoice ? "♪" : bank && bank !== "?" ? bank.slice(0, 2).toUpperCase() : "—"
   );
   setText(dom["patch-bank-label"], previewVoice ? "ENGINE" : "BANK");
-  setText(dom["patch-number-label"], previewVoice ? "VOICE" : "PROGRAM");
+  setText(dom["patch-number-label"], isDrums ? "KIT" : previewVoice ? "VOICE" : "PROGRAM");
   dom["patch-number"].classList.toggle("is-preview-voice", Boolean(previewVoice));
   setText(dom["patch-number"], previewVoice || (number === null ? "---" : String(number).padStart(3, "0")));
-  setText(dom["device-name"], device);
+  setText(dom["device-name"], isDrums ? "Virtual electronic drum kit" : device);
   setText(
     dom["midi-route"],
     source && destination && source !== destination
       ? `${source} → ${destination}`
       : source || destination || "MIDI route not reported"
   );
-  if (signalLab.output === "Hydrasynth MIDI" && bank && bank !== "?") {
+  if (isDrums) {
+    setText(dom["midi-route"], "Signal Lab → browser speakers / headphones");
+  } else if (signalLab.output === "Hydrasynth MIDI" && bank && bank !== "?") {
     setText(dom["midi-route"], "Signal Lab · bank / patch sent on MIDI channel 1");
   }
 }
@@ -1067,6 +1090,8 @@ function renderTransport(snapshot) {
 function renderPerformance(snapshot) {
   const serverState = objectOrEmpty(snapshot.state);
   const status = objectOrEmpty(snapshot.status);
+  const signalLab = objectOrEmpty(snapshot.signal_lab);
+  const isDrums = signalLab.output === "electronic drums";
   const notes = arrayOrEmpty(serverState.active_notes)
     .map(normalizeNote)
     .filter(Boolean);
@@ -1079,15 +1104,19 @@ function renderPerformance(snapshot) {
     key.setAttribute("aria-hidden", String(!active));
   });
 
-  const noteNames = notes.map((note) => midiNoteName(note.note));
+  const noteNames = notes.map((note) => isDrums ? DRUM_NAMES.get(note.note) || `Drum ${note.note}` : midiNoteName(note.note));
+  setText(dom["performance-title"], isDrums ? "Drum hits" : "Tracked held notes");
+  setText(dom["performance-unit"], isDrums ? "hits" : "notes");
+  setText(dom["channel-label"], isDrums ? "OUT" : "CH");
   setText(dom["active-note-count"], notes.reduce((sum, note) => sum + note.count, 0));
   setText(
     dom["note-readout"],
-    noteNames.length ? noteNames.join(" · ") : "No notes held"
+    noteNames.length ? noteNames.join(" · ") : isDrums ? "Between drum hits" : "No notes held"
   );
   dom.keyboard.setAttribute(
     "aria-label",
-    noteNames.length ? `Active notes: ${noteNames.join(", ")}` : "No active notes"
+    noteNames.length ? `${isDrums ? "Drum hits" : "Active notes"}: ${noteNames.join(", ")}`
+      : isDrums ? "No active drum hits" : "No active notes"
   );
 
   const channel = boundedInteger(
@@ -1095,7 +1124,7 @@ function renderPerformance(snapshot) {
     1,
     16
   );
-  setText(dom["midi-channel"], channel ?? "—");
+  setText(dom["midi-channel"], isDrums ? "Audio" : channel ?? "—");
 
   const sustain = findCcValue(serverState.cc, 64);
   const sustainCopy = sustain === null ? "Sustain —" : sustain >= 64 ? "Sustain on" : "Sustain off";
@@ -1104,7 +1133,7 @@ function renderPerformance(snapshot) {
   const bendCopy = !bendIsRecent
     ? "Recent bend —"
     : `Recent bend ${signedPercent(state.pitchBend.value)}`;
-  setText(dom["expression-readout"], `${sustainCopy} · ${bendCopy}`);
+  setText(dom["expression-readout"], isDrums ? drumGrooveDetail(signalLab.drums) : `${sustainCopy} · ${bendCopy}`);
 }
 
 function normalizeNote(item) {

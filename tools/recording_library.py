@@ -441,6 +441,8 @@ class RecordingLibrary:
             "source_points": len(values),
             "minimum": minimum,
             "maximum": maximum,
+            "start_time_seconds": start_time,
+            "end_time_seconds": end_time,
             "duration_seconds": duration,
             "points": points,
         }

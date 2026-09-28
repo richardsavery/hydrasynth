@@ -17,7 +17,7 @@ const context = vm.createContext({
   performance: { now() { return 0; } }, Intl, URLSearchParams,
   fetch: async () => ({ ok: true }),
 });
-for (const file of ["sonification.js", "parameters.js", "live.js", "app.js"]) {
+for (const file of ["drums.js", "sonification.js", "parameters.js", "live.js", "drum-workspace.js", "app.js"]) {
   vm.runInContext(fs.readFileSync(path.join(__dirname, "../dashboard", file), "utf8"), context);
 }
 vm.runInContext("globalThis.player = {state, dom, controlsAt, runPlaybackTick, stopPlayback, playMidiNote, stopActiveMidiNotes, togglePlayback, Music, CONTROL_IDS, sendMidiPatch, changeSoundAtBoundary};", context);

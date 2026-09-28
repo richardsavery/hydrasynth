@@ -86,6 +86,8 @@ globalThis.HydraSonification = (() => {
     result.midiRate = [25, 50, 100].includes(Number(input.midiRate)) ? Number(input.midiRate) : 50;
     result.soundEvery = [16, 32, 64, 128].includes(Number(input.soundEvery)) ? Number(input.soundEvery) : 32;
     if (typeof input.patchList === "string") result.patchList = input.patchList.slice(0, 512);
+    result.output = ["audio", "midi", "drums"].includes(input.output) ? input.output : "audio";
+    if (globalThis.HydraDrums) Object.assign(result, globalThis.HydraDrums.settings(input));
     return result;
   }
 

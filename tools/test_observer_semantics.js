@@ -24,7 +24,7 @@ globalThis.__dashboardTests = {
   semanticParameterValue,
   parameterSurfaceSignature,
   snapshotEndpoint,
-  state, dom, renderPatch
+  state, dom, renderPatch, renderConnection, renderPerformance, drumGrooveDetail
 };`,
   context,
   { filename: "dashboard/observer/app.js" }
@@ -241,3 +241,43 @@ assert.equal(patchDom["patch-bank"].textContent, "A");
 assert.equal(patchDom["patch-number"].textContent, "001");
 assert.equal(patchDom["patch-number-label"].textContent, "PROGRAM");
 console.log("observer chord sound display tests: ok");
+
+const drumSnapshot = {
+  bridge: { mode: "signal-lab", service_running: true, connected: true },
+  signal_lab: {
+    output: "electronic drums", voice_name: "Electro", recording: "robot.jsonl",
+    drums: { activity: 0.56, tempo: 124, density: 68, style: "straight", kit: "electro" }
+  },
+  state: { active_notes: [{ note: 36, count: 1 }, { note: 42, count: 1 }] }
+};
+context.__dashboardTests.renderPatch(drumSnapshot);
+assert.equal(patchDom["patch-bank-label"].textContent, "ENGINE");
+assert.equal(patchDom["patch-number-label"].textContent, "KIT");
+assert.equal(patchDom["patch-number"].textContent, "Electro");
+assert.equal(patchDom["device-name"].textContent, "Virtual electronic drum kit");
+assert.match(patchDom["midi-route"].textContent, /browser speakers/);
+for (const id of ["connection-light", "connection-label", "connection-detail", "mode-badge", "live-pulse",
+  "performance-title", "performance-unit", "channel-label", "active-note-count", "note-readout", "midi-channel", "expression-readout"]) {
+  patchDom[id] = { textContent: "", classList: { toggle() {}, add() {} } };
+}
+patchDom.keyboard = { querySelectorAll: () => [], setAttribute() {} };
+context.__dashboardTests.renderConnection(drumSnapshot);
+assert.equal(patchDom["connection-label"].textContent, "Movement drums active");
+assert.equal(patchDom["connection-detail"].textContent, "robot.jsonl · 56% movement · 124 BPM · 68% density");
+context.__dashboardTests.renderPerformance(drumSnapshot);
+assert.equal(patchDom["performance-title"].textContent, "Drum hits");
+assert.equal(patchDom["note-readout"].textContent, "Kick · Closed hat");
+assert.equal(patchDom["midi-channel"].textContent, "Audio");
+assert.equal(patchDom["performance-unit"].textContent, "hits");
+assert.equal(context.__dashboardTests.drumGrooveDetail({ activity: Infinity, tempo: 999, density: -1 }), "Virtual electronic kit");
+assert.equal(context.__dashboardTests.drumGrooveDetail({ activity: 0, tempo: 20, density: 0 }), "0% movement · 20 BPM · 0% density");
+context.__dashboardTests.renderPerformance({ state: { active_notes: [{ note: 60, count: 1, channel: 1 }] } });
+assert.equal(patchDom["performance-title"].textContent, "Tracked held notes");
+assert.equal(patchDom["performance-unit"].textContent, "notes");
+assert.equal(patchDom["note-readout"].textContent, "C4");
+assert.equal(patchDom["midi-channel"].textContent, "1");
+context.__dashboardTests.renderConnection({ bridge: { mode: "signal-lab", service_running: true, connected: true },
+  signal_lab: { output: "browser audio", recording: "recording.jsonl", mapping_count: 2, composite_count: 1 } });
+assert.equal(patchDom["connection-label"].textContent, "Signal Lab active");
+assert.equal(patchDom["connection-detail"].textContent, "recording.jsonl · 2 mappings · 1 composite");
+console.log("observer movement drum display tests: ok");

@@ -1572,7 +1572,7 @@ class SnapshotStore:
 
 
 class SignalLabFeed:
-    """Thread-safe virtual MIDI feed published by the Signal Lab browser."""
+    """Thread-safe performance feed published by the Signal Lab browser."""
 
     def __init__(self, catalog: ParameterCatalog | None = None) -> None:
         self.store = SnapshotStore("signal-lab", catalog)
@@ -1630,6 +1630,25 @@ class SignalLabFeed:
             return None
         text = value.strip()
         return text[:maximum] if text else None
+
+    def _update_drums_locked(self, value: Any) -> None:
+        """Accept only known, finite groove telemetry; retain prior valid fields."""
+        if not isinstance(value, dict):
+            return
+        drums = self.metadata.setdefault("drums", {})
+        for name, minimum, maximum in (
+            ("activity", 0, 1), ("tempo", 20, 240), ("density", 0, 100)
+        ):
+            number = value.get(name)
+            if (isinstance(number, (int, float)) and not isinstance(number, bool)
+                    and minimum <= number <= maximum):
+                drums[name] = float(number)
+        for name, choices in (
+            ("style", ("straight", "broken", "half")),
+            ("kit", ("electro", "warehouse", "minimal")),
+        ):
+            if value.get(name) in choices:
+                drums[name] = value[name]
 
     def _event_locked(self, payload: dict[str, Any]) -> None:
         self.sequence += 1
@@ -1691,10 +1710,21 @@ class SignalLabFeed:
             composite_count = integer(payload.get("composite_count"))
             if recording is not None:
                 self.metadata["recording"] = recording
-            if output in {"audio", "midi"}:
-                self.metadata["output"] = (
-                    "Hydrasynth MIDI" if output == "midi" else "browser audio"
-                )
+            output_names = {"audio": "browser audio", "midi": "Hydrasynth MIDI", "drums": "electronic drums"}
+            if output in output_names:
+                next_output = output_names[output]
+                if next_output != self.metadata["output"]:
+                    self._expire_notes_locked(now, clear_all=True)
+                    self.metadata.pop("voice_name", None)
+                    self.metadata.pop("drums", None)
+                    if output == "drums":
+                        with self.store.lock:
+                            self.store.state["patch"] = {"bank": "?", "number": None}
+                            self.store.state["cc"] = []
+                            self.store.state["nrpn"] = []
+                self.metadata["output"] = next_output
+            if self.metadata["output"] == "electronic drums":
+                self._update_drums_locked(payload.get("drums"))
             if progress is not None:
                 self.metadata["progress"] = max(0.0, min(1.0, progress))
             if mapping_count is not None:
@@ -2878,6 +2908,8 @@ def handler_for(
                 "/sonification.js": "sonification.js",
                 "/parameters.js": "parameters.js",
                 "/live.js": "live.js",
+                "/drums.js": "drums.js",
+                "/drum-workspace.js": "drum-workspace.js",
                 "/observer": "observer/index.html",
                 "/observer/": "observer/index.html",
                 "/observer/index.html": "observer/index.html",
@@ -3521,6 +3553,42 @@ def run_self_test() -> int:
         raise AssertionError("oversized parameter batches must be rejected")
     except ValueError:
         pass
+    drum_values = {"activity": 0.65, "tempo": 122.5, "density": 70, "style": "broken", "kit": "warehouse"}
+    published = signal_feed.publish({
+        "output": "drums", "voice_name": "Warehouse", "patch": None,
+        "drums": {**drum_values, "unexpected": ["discard"]},
+        "notes": [{"number": note, "velocity": 90, "duration_ms": 150} for note in (36, 38, 42)],
+    })
+    assert published["accepted_notes"] == 3
+    drum_snapshot = signal_feed.snapshot()
+    assert drum_snapshot["signal_lab"]["output"] == "electronic drums"
+    assert drum_snapshot["signal_lab"]["drums"] == drum_values
+    assert drum_snapshot["bridge"]["destination"] == "ELECTRONIC DRUMS"
+    assert drum_snapshot["state"]["patch"]["number"] is None
+    assert not drum_snapshot["state"]["cc"] and not drum_snapshot["state"]["nrpn"]
+    assert {item["note"] for item in drum_snapshot["state"]["active_notes"]} == {36, 38, 42}
+    signal_feed.publish({"drums": {
+        "activity": float("nan"), "tempo": 9999, "density": -1,
+        "style": "unknown", "kit": ["electro"], "extra": "discard",
+    }})
+    assert signal_feed.snapshot()["signal_lab"]["drums"] == drum_values
+    signal_feed.publish({"drums": {"activity": True, "tempo": "120", "density": float("inf")}})
+    assert signal_feed.snapshot()["signal_lab"]["drums"] == drum_values
+    signal_feed.publish({"drums": {"activity": 10 ** 400, "tempo": -10 ** 400, "density": 10 ** 400}})
+    assert signal_feed.snapshot()["signal_lab"]["drums"] == drum_values
+    signal_feed.publish({"drums": [1, 2, 3]})
+    assert signal_feed.snapshot()["signal_lab"]["drums"] == drum_values
+    signal_feed.publish({"drums": {"activity": 0, "tempo": 20, "density": 0, "style": "straight", "kit": "electro"}})
+    assert signal_feed.snapshot()["signal_lab"]["drums"]["activity"] == 0
+    signal_feed.publish({"drums": {"activity": 1, "tempo": 240, "density": 100, "style": "half", "kit": "minimal"}})
+    assert signal_feed.snapshot()["signal_lab"]["drums"]["density"] == 100
+    signal_feed.publish({"stop": True})
+    assert not signal_feed.snapshot()["state"]["active_notes"]
+    signal_feed.publish({"output": "audio", "voice_name": "Glass"})
+    assert "drums" not in signal_feed.snapshot()["signal_lab"]
+    assert signal_feed.snapshot()["signal_lab"]["output"] == "browser audio"
+    signal_feed.publish({"output": "midi", "patch": {"bank": "C", "number": 9}})
+    assert signal_feed.snapshot()["state"]["patch"] == {"bank": "C", "number": 9}
     assert handler_for(store, b"{}", signal_lab_feed=signal_feed)
     print("hydra-dashboard self-test: ok")
     return 0

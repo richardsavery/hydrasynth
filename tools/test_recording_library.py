@@ -55,6 +55,8 @@ def main() -> int:
             "sample", "robot_joint_states", "data:1", reducer="value", limit=32
         )
         assert position["points"][0][1] == 2.0
+        assert position["start_time_seconds"] == position["end_time_seconds"] == 10.0
+        assert position["duration_seconds"] == 0.0
         energy = library.series(
             "sample",
             "activation_energy",
@@ -106,6 +108,30 @@ def main() -> int:
                 pass
             else:
                 raise AssertionError("invalid series batch was accepted")
+
+        # Sources with different start times and durations must retain their
+        # relative timing, even though each source's points use local 0..1 progress.
+        staggered_path = Path(directory) / "staggered.jsonl"
+        staggered_messages = [
+            {"channel": "arm", "labels": ["joint"], "data": [0], "t_recv": 100.0},
+            {"channel": "leg", "labels": ["joint"], "data": [2], "stamp": 100.25},
+            {"channel": "arm", "labels": ["joint"], "data": [1], "t_recv": 100.5},
+            {"channel": "leg", "labels": ["joint"], "data": [3], "stamp": 100.75},
+            {"channel": "arm", "labels": ["joint"], "data": [2], "t_recv": 101.0},
+        ]
+        staggered_path.write_text("\n".join(json.dumps(message) for message in staggered_messages) + "\n")
+        library.refresh()
+        aligned_sources = [{"channel": channel, "field": "data:0", "reducer": "value"}
+                           for channel in ("arm", "leg")]
+        arm, leg = library.series_batch("staggered", aligned_sources)
+        assert (arm["start_time_seconds"], arm["end_time_seconds"], arm["duration_seconds"]) == (100.0, 101.0, 1.0)
+        assert (leg["start_time_seconds"], leg["end_time_seconds"], leg["duration_seconds"]) == (100.25, 100.75, 0.5)
+        assert [point[0] for point in arm["points"]] == [0, 0.5, 1]
+        assert [point[0] for point in leg["points"]] == [0, 1]
+        origin = min(arm["start_time_seconds"], leg["start_time_seconds"])
+        assert [[series["start_time_seconds"] - origin + point[0] * series["duration_seconds"]
+                 for point in series["points"]] for series in (arm, leg)] == [[0, 0.5, 1], [0.25, 0.75]]
+        assert library.series_batch("staggered", aligned_sources)[1] is leg
     print("recording library tests: ok")
     return 0
 

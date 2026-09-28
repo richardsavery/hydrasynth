@@ -5,6 +5,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const vm = require("node:vm");
 const context = vm.createContext({});
+vm.runInContext(fs.readFileSync(path.join(__dirname, "../dashboard/drums.js"), "utf8"), context);
 vm.runInContext(fs.readFileSync(path.join(__dirname, "../dashboard/sonification.js"), "utf8"), context);
 const Music = context.HydraSonification;
 const plain = (value) => JSON.parse(JSON.stringify(value));

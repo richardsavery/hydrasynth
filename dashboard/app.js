@@ -12,6 +12,7 @@ const Music = globalThis.HydraSonification;
 const { DESTINATIONS, MAX_MAPPINGS, MAX_TARGETS, MAX_TABS, MAX_PRESETS } = Music;
 const Parameters = globalThis.HydraParameters;
 const Live = globalThis.HydraLive;
+const Drums = globalThis.HydraDrums;
 
 const SCALE_INTERVALS = Music.SCALE_INTERVALS;
 
@@ -55,6 +56,8 @@ const state = {
   cursor: 0,
   maxSteps: SERIES_LIMIT,
   output: "audio",
+  drumSources: [], drumMuted: [], drumSeries: new Map(), drumMotion: null,
+  drumActivity: 0, drumEngine: null, drumOrigin: 0, drumDuration: 1, drumRevision: 0,
   audio: null,
   midiAccess: null,
   midiOutput: null,
@@ -72,6 +75,7 @@ document.addEventListener("DOMContentLoaded", () => {
   bindWorkspaces();
   bindParameterPicker();
   bindLiveInput();
+  bindDrumInterface();
   bindDashboardSwitcher();
   applySavedControls();
   renderScale();
@@ -119,7 +123,7 @@ function cacheDom() {
     "engine-state", "refresh-recordings", "recording-list", "recording-empty",
     "source-summary", "source-channel", "source-field", "recordings-path",
     "recording-title", "recording-detail", "tempo", "steps-per-beat",
-    "preview-button", "signal-title", "signal-min", "signal-max", "waveform",
+    "preview-button", "playback-help", "signal-title", "signal-min", "signal-max", "waveform",
     "signal-area", "signal-line", "playhead", "wave-empty", "wave-progress",
     "add-mapping", "mapping-rows", "mapping-help", "wave-type", "voice-name",
     "attack", "attack-output", "release", "release-output", "brightness",
@@ -138,7 +142,9 @@ function cacheDom() {
     "random-palette", "catalog-status", "midi-format", "midi-rate", "midi-parameter-status",
     "parameter-picker", "picker-close", "picker-search", "picker-group", "picker-results", "picker-prev", "picker-next",
     "picker-page", "picker-status", "picker-add", "picker-select-page", "picker-select-group", "picker-clear", "picker-description",
-    "live-url", "live-connect", "live-disconnect", "live-reconnect", "live-status", "live-reset-ranges"
+    "live-url", "live-connect", "live-disconnect", "live-reconnect", "live-status", "live-reset-ranges", "return-to-recording",
+    ...Object.values(DRUM_CONTROL_IDS), "drum-panel", "drum-grid", "drum-sources", "drum-source-summary",
+    "drum-auto-sources", "drum-activity", "drum-activity-value", "drum-tempo-readout", "drum-density-readout", "drum-status"
   ].forEach((id) => { dom[id] = document.getElementById(id); });
   dom.outputButtons = Array.from(document.querySelectorAll("[data-output]"));
 }
@@ -195,6 +201,10 @@ function bindInterface() {
     if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
       event.preventDefault();
       state.cursor = clamp(state.cursor + (event.key === "ArrowLeft" ? -1 : 1), 0, state.maxSteps - 1);
+      if (state.output === "drums") {
+        state.drumOrigin = performance.now() - state.cursor / Math.max(1, state.maxSteps - 1) * state.drumDuration * 1000;
+        state.drumMotion?.reset();
+      }
       updatePlayhead();
     }
   });
@@ -230,6 +240,7 @@ async function loadRecordings(refresh) {
     setEngineState("error", "Recording link unavailable", "The dashboard is still available");
   } finally {
     dom["recording-list"].setAttribute("aria-busy", "false");
+    renderPlaybackAvailability();
   }
 }
 
@@ -293,7 +304,7 @@ async function selectRecording(recordingId) {
   renderWorkspaces();
   dom["recording-title"].textContent = recording.name;
   dom["recording-detail"].textContent = `${formatInteger(recording.frames)} JSON frames · ${recording.channels.length} channels · ${formatBytes(recording.size_bytes)}`;
-  dom["preview-button"].disabled = !state.fields.length;
+  renderPlaybackAvailability();
   dom["add-mapping"].disabled = !state.fields.length;
   renderRecordingList();
   renderMappings();
@@ -312,8 +323,9 @@ const CONTROL_IDS = {
 };
 
 function readMusicalControls() {
-  return Music.controls(Object.fromEntries(Object.entries(CONTROL_IDS).map(([key, id]) =>
-    [key, key === "loop" ? dom[id].checked : dom[id].value])));
+  return Music.controls({ ...Object.fromEntries(Object.entries(CONTROL_IDS).map(([key, id]) =>
+    [key, key === "loop" ? dom[id].checked : dom[id].value])),
+    ...readDrumControls(), output: state.output });
 }
 
 function applyMusicalControls(raw) {
@@ -323,6 +335,9 @@ function applyMusicalControls(raw) {
     if (key === "loop") dom[id].checked = controls[key];
     else dom[id].value = String(controls[key]);
   });
+  applyDrumControls(controls);
+  state.output = controls.output;
+  renderOutputMode();
   updateControlReadouts();
   renderScale();
   renderRhythm();
@@ -473,7 +488,7 @@ function bindWorkspaces() {
     const preset = presetLibrary().find((item) => item.id === state.selectedPreset);
     if (!preset) return;
     const mappings = Music.restoreMappings(preset.mappings, state.fields, () => state.nextMappingId++, { allowMissing: state.sourceMode === "live" });
-    if (preset.mappings.length && !mappings.length) {
+    if (preset.controls?.output !== "drums" && preset.mappings.length && !mappings.length) {
       dom["workspace-status"].textContent = `This preset needs fields from ${preset.recording}. Select a compatible recording first.`;
       return;
     }
@@ -612,18 +627,18 @@ function createMappingSource(field) {
 
 function renderMappings() {
   dom["add-mapping"].disabled = !state.fields.length || state.mappings.length >= MAX_MAPPINGS;
-  dom["preview-button"].disabled = !state.recording || !state.mappings.length;
+  renderPlaybackAvailability();
   renderRhythm();
   renderHarmony();
   renderSoundControls();
   dom["mapping-rows"].replaceChildren();
   if (!state.mappings.length) {
-    if (state.playing || state.preparing) stopPlayback();
+    if (state.output !== "drums" && (state.playing || state.preparing)) stopPlayback();
     const placeholder = document.createElement("div");
     placeholder.className = "mapping-placeholder";
     placeholder.textContent = "Add a mapping to turn a signal into sound.";
     dom["mapping-rows"].append(placeholder);
-    clearWaveform();
+    if (state.output !== "drums") clearWaveform();
     return;
   }
   state.mappings.forEach((mapping) => {
@@ -780,6 +795,7 @@ function focusMapping(mappingId) {
 }
 
 async function loadFocusedSeries() {
+  if (state.output === "drums") { await loadDrumPreview(); return; }
   if (state.sourceMode === "live") { updateSourceSummary(); drawLiveWaveform(); return; }
   const mapping = state.mappings.find((candidate) => candidate.id === state.focusedMappingId);
   if (!mapping) {
@@ -973,40 +989,90 @@ function updateSourceSummary() {
     : `${operator} of ${inputs.map(({ field }) => field.name).join(" + ")}`;
 }
 
+function playbackUnavailableReason() {
+  if (!state.recording) return "Choose a recording or connect live movement data to enable Preview.";
+  if (state.sourceMode === "live") {
+    if (state.liveSocket?.readyState !== 1) return "Live input is disconnected. Connect live or return to a recording to enable Preview.";
+    if (!state.fields.length) return "Live input is connected. Waiting for movement data before Preview is available.";
+  }
+  if (state.output === "drums") {
+    const keys = drumSourceKeys();
+    if (!keys.length) return "No movement signals are available. Choose another recording or connect live data.";
+    if (keys.some((key) => !state.fieldIndex.has(key))) return "Some selected movement signals are missing. Use Auto-select movement or choose available sources.";
+  } else if (!state.mappings.length) return "Add a mapping or generate a tab to enable Preview.";
+  return "";
+}
+
+function renderPlaybackAvailability() {
+  const reason = playbackUnavailableReason();
+  const active = state.playing || state.preparing;
+  if (dom["preview-button"]) {
+    // Missing input must never prevent the user from stopping or canceling.
+    dom["preview-button"].disabled = !active && Boolean(reason);
+    dom["preview-button"].title = active ? "" : reason;
+  }
+  if (dom["playback-help"]) {
+    dom["playback-help"].textContent = reason;
+    dom["playback-help"].hidden = active || !reason;
+  }
+  if (dom["return-to-recording"]) {
+    dom["return-to-recording"].hidden = state.sourceMode !== "live";
+    dom["return-to-recording"].disabled = !state.library?.recordings.length;
+  }
+  if (state.output === "drums" && !active && dom["drum-status"]) {
+    dom["drum-status"].textContent = reason || "Ready · press Preview to hear the movement.";
+  }
+}
+
 async function togglePlayback() {
   if (state.playing || state.preparing) { stopPlayback(); return; }
-  if (!state.recording || !state.mappings.length) {
-    showToast("Add mappings or generate a tab first.");
+  const unavailable = playbackUnavailableReason();
+  if (unavailable) {
+    renderPlaybackAvailability();
+    showToast(unavailable);
     return;
   }
   const generation = ++state.playbackGeneration;
   state.preparing = true;
+  renderPlaybackAvailability();
   dom["preview-button"].innerHTML = "<span>■</span> Cancel";
-  dom["session-state"].textContent = "PREPARING MAPPINGS";
+  dom["session-state"].textContent = state.output === "drums" ? "PREPARING MOVEMENT" : "PREPARING MAPPINGS";
   try {
     // Ask for audio/MIDI access in the user's click, before fetching recordings.
-    if (state.output === "audio") await ensureAudioEngine();
+    if (state.output !== "midi") await ensureAudioEngine();
     else if (!state.midiOutput) await connectMidi();
     if (generation !== state.playbackGeneration) return;
     if (state.output === "midi" && !state.midiOutput) throw new Error("Choose a MIDI destination before playing");
     const settings = readMusicalControls();
     if (state.output === "midi" && settings.soundMode !== "off") Music.patchPool(settings);
     if (state.sourceMode === "live" && state.liveSocket?.readyState !== 1) throw new Error("Connect a live stream before playing");
-    const loaded = state.sourceMode === "live" ? [] : await loadMappingSet(state.mappings);
+    const loaded = state.sourceMode === "live" ? [] : state.output === "drums"
+      ? await loadDrumSeries() : await loadMappingSet(state.mappings);
     if (generation !== state.playbackGeneration) return;
+    if (state.output === "drums") {
+      if (state.sourceMode !== "live") acceptDrumSeries(loaded);
+      state.drumPlayingKeys = [...drumSourceKeys()];
+    }
     state.playSeries = new Map(loaded);
     state.maxSteps = Math.max(...loaded.map(([_id, series]) => series.points.length), 2);
     state.cursor = clamp(state.cursor, 0, state.maxSteps - 1);
+    if (state.output === "drums" && state.sourceMode !== "live" && state.cursor >= state.maxSteps - 1) state.cursor = 0;
     state.preparing = false;
     state.playing = true;
     state.rhythmStep = 0;
     state.currentPreviewVoice = null;
     state.lastSoundChange = -Infinity;
     state.nextTickAt = performance.now();
+    if (state.output === "drums") {
+      state.drumMotion = new Drums.Motion();
+      state.drumActivity = 0;
+      state.drumOrigin = performance.now() - (state.cursor / Math.max(1, state.maxSteps - 1)) * state.drumDuration * 1000;
+      state.drumEngine ||= new Drums.Engine(state.audio.context, state.audio.master);
+    }
     dom["preview-button"].classList.add("is-playing");
     dom["preview-button"].innerHTML = "<span>■</span> Stop";
     dom["session-state"].textContent = state.output === "midi" ? "PLAYING · HYDRASYNTH MIDI" : "PLAYING · BROWSER AUDIO";
-    startParameterPump();
+    if (state.output !== "drums") startParameterPump();
     runPlaybackTick();
   } catch (error) {
     if (generation !== state.playbackGeneration) return;
@@ -1037,6 +1103,7 @@ async function runPlaybackTick() {
   if (!state.playing) return;
   const generation = state.playbackGeneration;
   try {
+    if (state.output === "drums") { await runDrumTick(generation); return; }
     const progress = state.maxSteps > 1 ? state.cursor / (state.maxSteps - 1) : 0;
     const controls = controlsAt(progress);
     state.currentParameterCommands = controls.parameters;
@@ -1260,9 +1327,13 @@ function silenceStaleInput() {
     state.noteTimers.clear();
     stopActiveMidiNotes();
     stopAudioVoices();
+    state.drumEngine?.stop();
+    state.drumMotion?.reset();
+    state.drumActivity = 0;
+    if (state.output === "drums") renderDrumReadout(0, null, "Waiting for fresh data from every selected movement source.");
     publishSignalLabActivity({ stop: true });
   }
-  dom["session-state"].textContent = "WAITING FOR FRESH LIVE DATA";
+  dom["session-state"].textContent = state.sourceMode === "live" ? "WAITING FOR FRESH LIVE DATA" : "WAITING FOR MOVEMENT DATA";
 }
 
 function startParameterPump() {
@@ -1305,7 +1376,7 @@ function publishSignalLabActivity(activity = {}) {
     source_mode: state.sourceMode,
     composite_count: compositeCount,
     patch: state.output === "midi" ? state.currentPatch : null,
-    voice_name: state.output === "audio" ? effectivePreviewVoice().name || "Custom" : null,
+    voice_name: state.output === "drums" ? drumKitName() : state.output === "audio" ? effectivePreviewVoice().name || "Custom" : null,
     ...activity
   };
   // Preserve emitted parameter changes while the previous HTTP request is in flight.
@@ -1363,11 +1434,17 @@ function stopPlayback() {
   if (dom["apply-patch"]) dom["apply-patch"].disabled = false;
   stopActiveMidiNotes();
   stopAudioVoices();
+  state.drumEngine?.stop();
+  state.drumMotion?.reset();
+  state.drumPlayingKeys = null;
+  state.drumActivity = 0;
   dom["preview-button"].classList.remove("is-playing");
   dom["preview-button"].innerHTML = "<span>▶</span> Preview";
   dom["session-state"].textContent = "LOCAL SESSION · READY";
   updatePlayhead();
   renderRhythm();
+  if (state.output === "drums") renderDrumReadout(0, null, "Ready · press Preview to hear the movement.");
+  renderPlaybackAvailability();
   if (wasPlaying) publishSignalLabActivity({ stop: true });
 }
 
@@ -1384,6 +1461,7 @@ async function ensureAudioEngine() {
     const delayReturn = context.createGain();
     const reverbInput = context.createGain();
     const reverb = context.createConvolver();
+    const reverbReturn = context.createGain();
     const impulse = context.createBuffer(2, Math.round(context.sampleRate * 1.8), context.sampleRate);
     for (let channel = 0; channel < 2; channel += 1) {
       const samples = impulse.getChannelData(channel);
@@ -1407,12 +1485,16 @@ async function ensureAudioEngine() {
     delay.connect(delayReturn);
     delayReturn.connect(master);
     reverbInput.connect(reverb);
-    reverb.connect(master);
+    reverb.connect(reverbReturn);
+    reverbReturn.connect(master);
     master.connect(compressor);
     compressor.connect(context.destination);
-    state.audio = { context, master, delay, delayInput, reverbInput, driveCurves: new Map() };
+    state.audio = { context, master, delay, delayInput, reverbInput, delayReturn, reverbReturn, driveCurves: new Map() };
   }
   const { context, master } = state.audio;
+  // A newly selected drum kit should not bring back the melodic engine's effect tails.
+  state.audio.delayReturn.gain.setValueAtTime(state.output === "drums" ? 0 : .7, context.currentTime);
+  state.audio.reverbReturn.gain.setValueAtTime(state.output === "drums" ? 0 : 1, context.currentTime);
   master.gain.cancelScheduledValues(context.currentTime);
   master.gain.setTargetAtTime(0.5, context.currentTime, 0.015);
   await context.resume();
@@ -1607,20 +1689,16 @@ function panicMidi() {
 }
 
 function setOutput(output) {
-  if (!['audio', 'midi'].includes(output)) return;
+  if (!['audio', 'midi', 'drums'].includes(output)) return;
   if (state.playing || state.preparing) stopPlayback();
+  state.selectionGeneration += 1;
   state.output = output;
   state.midiPacer?.reset();
   renderSoundControls();
-  dom.outputButtons.forEach((button) => {
-    const selected = button.dataset.output === output;
-    button.classList.toggle("is-selected", selected);
-    button.setAttribute("aria-checked", String(selected));
-  });
-  dom["midi-panel"].hidden = output !== "midi" && !state.midiAccess;
-  dom["panic-button"].hidden = output !== "midi";
+  renderOutputMode();
   if (output === "midi" && !state.midiAccess) connectMidi();
   saveSettings();
+  loadFocusedSeries();
 }
 
 function seekFromPointer(event) {
@@ -1628,6 +1706,10 @@ function seekFromPointer(event) {
   const bounds = dom["waveform"].getBoundingClientRect();
   const progress = clamp((event.clientX - bounds.left) / bounds.width, 0, 1);
   state.cursor = Math.round(progress * (state.maxSteps - 1));
+  if (state.output === "drums") {
+    state.drumOrigin = performance.now() - progress * state.drumDuration * 1000;
+    state.drumMotion?.reset();
+  }
   updatePlayhead();
 }
 
@@ -1670,7 +1752,6 @@ function updateControlReadouts() {
 
 function applySavedControls() {
   applyMusicalControls(state.saved.controls);
-  state.output = state.saved.controls?.output === "midi" ? "midi" : "audio";
   renderSoundControls();
   dom.outputButtons.forEach((button) => {
     const selected = button.dataset.output === state.output;
@@ -1998,7 +2079,15 @@ function bindLiveInput() {
   dom["live-reconnect"].checked = state.saved.live?.reconnect !== false;
   dom["live-connect"].addEventListener("click", connectLive);
   dom["live-disconnect"].addEventListener("click", () => { disconnectLive(); updateLiveStatus(); });
-  dom["live-reset-ranges"].addEventListener("click", () => { state.live?.resetRanges(); state.livePlot?.clear(); showToast("Live input ranges reset"); });
+  dom["return-to-recording"].addEventListener("click", returnToRecording);
+  dom["live-reset-ranges"].addEventListener("click", () => { state.live?.resetRanges(); state.livePlot?.clear(); state.drumMotion?.reset(); showToast("Live input ranges reset"); });
+}
+
+async function returnToRecording() {
+  const recordings = state.library?.recordings || [];
+  const recording = recordings.find((item) => item.id === state.saved.lastRecording) || recordings[0];
+  if (recording) await selectRecording(recording.id);
+  else showToast("Add a recording to the recordings folder, then refresh the list.");
 }
 
 function disconnectLive() {
@@ -2012,6 +2101,7 @@ function disconnectLive() {
   if (state.sourceMode === "live") stopPlayback();
   state.liveStatus = "Disconnected";
   if (dom["live-disconnect"]) dom["live-disconnect"].disabled = true;
+  updateLiveStatus();
 }
 
 function connectLive() {
@@ -2091,6 +2181,7 @@ function openLiveSocket(generation) {
 }
 
 function updateLiveStatus() {
+  renderPlaybackAvailability();
   if (!dom["live-status"]) return;
   let label = state.liveStatus;
   if (state.liveSocket?.readyState === 1 && state.live?.lastAt !== null) {
@@ -2108,7 +2199,7 @@ function refreshLiveView() {
       state.mappings = createDefaultMappings(); state.focusedMappingId = state.mappings[0]?.id;
       state.liveNeedsDefaults = false;
     }
-    renderWorkspaces(); renderMappings(); saveSettings();
+    renderWorkspaces(); renderMappings(); renderDrumSources(); saveSettings();
   }
   dom["recording-detail"].textContent = `${state.liveUrl} · ${state.live?.channels.size || 0} channels · latest values`;
   updateLiveStatus(); drawLiveWaveform();
@@ -2127,6 +2218,7 @@ function liveMappingValue(mapping, now) {
 
 function drawLiveWaveform() {
   if (state.sourceMode !== "live") return;
+  if (state.output === "drums") { drawDrumLiveWaveform(); return; }
   const mapping = state.mappings.find((item) => item.id === state.focusedMappingId);
   if (!mapping) { clearWaveform("Waiting for RAPP data and mappings."); return; }
   const now = performance.now();

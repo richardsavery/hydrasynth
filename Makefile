@@ -46,9 +46,13 @@ dashboard-test:
 	$(NODE) --check dashboard/sonification.js
 	$(NODE) --check dashboard/parameters.js
 	$(NODE) --check dashboard/live.js
+	$(NODE) --check dashboard/drums.js
+	$(NODE) --check dashboard/drum-workspace.js
 	$(NODE) tools/test_parameters_live.js
 	$(NODE) tools/test_sonification.js
 	$(NODE) tools/test_sonification_player.js
+	$(NODE) tools/test_drums.js
+	$(NODE) tools/test_drum_player.js
 	$(NODE) tools/test_dashboard_semantics.js
 	$(NODE) --check dashboard/observer/app.js
 	$(NODE) tools/test_observer_semantics.js
