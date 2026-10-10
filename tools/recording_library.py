@@ -210,6 +210,8 @@ class RecordingLibrary:
                 "frames": 0,
                 "invalid_lines": 0,
                 "duration_seconds": 0.0,
+                "start_time_seconds": None,
+                "end_time_seconds": None,
                 "channels": [],
                 "error": str(error),
             }
@@ -226,6 +228,8 @@ class RecordingLibrary:
             "frames": frames,
             "invalid_lines": invalid_lines,
             "duration_seconds": max(0.0, (last_time or 0.0) - (first_time or 0.0)),
+            "start_time_seconds": first_time,
+            "end_time_seconds": last_time,
             "channels": [
                 {**channel, "fields": list(channel["fields"].values())}
                 for channel in channels.values()

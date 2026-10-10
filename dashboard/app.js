@@ -77,6 +77,7 @@ document.addEventListener("DOMContentLoaded", () => {
   bindLiveInput();
   bindDrumInterface();
   bindDashboardSwitcher();
+  bindSonificationWorkspaces();
   applySavedControls();
   renderScale();
   renderRhythm();
@@ -87,6 +88,34 @@ document.addEventListener("DOMContentLoaded", () => {
     dom["catalog-status"].textContent = `${error.message} Use Refresh to retry.`;
   });
 });
+
+function bindSonificationWorkspaces() {
+  const links = [...document.querySelectorAll("[data-workspace]")];
+  const signalLab = document.getElementById("signal-lab-workspace");
+  const elevenLabs = document.getElementById("elevenlabs-workspace");
+  if (!signalLab || !elevenLabs || !globalThis.HydraElevenLabs) return;
+  const sourceBridge = globalThis.HydraElevenSource?.create({
+    getState: () => state, loadSeries: loadSourceSeries
+  });
+  globalThis.HydraElevenLabs.init({ sourceBridge });
+  const selectWorkspace = () => {
+    const generatedMusic = window.location.hash === "#elevenlabs";
+    if (generatedMusic) stopPlayback();
+    signalLab.hidden = generatedMusic;
+    elevenLabs.hidden = !generatedMusic;
+    document.body.classList.toggle("elevenlabs-mode", generatedMusic);
+    document.querySelector(".skip-link").href = generatedMusic ? "#elevenlabs-workspace" : "#stage";
+    links.forEach((link) => {
+      const selected = link.dataset.workspace === (generatedMusic ? "elevenlabs" : "signal-lab");
+      link.classList.toggle("is-active", selected);
+      if (selected) link.setAttribute("aria-current", "page"); else link.removeAttribute("aria-current");
+    });
+    if (generatedMusic) globalThis.HydraElevenLabs.activate();
+    else globalThis.HydraElevenLabs.deactivate();
+  };
+  window.addEventListener("hashchange", selectWorkspace);
+  selectWorkspace();
+}
 
 function bindDashboardSwitcher() {
   const openLink = document.querySelector("[data-open-observer]");

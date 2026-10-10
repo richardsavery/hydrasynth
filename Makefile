@@ -40,6 +40,10 @@ dashboard-command:
 dashboard-test:
 	$(PYTHON) -B tools/hydra_dashboard.py --self-test
 	$(PYTHON) -B tools/test_recording_library.py
+	$(PYTHON) -B tools/test_elevenlabs_analysis.py
+	$(PYTHON) -B tools/test_elevenlabs_service.py
+	$(PYTHON) -B tools/test_elevenlabs_realtime.py
+	$(PYTHON) -B tools/test_elevenlabs_http.py
 	$(PYTHON) -B tools/validate_parameters.py
 	$(PYTHON) -B tools/validate_parameters.py --self-test
 	$(NODE) --check dashboard/app.js
@@ -48,6 +52,14 @@ dashboard-test:
 	$(NODE) --check dashboard/live.js
 	$(NODE) --check dashboard/drums.js
 	$(NODE) --check dashboard/drum-workspace.js
+	$(NODE) --check dashboard/elevenlabs.js
+	$(NODE) --check dashboard/elevenlabs-player.js
+	$(NODE) --check dashboard/elevenlabs-realtime.js
+	$(NODE) --check dashboard/elevenlabs-source.js
+	$(NODE) tools/test_elevenlabs_ui.js
+	$(NODE) tools/test_elevenlabs_source.js
+	$(NODE) tools/test_elevenlabs_player.js
+	$(NODE) tools/test_elevenlabs_realtime.js
 	$(NODE) tools/test_parameters_live.js
 	$(NODE) tools/test_sonification.js
 	$(NODE) tools/test_sonification_player.js

@@ -24,13 +24,15 @@ cd hydrasynth
 make dashboard-sonify
 ```
 
-The same service provides both dashboards:
+The same service provides these workspaces:
 
 - **Signal Lab** at <http://127.0.0.1:8790/> for mapping JSON data to sound.
+- **ElevenLabs** at <http://127.0.0.1:8790/#elevenlabs> for generating music,
+  controlling it with live data, and preparing upcoming segments in the background.
 - **Observer** at <http://127.0.0.1:8790/observer/> for the original live
   Hydrasynth telemetry view.
 
-Each dashboard has a switcher in its header, so both remain available while the
+The dashboard has a switcher in its header, so all remain available while the
 service is running. Observer's **Auto** source follows Signal Lab whenever its
 preview is playing, then falls back to native/demo telemetry after the preview
 stops. Choose **Signal Lab** in Observer to keep that view locked to the
@@ -72,6 +74,105 @@ control. Mapping tabs save automatically in browser storage for each recording.
 Existing saved mappings migrate to an **Original** tab, including their sound
 settings. Browser storage is specific to the browser and page origin; use
 **Export** to move saved presets to another browser or machine.
+
+### ElevenLabs recorded-data sonification
+
+Start with `make dashboard-sonify` and open the **ElevenLabs** header tab. This
+workspace uses the existing local server and works without MIDI hardware.
+It has its own generated-audio mappings and saved music, and can share Signal
+Lab's selected recording or live RAPP stream. Existing browser/MIDI/drum recipes
+remain available in Signal Lab.
+
+Set `ELEVENLABS_API_KEY` in the repository's ignored `.env` file or the process
+environment (the environment takes precedence). Install `ffmpeg` and `ffprobe`
+on `PATH`, or place executable copies in `var/bin/`. The workspace reports
+missing setup requirements and permits planning before generation is ready.
+Only the backend reads the key. Original recordings, feature tables, and local
+paths are never included in the provider request.
+
+**Realtime playback:** choose a saved track as the starting sound, choose a
+control source, and press **Play reactive**. Use **Signal Lab source** to share
+the main workspace's recording or connected stream, **RAPP / player WebSocket**
+to connect directly, **Replay this recording** for the analyzed flat file, or
+the clearly labeled demo movement to try the controls. Nested RAPP recordings
+work directly through the shared source; flattening is only needed for the
+separate recorded composition planner below.
+
+Live mapping rows connect an input to low-pass cutoff, resonance, high-pass
+cutoff, volume, stereo pan, speed/pitch, delay, reverb, or an available stem's
+volume. Configure fixed input/output bounds, inversion, and smoothing per row.
+**Calibrate** measures five seconds then freezes the input bounds. Controls
+update at 20 Hz with audio-parameter smoothing. Missing or stale input fades
+the audio and prevents new automatic generation. Playback speed also changes
+pitch; tempo and key in a generation plan remain musical requests.
+Mapping rows, source settings and the starter selection are saved in the browser.
+Automatic upcoming music generation always starts off after a reload.
+
+**Stem separation is automatic by default.** Every new starting track, variation,
+and upcoming segment is separated into six instrument layers after generation.
+Both music generation and stem separation use provider credits. Older saved
+tracks without stems are separated on their first reactive playback; selecting
+or reopening a track alone does not start a paid request. Saved stems are reused.
+Saved stems play in sync and replace the full mix. Their
+sliders and mapping destinations control each layer independently; separation
+quality and instrument isolation depend on the provider. Filters and effects
+apply to the resulting mix. A failed separation leaves the original audio
+available. Failed or unknown stem outcomes are not automatically retried.
+
+**Generate upcoming music automatically** is an explicit, initially disabled
+credit-using option. Choose 20, 40, or 60 seconds (default 60) and a session cap
+(default three new segments). Recent normalized input changes the next segment's
+arrangement while preserving the starting plan's style, tempo, key and palette.
+The next request starts early using measured generation latency. Only one
+request and one ready segment can be pending; current audio loops while waiting
+and crossfades when the replacement is ready. Every upcoming segment includes
+stem separation; lookahead accounts for its additional processing time.
+Stopping or leaving the tab disarms future requests; work already sent may
+finish its music-and-stems pipeline and incur charges. Automatic generation is
+never armed after reload.
+
+Rolling segments are saved separately with their observed feature summary and
+provenance. They extrapolate recent activity and are not aligned to the original
+recording's section timeline. New rolling audio is stored for provider
+conditioning; a following segment can reference up to its last 30 seconds.
+Older tracks without retained provider audio use the shared musical directions
+and a local crossfade. Neither path guarantees beat or melody continuity.
+
+**Create a starting track from recorded data:**
+
+1. Load the built-in 60-second alternating-activity example, or import a flat
+   CSV/JSONL file. Select the timestamp field and units explicitly. Nested RAPP
+   recordings need conversion to this flat format first.
+2. Choose numeric channels, their meaning (velocity, position, or scalar), and
+   normalization bounds. Crop the source and inspect coverage and section
+   features. Saved baseline bounds can be reused for comparisons.
+3. Build a plan. Activity controls arrangement density; variability-to-
+   articulation is optional and off initially. Inspect the section directions
+   and exact JSON before sending. Plan downloads do not contact ElevenLabs.
+4. **Generate** submits one whole composition using `music_v2_5`, then
+   automatically separates its stems. Both steps consume account credits.
+   The duration and attempt history are visible first.
+   Repeated requests reuse an in-flight job or completed result; **Generate
+   another variation** deliberately creates a new attempt. Editing settings
+   never starts generation.
+5. Play or seek saved attempts, compare their planned sections with the source,
+   and export audio plus the exact request, features, and manifest as a ZIP.
+
+Jobs, inputs, immutable plan revisions, and audio persist under ignored
+`var/elevenlabs/`. One worker sends generation requests at a time. Interrupted
+or ambiguous provider outcomes become **unknown**, with no automatic retry;
+another attempt may incur another charge. Successful responses must fully
+decode before playback becomes available. Duration mismatches remain visible.
+Tempo, key, articulation, and density are requested musical properties; the
+playhead uses planned boundaries, and listening is needed to assess the mapping.
+
+The provider timeout defaults to 300 seconds and can be configured with
+`ELEVENLABS_TIMEOUT_SECONDS`. Music routes accept same-origin JSON requests
+on a loopback server only, including when remote telemetry is otherwise enabled.
+The implementation follows the [composition plan API](https://elevenlabs.io/docs/eleven-api/guides/how-to/music/composition-plans),
+[compose endpoint](https://elevenlabs.io/docs/api-reference/music/compose),
+[stem separation endpoint](https://elevenlabs.io/docs/api-reference/music/separate-stems),
+and [audio conditioning guide](https://elevenlabs.io/docs/eleven-api/guides/how-to/music/inpainting).
 
 ### Mapping tabs and presets
 
@@ -615,9 +716,10 @@ The same interface can be explored without touching the synth:
 make dashboard-demo
 ```
 
-The browser surface remains deliberately read-only: HTTP `POST` requests are
-rejected, and command traffic is never accepted over TCP or exposed to browser
-JavaScript. HTTP binds only to loopback by default. A non-loopback `--host`
+Native MIDI command traffic is never accepted over TCP or exposed to browser
+JavaScript. The browser can publish Signal Lab observer events and use the
+local ElevenLabs workflow over HTTP `POST`; other mutation routes are rejected.
+HTTP binds only to loopback by default. A non-loopback `--host`
 requires explicit `--allow-remote`, but this is not a secured remote mode: it
 exposes unauthenticated, unencrypted telemetry, including `stderr_tail`, to the
 bound network. The token-gated command broker remains AF_UNIX-only regardless

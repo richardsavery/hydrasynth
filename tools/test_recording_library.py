@@ -47,6 +47,8 @@ def main() -> int:
         assert recording["id"] == "sample"
         assert recording["frames"] == 3
         assert recording["duration_seconds"] == 1.0
+        assert recording["start_time_seconds"] == 10.0
+        assert recording["end_time_seconds"] == 11.0
         assert {channel["id"] for channel in recording["channels"]} == {
             "robot_joint_states",
             "activation_energy",

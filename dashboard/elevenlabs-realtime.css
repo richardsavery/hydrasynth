@@ -1,0 +1,31 @@
+.el-realtime { margin-bottom: 22px; }
+.el-rt-panel { border-color: #536440; box-shadow: inset 0 3px 0 #a9d56b; }
+.el-rt-panel > .el-notice { margin: 20px 0 0; }
+.el-rt-grid { display: grid; grid-template-columns: minmax(220px, 1fr) minmax(280px, 1.3fr); gap: 24px; margin-top: 22px; }
+.el-rt-transport { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 16px; }
+.el-rt-monitor { display: grid; grid-template-columns: 1fr 1fr; gap: 22px 18px; padding: 20px; background: #11170f; border: 1px solid #34422b; border-radius: 4px; align-content: start; }
+.el-rt-monitor span { display: block; color: var(--muted); font-size: 10px; margin-bottom: 9px; }
+.el-rt-monitor b { display: block; font: 11px/1.7 var(--mono); color: var(--lime); overflow-wrap: anywhere; }
+.el-rt-monitor meter { grid-column: 1/-1; width: 100%; height: 10px; accent-color: var(--lime); }
+.el-rt-monitor meter::-webkit-meter-bar { background: #2b3524; border: 0; }
+.el-rt-monitor meter::-webkit-meter-optimum-value { background: var(--lime); }
+.el-rt-section-heading { display: flex; align-items: center; gap: 18px; justify-content: space-between; margin: 24px 0 12px; }
+.el-rt-section-heading h3 { margin: 0; font-size: 14px; font-weight: 500; }
+.el-rt-section-heading .el-help { max-width: 780px; margin-bottom: 0; }
+.el-rt-section-heading button { flex: 0 0 auto; }
+.el-rt-mappings { display: grid; gap: 9px; }
+.el-rt-mapping { padding: 12px; background: #121712; border: 1px solid var(--line); border-radius: 4px; }
+.el-rt-map-main { display: grid; grid-template-columns: minmax(150px, 1.2fr) minmax(155px, 1fr) minmax(125px, .75fr) auto; gap: 12px; align-items: center; }
+.el-rt-map-main .el-label { margin-bottom: 0; }
+.el-rt-map-main button { margin-top: 20px; }
+.el-rt-map-value { color: var(--lime); font: 11px/1.7 var(--mono); padding-top: 20px; overflow-wrap: anywhere; }
+.el-rt-map-details { margin-top: 10px; }
+.el-rt-map-details summary { font-size: 10px; color: var(--muted); cursor: pointer; }
+.el-rt-map-settings { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px 12px; margin-top: 15px; }
+.el-rt-panel > .el-details > .el-field-pair { max-width: 550px; margin-top: 16px; }
+.el-rt-extra-option { margin-top: 12px; }
+.el-rt-stems { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px 20px; }
+.el-rt-stems input { accent-color: var(--lime); }
+@media (max-width: 1050px) { .el-rt-grid { gap: 15px; }.el-rt-map-main { grid-template-columns: minmax(130px, 1fr) minmax(140px, 1fr) 100px auto; gap: 9px; } }
+@media (max-width: 760px) { .el-rt-grid { grid-template-columns: 1fr; }.el-rt-map-main { grid-template-columns: 1fr 1fr; }.el-rt-map-value, .el-rt-map-main button { margin-top: 0; padding-top: 0; }.el-rt-map-main button { justify-self: end; }.el-rt-map-settings { grid-template-columns: 1fr 1fr; }.el-rt-stems { grid-template-columns: 1fr 1fr; }.el-rt-section-heading { align-items: start; }.el-rt-panel .el-badge { font-size: 8px; } }
+@media (max-width: 400px) { .el-rt-monitor { grid-template-columns: 1fr; gap: 15px; }.el-rt-stems { grid-template-columns: 1fr; }.el-rt-map-main { gap: 8px; }.el-rt-map-main .el-label { font-size: 9px; }.el-rt-map-main select { font-size: 10px; } }

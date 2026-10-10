@@ -220,6 +220,9 @@ __marimo__/
 # Swift build output (the native C controller uses build/)
 .build/
 
+# Local generated music, source imports, jobs, and optional media tools
+/var/
+
 # Portable recordings are committed in compressed form. Keep raw captures and
 # live scratch output out of Git so a local session cannot accidentally add a
 # very large file.

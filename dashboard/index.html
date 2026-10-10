@@ -8,6 +8,8 @@
   <title>Hydra Signal Lab</title>
   <meta name="description" content="Turn RAPP movement into electronic drum grooves, browser sound, and Hydrasynth MIDI parameters.">
   <link rel="stylesheet" href="styles.css">
+  <link rel="stylesheet" href="elevenlabs.css">
+  <link rel="stylesheet" href="elevenlabs-realtime.css">
 </head>
 <body>
   <a class="skip-link" href="#stage">Skip to sonification controls</a>
@@ -19,7 +21,8 @@
     <div class="project-title">
       <span class="eyebrow">RAPP → HYDRASYNTH</span>
       <nav class="dashboard-switcher" aria-label="Dashboard views">
-        <a class="is-active" href="/" aria-current="page">Signal Lab</a>
+        <a class="is-active" href="#signal-lab" data-workspace="signal-lab" aria-current="page" aria-controls="signal-lab-workspace">Signal Lab</a>
+        <a href="#elevenlabs" data-workspace="elevenlabs" aria-controls="elevenlabs-workspace">ElevenLabs</a>
         <a href="/observer/" data-open-observer aria-controls="observer-overlay">Observer</a>
       </nav>
     </div>
@@ -29,7 +32,7 @@
     </div>
   </header>
 
-  <main class="workspace">
+  <main id="signal-lab-workspace" class="workspace">
     <aside class="rail source-rail" aria-labelledby="recordings-title">
       <div class="rail-heading">
         <span class="eyebrow">01 / SOURCE</span>
@@ -279,6 +282,8 @@
     </aside>
   </main>
 
+  <section id="elevenlabs-workspace" aria-label="ElevenLabs sonification workspace" hidden></section>
+
   <footer class="footer-bar">
     <span id="recording-link-status"><i class="status-light is-pending"></i> Checking RAPP recordings</span>
     <span id="footer-clock">—</span>
@@ -326,8 +331,8 @@
 
   <section id="observer-overlay" class="observer-overlay" aria-label="Hydrasynth Observer" hidden>
     <div class="observer-overlay-toolbar">
-      <button id="close-observer" type="button">← Signal Lab</button>
-      <span><i class="status-light is-ready"></i> Signal Lab remains active underneath</span>
+      <button id="close-observer" type="button">← Back to workspace</button>
+      <span><i class="status-light is-ready"></i> Your workspace remains open underneath</span>
     </div>
     <iframe id="observer-frame" title="Hydrasynth Observer dashboard" data-src="/observer/?embedded=1"></iframe>
   </section>
@@ -338,6 +343,10 @@
   <script src="parameters.js" defer></script>
   <script src="live.js" defer></script>
   <script src="drum-workspace.js" defer></script>
+  <script src="elevenlabs-source.js" defer></script>
+  <script src="elevenlabs-player.js" defer></script>
+  <script src="elevenlabs-realtime.js" defer></script>
+  <script src="elevenlabs.js" defer></script>
   <script src="app.js" defer></script>
 </body>
 </html>

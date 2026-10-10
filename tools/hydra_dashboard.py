@@ -29,6 +29,7 @@ from typing import Any
 from urllib.parse import parse_qs, unquote, urlsplit
 
 from recording_library import RecordingLibrary, default_recordings_directory
+from elevenlabs_service import ElevenLabsService, FileResponse
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -2781,6 +2782,7 @@ def handler_for(
     catalog_payload: bytes | None = None,
     recording_library: RecordingLibrary | None = None,
     signal_lab_feed: SignalLabFeed | None = None,
+    elevenlabs: ElevenLabsService | None = None,
 ) -> type[BaseHTTPRequestHandler]:
     class DashboardHandler(BaseHTTPRequestHandler):
         server_version = "HydraDashboard/1"
@@ -2788,6 +2790,9 @@ def handler_for(
         def do_GET(self) -> None:  # noqa: N802
             request_url = urlsplit(self.path)
             path = unquote(request_url.path)
+            if path.startswith("/api/elevenlabs/"):
+                self._elevenlabs_request("GET", path)
+                return
             if path == "/api/snapshot":
                 payload = json.dumps(
                     store.snapshot(), separators=(",", ":"), allow_nan=False
@@ -2910,6 +2915,12 @@ def handler_for(
                 "/live.js": "live.js",
                 "/drums.js": "drums.js",
                 "/drum-workspace.js": "drum-workspace.js",
+                "/elevenlabs.js": "elevenlabs.js",
+                "/elevenlabs.css": "elevenlabs.css",
+                "/elevenlabs-source.js": "elevenlabs-source.js",
+                "/elevenlabs-player.js": "elevenlabs-player.js",
+                "/elevenlabs-realtime.js": "elevenlabs-realtime.js",
+                "/elevenlabs-realtime.css": "elevenlabs-realtime.css",
                 "/observer": "observer/index.html",
                 "/observer/": "observer/index.html",
                 "/observer/index.html": "observer/index.html",
@@ -2941,6 +2952,9 @@ def handler_for(
 
         def do_POST(self) -> None:  # noqa: N802
             path = unquote(urlsplit(self.path).path)
+            if path.startswith("/api/elevenlabs/"):
+                self._elevenlabs_request("POST", path)
+                return
             if path == "/api/signal-lab/events":
                 if signal_lab_feed is None:
                     self._json_error(404, "signal_lab_unavailable")
@@ -2973,6 +2987,109 @@ def handler_for(
                 "application/json; charset=utf-8",
                 "no-store",
             )
+
+        def _elevenlabs_request(self, method: str, path: str) -> None:
+            # These local file and billable-generation routes never share the
+            # optional remote telemetry surface. Validate Host to stop DNS rebinding.
+            if not host_is_loopback(self.client_address[0]) or not host_is_loopback(self.server.server_address[0]):
+                self._json_error(403, "ElevenLabs is available on a loopback server only.")
+                return
+            authority = self.headers.get("Host", "")
+            try:
+                host = urlsplit("http://" + authority)
+                valid_host = (host_is_loopback(host.hostname or "")
+                              and host.port == self.server.server_address[1]
+                              and not host.username and not host.password
+                              and not host.path and not host.query and not host.fragment)
+            except ValueError:
+                valid_host = False
+            origin = self.headers.get("Origin")
+            if not valid_host or (origin is not None and origin != "http://" + authority) or self.headers.get("Sec-Fetch-Site") == "cross-site":
+                self._json_error(403, "Use the local dashboard origin for ElevenLabs.")
+                return
+            if elevenlabs is None:
+                self._json_error(503, "ElevenLabs workspace unavailable.")
+                return
+            document = None
+            if method == "POST":
+                if self.headers.get_content_type() != "application/json" or self.headers.get("Transfer-Encoding"):
+                    self._json_error(415, "Send application/json with a Content-Length.")
+                    return
+                try:
+                    length = int(self.headers.get("Content-Length", "0"))
+                except ValueError:
+                    length = 0
+                if not 0 < length <= 12 * 1024 * 1024:
+                    self._json_error(413, "Upload exceeds the 12 MiB request limit.")
+                    return
+                try:
+                    self.connection.settimeout(30)
+                    document = json.loads(self.rfile.read(length))
+                    if not isinstance(document, dict):
+                        raise ValueError("Expected an object")
+                except (ValueError, UnicodeDecodeError, TimeoutError):
+                    self._json_error(400, "Invalid JSON request.")
+                    return
+            try:
+                status, body = elevenlabs.dispatch(method, self.path, document)
+                if isinstance(body, FileResponse):
+                    self._send_elevenlabs_file(body)
+                else:
+                    self._send(status, json.dumps(body, allow_nan=False).encode("utf-8"), "application/json; charset=utf-8", "no-store")
+            except (BrokenPipeError, ConnectionResetError):
+                return
+            except Exception:
+                # Never echo provider exceptions: they may contain credentials.
+                self._json_error(500, "The local music service could not complete this request.")
+
+        def _send_elevenlabs_file(self, response: FileResponse) -> None:
+            with response.path.open("rb") as stream:
+                size = response.path.stat().st_size
+                start, end, status = 0, size - 1, 200
+                requested_range = self.headers.get("Range")
+                if requested_range:
+                    try:
+                        if not requested_range.startswith("bytes=") or "," in requested_range:
+                            raise ValueError()
+                        first, last = requested_range[6:].split("-", 1)
+                        if first:
+                            start = int(first)
+                            end = min(int(last), size - 1) if last else size - 1
+                        else:
+                            suffix = int(last)
+                            if suffix <= 0:
+                                raise ValueError()
+                            start = max(0, size - suffix)
+                        if not 0 <= start <= end < size:
+                            raise ValueError()
+                    except ValueError:
+                        self.send_response(416)
+                        self.send_header("Content-Range", f"bytes */{size}")
+                        self.send_header("Content-Length", "0")
+                        self.end_headers()
+                        return
+                    status = 206
+                self.send_response(status)
+                self.send_header("Content-Type", response.content_type)
+                self.send_header("Content-Length", str(end - start + 1))
+                self.send_header("Accept-Ranges", "bytes")
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("X-Content-Type-Options", "nosniff")
+                if status == 206:
+                    self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
+                if response.download_name:
+                    self.send_header("Content-Disposition", f'attachment; filename="{Path(response.download_name).name}"')
+                self.end_headers()
+                if self.command == "HEAD":
+                    return
+                stream.seek(start)
+                remaining = end - start + 1
+                while remaining:
+                    block = stream.read(min(64 * 1024, remaining))
+                    if not block:
+                        break
+                    self.wfile.write(block)
+                    remaining -= len(block)
 
         def _json_error(self, status: int, code: str) -> None:
             payload = json.dumps(
@@ -3597,7 +3714,7 @@ def run_self_test() -> int:
 def parse_arguments(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Serve a read-only Hydrasynth telemetry dashboard with an optional "
+            "Serve the local sonification and Hydrasynth telemetry dashboard with an optional "
             "authenticated local Unix command broker."
         )
     )
@@ -3655,6 +3772,11 @@ def main(argv: list[str] | None = None) -> int:
     recording_library = RecordingLibrary(recordings_directory)
     store = SnapshotStore("demo" if arguments.demo else "live", catalog)
     signal_lab_feed = SignalLabFeed(catalog)
+    try:
+        elevenlabs = ElevenLabsService(PROJECT_ROOT / "var" / "elevenlabs", PROJECT_ROOT / ".env")
+    except (OSError, ValueError, RuntimeError) as error:
+        print(f"error: unable to initialize local music storage: {error}", file=sys.stderr)
+        return 1
     service: DemoService | LiveService
     if arguments.demo:
         service = DemoService(store)
@@ -3691,6 +3813,7 @@ def main(argv: list[str] | None = None) -> int:
             broker.start()
         except (OSError, ValueError) as error:
             service.stop()
+            elevenlabs.close()
             print(f"error: unable to start command broker: {error}", file=sys.stderr)
             return 1
 
@@ -3717,12 +3840,14 @@ def main(argv: list[str] | None = None) -> int:
                 catalog_payload,
                 recording_library,
                 signal_lab_feed,
+                elevenlabs,
             ),
         )
     except OSError as error:
         if broker is not None:
             broker.stop()
         service.stop()
+        elevenlabs.close()
         print(f"error: unable to listen on {arguments.host}:{arguments.port}: {error}", file=sys.stderr)
         return 1
     server.timeout = 0.4
@@ -3767,6 +3892,7 @@ def main(argv: list[str] | None = None) -> int:
         if broker is not None:
             broker.stop()
         service.stop()
+        elevenlabs.close()
     return 0
 
 
