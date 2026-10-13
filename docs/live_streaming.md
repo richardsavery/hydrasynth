@@ -17,8 +17,9 @@ python3 player.py recordings/enact_viz_01.jsonl.txt --loop
 
 The checked-in recordings currently have `.jsonl.txt` names; use the actual
 filename in your checkout. `--host 127.0.0.1 --port 8765` restricts playback to the
-local machine. In Signal Lab, enter `ws://localhost:8765` under **Live RAPP**,
-click **Connect live**, and press **Preview** once sources appear. For the robot,
+local machine. In **Connections → Live stream**, enter `ws://localhost:8765`
+and click **Connect live**. Open **Synth** or **Drums** and press **Preview**
+once sources appear, or use the shared input in **Generated music**. For the robot,
 use the address supplied by the workshop, such as `ws://192.168.1.50:8765`.
 Browser local-network permission and network access to that host/port are needed.
 A dashboard served over HTTPS requires a secure `wss://` endpoint.
@@ -54,10 +55,16 @@ an invalid indexed element is treated as missing, without shifting indices.
 The musical clock samples the latest values at the chosen tempo. It does not
 play one note per network frame. MIDI parameter updates run independently at
 25, 50 or 100 changes/second and replace queued values with the newest values.
-Each source can learn minimum/maximum from samples read during this connection,
-or use a fixed physical range. Constant learned signals map to the midpoint.
-Use **Reset learned ranges** to recalibrate; learned ranges persist across an
-automatic reconnect but start fresh on a new connection.
+In both Synth and Generated music, each mapping input can automatically learn
+its incoming minimum and maximum, or use an editable fixed range. Registered
+inputs learn every fresh frame, including peaks between playback ticks.
+Constant learned signals map to the midpoint. **Freeze** keeps the learned
+range; **Relearn** resets that input without changing other mappings. Combine
+inputs after normalization with average, weighted average, normalized sum,
+difference, minimum, or maximum. These controls are available in Basic.
+Synth's **Reset learned ranges** resets the connection's learned ranges;
+learned Synth ranges persist across automatic reconnects and restart with a
+new connection. Explicit fixed ranges persist with saved mappings.
 
 Every enabled recipe requires fresh data for all its inputs. A missing source
 or a channel older than three seconds silences notes and parameter output;

@@ -50,7 +50,8 @@ class MusicHTTPTests(unittest.TestCase):
         status, _, _ = self.request("POST", "/api/elevenlabs/datasets", '{"synthetic":true}', headers)
         self.assertEqual(status, 200)
         self.assertEqual(self.calls[-1][2], {"synthetic": True})
-        for path in ("/", "/elevenlabs.js", "/elevenlabs.css", "/api/snapshot"):
+        for path in ("/", "/workspace-shell.js", "/workspace-shell.css", "/elevenlabs.js", "/elevenlabs.css",
+                     "/music-mixer-engine.js", "/music-mixer-generation.js", "/music-mixer.js", "/music-mixer.css", "/api/snapshot"):
             self.assertEqual(self.request("GET", path)[0], 200, path)
         self.assertEqual(self.request("GET", "/.env")[0], 404)
         self.assertEqual(self.request("GET", "/var/elevenlabs/jobs.sqlite")[0], 404)

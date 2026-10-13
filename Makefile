@@ -47,6 +47,7 @@ dashboard-test:
 	$(PYTHON) -B tools/validate_parameters.py
 	$(PYTHON) -B tools/validate_parameters.py --self-test
 	$(NODE) --check dashboard/app.js
+	$(NODE) --check dashboard/workspace-shell.js
 	$(NODE) --check dashboard/sonification.js
 	$(NODE) --check dashboard/parameters.js
 	$(NODE) --check dashboard/live.js
@@ -56,6 +57,12 @@ dashboard-test:
 	$(NODE) --check dashboard/elevenlabs-player.js
 	$(NODE) --check dashboard/elevenlabs-realtime.js
 	$(NODE) --check dashboard/elevenlabs-source.js
+	$(NODE) --check dashboard/music-mixer-engine.js
+	$(NODE) --check dashboard/music-mixer-generation.js
+	$(NODE) --check dashboard/music-mixer.js
+	$(NODE) tools/test_music_mixer_engine.js
+	$(NODE) tools/test_music_mixer_generation.js
+	$(NODE) tools/test_music_mixer_ui.js
 	$(NODE) tools/test_elevenlabs_ui.js
 	$(NODE) tools/test_elevenlabs_source.js
 	$(NODE) tools/test_elevenlabs_player.js
@@ -66,6 +73,8 @@ dashboard-test:
 	$(NODE) tools/test_drums.js
 	$(NODE) tools/test_drum_player.js
 	$(NODE) tools/test_dashboard_semantics.js
+	$(NODE) tools/test_workspace_shell.js
+	$(NODE) tools/test_workspace_integration.js
 	$(NODE) --check dashboard/observer/app.js
 	$(NODE) tools/test_observer_semantics.js
 

@@ -20,7 +20,7 @@ const context = vm.createContext({
 for (const file of ["drums.js", "sonification.js", "parameters.js", "live.js", "drum-workspace.js", "app.js"]) {
   vm.runInContext(fs.readFileSync(path.join(__dirname, "../dashboard", file), "utf8"), context);
 }
-vm.runInContext("globalThis.player = {state, dom, controlsAt, runPlaybackTick, stopPlayback, playMidiNote, stopActiveMidiNotes, togglePlayback, Music, CONTROL_IDS, sendMidiPatch, changeSoundAtBoundary};", context);
+vm.runInContext("globalThis.player = {state, dom, controlsAt, runPlaybackTick, stopPlayback, playMidiNote, stopActiveMidiNotes, togglePlayback, Music, CONTROL_IDS, sendMidiPatch, changeSoundAtBoundary, loadMappingSourceSeries, learnedMappingRange, resetMappingSourceRange, usableFixedRange};", context);
 const { state, dom, Music, CONTROL_IDS } = context.player;
 for (const [key, id] of Object.entries(CONTROL_IDS)) dom[id] = element(String(Music.DEFAULT_CONTROLS[key]));
 dom["scale-root"].selectedIndex = 0;
@@ -138,6 +138,31 @@ async function main() {
   context.player.changeSoundAtBoundary(context.player.controlsAt(0));
   assert.equal(state.currentPreviewVoice.id, "pluck");
   dom["sound-mode"].value = "off";
+  // A delayed recording fetch cannot assign calibration to a newly selected input/session.
+  vm.runInContext("globalThis.originalSourceLoader = loadSourceSeries; globalThis.rangeLoads = []; loadSourceSeries = () => new Promise(resolve => rangeLoads.push(resolve));", context);
+  const calibratedInput = { sourceKey: "first", reducer: "mean", index: 0, rangeMode: "auto" };
+  const lateRange = context.player.loadMappingSourceSeries(calibratedInput);
+  calibratedInput.sourceKey = "second";
+  context.rangeLoads.shift()({ minimum: 5, maximum: 15 });
+  await lateRange;
+  assert.equal(context.player.learnedMappingRange(calibratedInput), null, "source changes invalidate pending calibration");
+  const changedRecording = context.player.loadMappingSourceSeries(calibratedInput);
+  state.selectionGeneration++;
+  context.rangeLoads.shift()({ minimum: 20, maximum: 40 });
+  await changedRecording;
+  assert.equal(context.player.learnedMappingRange(calibratedInput), null, "recording switches invalidate pending calibration");
+  const validRange = context.player.loadMappingSourceSeries(calibratedInput);
+  context.rangeLoads.shift()({ minimum: 2, maximum: 8 });
+  await validRange;
+  assert.equal(context.player.learnedMappingRange(calibratedInput).minimum, 2);
+  assert.equal(context.player.learnedMappingRange(calibratedInput).maximum, 8);
+  context.player.resetMappingSourceRange(calibratedInput);
+  assert.equal(context.player.learnedMappingRange(calibratedInput), null);
+  const frozenConstant = context.player.usableFixedRange({ minimum: 12, maximum: 12 });
+  assert.ok(frozenConstant.maximum > frozenConstant.minimum);
+  assert.ok(Math.abs((12 - frozenConstant.minimum) / (frozenConstant.maximum - frozenConstant.minimum) - .5) < 1e-12,
+    "freezing a constant signal preserves its midpoint response");
+  vm.runInContext("loadSourceSeries = originalSourceLoader", context);
   state.mappings = [{ id: 8, destination: "pitch", sources: [] }];
   vm.runInContext("globalThis.finishLoads = []; ensureAudioEngine = async () => {}; loadSeries = () => new Promise(resolve => finishLoads.push(resolve));", context);
   const starting = context.player.togglePlayback();

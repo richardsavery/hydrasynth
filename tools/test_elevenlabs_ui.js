@@ -54,3 +54,220 @@ for (const stemState of ["complete", "failed", "unknown"]) {
   assert.equal(hasPendingWork({ ...cached, stem_separation: { state: stemState } }), false, "terminal stem outcomes must not poll forever");
 }
 console.log("ElevenLabs UI: timeline, cache revisions, and generation guards passed.");
+
+// Next-segment directions are read at dispatch, independently of a stale initial
+// plan. Editing them persists a draft and never starts a paid request.
+const elements = new Map();
+const element = (id) => {
+  if (!elements.has(id)) elements.set(id, {
+    value: "", checked: false, hidden: false, open: false,
+    listeners: {}, classList: { add() {}, toggle() {} },
+    addEventListener(name, callback) { this.listeners[name] = callback; },
+    setAttribute() {}, getAttribute() { return null; }, removeAttribute() {},
+    pause() {}, focus() {}, scrollIntoView() {},
+    querySelectorAll() { return []; },
+    getBoundingClientRect() { return { width: 600 }; }, getContext() { return null; },
+  });
+  return elements.get(id);
+};
+const workspace = { hidden: false, classList: { add() {}, toggle() {} },
+  querySelector: (selector) => element(selector.slice(4)), querySelectorAll: () => [] };
+let realtimeOptions, stopped = 0, paidRequests = 0;
+const storage = new Map();
+const browserContext = vm.createContext({
+  document: { getElementById: () => workspace },
+  localStorage: { getItem: (key) => storage.get(key), setItem: (key, value) => storage.set(key, value) },
+  HydraElevenRealtime: { init: (options) => { realtimeOptions = options; }, setSelection() {}, deactivate: () => stopped++ },
+  fetch: () => { paidRequests++; throw new Error("Unexpected request from a local UI edit"); },
+});
+vm.runInContext(fs.readFileSync(path.join(__dirname, "../dashboard/elevenlabs.js"), "utf8"), browserContext);
+browserContext.HydraElevenLabs.init();
+for (const [id, value] of Object.entries({ style: "ambient strings", bpm: "85", key: "A minor", palette: "cello, soft percussion", context: "high", seed: "", length: "20" })) element(id).value = value;
+element("generation-direction").listeners.input();
+assert.equal(paidRequests, 0);
+const savedDirections = JSON.parse(storage.get("hydra.elevenlabs.workspace.v1")).generationSettings;
+assert.equal(savedDirections.style, "ambient strings");
+assert.equal(savedDirections.seed, null, "clearing the seed must override an anchor plan's old seed");
+assert.equal(realtimeOptions.getGenerationSettings().bpm, 85);
+element("bpm").value = "120";
+assert.equal(realtimeOptions.getGenerationSettings().bpm, 120, "the next segment uses the current direction, not the plan's saved direction");
+assert.equal(realtimeOptions.generationSettingsContainer, element("next-settings"));
+for (const [id, value, error] of [
+  ["bpm", "", /BPM/], ["bpm", "301", /BPM/],
+  ["style", " ", /Describe/], ["key", "", /requested key/],
+  ["palette", Array(21).fill("cello").join(","), /20 comma-separated/],
+  ["seed", "1.5", /whole number/], ["context", "unknown", /continuity/],
+]) {
+  const original = element(id).value;
+  element(id).value = value;
+  assert.throws(() => realtimeOptions.getGenerationSettings(), error, "invalid directions fail before any generation request");
+  element(id).value = original;
+}
+browserContext.HydraElevenLabs.showView("create");
+assert.equal(element("create").open, true);
+assert.equal(element("realtime").hidden, false);
+assert.equal(stopped, 0, "opening samepage creation must keep reactive playback running");
+assert.equal(paidRequests, 0);
+console.log("ElevenLabs UI: samepage creation, saved directions, and pre-request validation passed.");
+
+const defaults = { style: "instrumental electronic music", bpm: 100, key: "D minor",
+  instrument_palette: ["warm synthesizer tones", "soft electronic percussion"], enable_variability: false,
+  context_adherence: "high", seed: null };
+const clone = (value) => JSON.parse(JSON.stringify(value));
+const original = (id, settings = defaults) => ({ id, origin: "original", analysis_id: null, dataset_id: null,
+  dataset_name: "Original music", duration_seconds: 20, settings, can_generate: true, cache_key: "original-key",
+  sections: [{ audio_start: 0, audio_end: 20 }], created_at: "2026-10-11T00:00:00Z" });
+const savedJob = (plan) => ({ id: "saved-music", plan_id: plan.id, cache_key: plan.cache_key,
+  state: "complete", audio_url: "/saved.mp3", audio: { duration_seconds: 20 }, stem_separation: { state: "complete" } });
+
+// Exercise the real initialization, click, restore and fetch paths. These fake
+// server responses cannot reach ElevenLabs or spend credits.
+function creationHarness({ initialPlan, initialJob, stored = {}, missingAnalysis = false, ready: serviceReady = true } = {}) {
+  const nodes = new Map(), requests = [], plans = initialPlan ? [clone(initialPlan)] : [], jobs = initialJob ? [clone(initialJob)] : [];
+  let selection, planGate, rejectGeneration = false;
+  const storage = new Map([["hydra.elevenlabs.workspace.v1", JSON.stringify(stored)]]);
+  const node = (id) => {
+    if (!nodes.has(id)) nodes.set(id, { value: "", checked: false, disabled: false, hidden: false,
+      open: false, paused: true, currentTime: 0, listeners: {}, attributes: {}, classList: { add() {}, toggle() {} },
+      addEventListener(name, callback) { this.listeners[name] = callback; },
+      querySelectorAll() { return []; }, setAttribute(name, value) { this.attributes[name] = value; },
+      getAttribute(name) { return name === "src" ? this.src : this.attributes[name] || null; },
+      removeAttribute(name) { delete this.attributes[name]; if (name === "src") delete this.src; },
+      pause() { this.paused = true; }, play() { this.paused = false; return Promise.resolve(); }, focus() {}, scrollIntoView() {},
+    });
+    return nodes.get(id);
+  };
+  const workspace = { hidden: false, classList: { add() {}, toggle() {} }, querySelectorAll: () => [],
+    querySelector: (selector) => node(selector.slice(4)) };
+  const fetch = async (url, options) => {
+    const method = options?.method || "GET", body = options?.body ? JSON.parse(options.body) : undefined;
+    const route = url.replace("/api/elevenlabs", "");
+    requests.push({ method, route, body });
+    let result;
+    if (method === "GET" && route === "/status") result = { ready: serviceReady };
+    else if (method === "GET" && route === "/plans") result = { plans: clone(plans) };
+    else if (method === "GET" && route === "/generations") result = { jobs: clone(jobs) };
+    else if (method === "GET" && route.startsWith("/plans/")) result = clone(plans.find((plan) => plan.id === route.slice(7)));
+    else if (method === "GET" && route.startsWith("/analyses/")) {
+      if (missingAnalysis) return { ok: false, status: 404, json: async () => ({ error: "Missing old analysis" }) };
+      result = { id: route.slice(10), timeline: { times: [0, 1], signal: [0, 1], channels: {} } };
+    } else if (method === "POST" && route === "/plans") {
+      if (planGate) await planGate;
+      result = { ...original(`new-original-${plans.length + 1}`, body.settings), duration_seconds: body.duration_seconds };
+      plans.unshift(result);
+    } else if (method === "POST" && route === "/generations") {
+      result = { ...savedJob(plans.find((plan) => plan.id === body.plan_id)), id: `new-audio-${jobs.length + 1}` };
+      if (rejectGeneration) {
+        jobs.unshift({ ...result, state: "unknown" });
+        return { ok: false, status: 502, json: async () => ({ error: "Connection lost" }) };
+      }
+      jobs.unshift(result);
+    } else throw new Error(`Unexpected request: ${method} ${route}`);
+    return { ok: true, status: 200, json: async () => clone(result) };
+  };
+  const context = vm.createContext({
+    document: { getElementById: () => workspace }, fetch,
+    localStorage: { getItem: (key) => storage.get(key), setItem: (key, value) => storage.set(key, value) },
+    setTimeout: () => 1, clearTimeout() {}, cancelAnimationFrame() {}, requestAnimationFrame: () => 1,
+    HydraElevenRealtime: { init() {}, setSelection: (value) => { selection = value; }, activate() {}, deactivate() {} },
+  });
+  vm.runInContext(fs.readFileSync(path.join(__dirname, "../dashboard/elevenlabs.js"), "utf8"), context);
+  context.HydraElevenLabs.init();
+  for (const [id, value] of Object.entries({ style: defaults.style, bpm: "100", key: "D minor", palette: defaults.instrument_palette.join(", "), context: "high", seed: "", length: "20" })) node(id).value = value;
+  return { ui: context.HydraElevenLabs, node, workspace, requests, plans, jobs, storage,
+    get selection() { return selection; },
+    delayPlan() { let release; planGate = new Promise((resolve) => { release = resolve; }); return release; },
+    loseGenerationResponse() { rejectGeneration = true; },
+    click(id) { return node(id).listeners.click(); },
+    edit(id, value) { node(id).value = value; node(id === "length" ? "length" : "generation-direction").listeners[id === "length" ? "change" : "input"](); },
+  };
+}
+
+async function originalCreationTests() {
+  const h = creationHarness();
+  await h.ui.activate();
+  assert.equal(h.requests.some((request) => request.method === "POST"), false, "opening the page must never generate");
+  assert.doesNotMatch(h.workspace.innerHTML, /Import CSV|JSONL|Request JSON|Preview track plan|el-synthetic|el-file/,
+    "creation must have no recording or JSON workflow in either view");
+  h.edit("style", "quiet cello and piano"); h.edit("length", "40");
+  assert.equal(h.requests.some((request) => request.method === "POST"), false, "direction and length edits are free");
+  const release = h.delayPlan();
+  const firstClick = h.click("generate");
+  assert.equal(h.node("generate").disabled, true, "the first click locks creation before awaiting the local plan");
+  await h.click("generate");
+  assert.equal(h.requests.filter((request) => request.method === "POST").length, 1, "double clicks share a single in-flight action");
+  release(); await firstClick;
+  const submissions = h.requests.filter((request) => request.method === "POST");
+  assert.deepEqual(submissions.map((request) => request.route), ["/plans", "/generations"]);
+  assert.deepEqual(submissions[0].body, { kind: "original", duration_seconds: 40,
+    settings: { ...defaults, style: "quiet cello and piano" } });
+  assert.deepEqual(submissions[1].body, { plan_id: h.plans[0].id, variation: false });
+  assert.equal(h.selection.analysis, null);
+  assert.equal(h.selection.currentJob.state, "complete");
+  assert.equal(h.requests.some((request) => /datasets|analyses/.test(request.route)), false, "original creation never needs input files or analyses");
+  await h.click("generate");
+  assert.equal(h.requests.filter((request) => request.method === "POST").length, 2, "clicking saved music must not submit again");
+  assert.match(h.node("notice").textContent, /No new generation request/);
+
+  const cachedPlan = original("cached-original"), cachedJob = savedJob(cachedPlan);
+  const equivalent = creationHarness({ initialPlan: cachedPlan, initialJob: cachedJob });
+  await equivalent.ui.activate();
+  equivalent.edit("style", "another direction"); equivalent.edit("style", defaults.style);
+  await equivalent.click("generate");
+  assert.equal(equivalent.requests.filter((request) => request.method === "POST" && request.route === "/plans").length, 1);
+  assert.equal(equivalent.requests.some((request) => request.method === "POST" && request.route === "/generations"), false,
+    "equivalent settings may save a new local plan but reuse the previous audio by cache key");
+  assert.notEqual(equivalent.selection.plan.id, equivalent.selection.currentJob.plan_id);
+  assert.equal(equivalent.selection.currentJob.id, cachedJob.id);
+  await equivalent.click("variation");
+  assert.deepEqual(equivalent.requests.filter((request) => request.method === "POST" && request.route === "/generations").map((request) => request.body),
+    [{ plan_id: equivalent.selection.plan.id, variation: true }], "another version is a separate explicit paid action");
+  for (const withDirections of [false, true]) {
+    const restored = creationHarness({ initialPlan: cachedPlan, initialJob: cachedJob,
+      stored: { planId: cachedPlan.id, jobId: cachedJob.id, ...(withDirections ? { generationSettings: { ...defaults, style: "saved draft" }, durationSeconds: 60 } : {}) } });
+    await restored.ui.activate();
+    assert.equal(restored.node("audio").src, cachedJob.audio_url);
+    assert.equal(restored.requests.some((request) => /analyses|datasets|\/null/.test(request.route)), false);
+    assert.equal(restored.requests.some((request) => request.method === "POST"), false, "restoring music or unsent directions cannot generate");
+    if (withDirections) {
+      assert.equal(restored.node("style").value, "saved draft");
+      assert.equal(restored.node("length").value, "60");
+      assert.match(restored.node("generate").textContent, /Generate original/);
+    } else assert.match(restored.node("generate").textContent, /Use saved music/);
+  }
+
+  const legacyPlan = { ...original("legacy-plan"), origin: undefined, analysis_id: "old-analysis", dataset_id: "old-dataset", dataset_name: "movement.jsonl", cache_key: "legacy-key" };
+  for (const missingAnalysis of [false, true]) {
+    const legacy = creationHarness({ initialPlan: legacyPlan, initialJob: savedJob(legacyPlan), missingAnalysis });
+    await legacy.ui.activate();
+    assert.equal(legacy.node("audio").src, "/saved.mp3", "saved legacy audio opens even if its old analysis was removed");
+    assert.equal(legacy.requests.filter((request) => request.route === "/analyses/old-analysis").length, 1);
+    assert.equal(legacy.requests.some((request) => request.route.startsWith("/datasets")), false);
+    assert.equal(legacy.requests.some((request) => request.method === "POST"), false);
+    assert.equal(Boolean(legacy.selection.analysis), !missingAnalysis, "available legacy replay remains supported");
+    assert.doesNotMatch(legacy.node("saved-plan").innerHTML, /jsonl|movement/);
+    assert.match(legacy.node("generate").textContent, /Generate original/, "old recorded music is not resubmitted as the starting track");
+  }
+
+  const unknown = creationHarness();
+  await unknown.ui.activate(); unknown.loseGenerationResponse();
+  await unknown.click("generate");
+  assert.match(unknown.node("notice").textContent, /No automatic retry/);
+  await unknown.click("generate");
+  assert.equal(unknown.requests.filter((request) => request.method === "POST" && request.route === "/generations").length, 1,
+    "an unknown provider outcome must not be billed again by the normal button");
+  assert.match(unknown.node("generate").textContent, /View previous attempt/);
+
+  const bad = creationHarness(); await bad.ui.activate();
+  bad.edit("length", "25"); await bad.click("generate");
+  assert.match(bad.node("notice").textContent, /20, 40 or 60/);
+  bad.edit("length", "20"); bad.edit("bpm", ""); await bad.click("generate");
+  assert.match(bad.node("notice").textContent, /BPM/);
+  assert.equal(bad.requests.some((request) => request.method === "POST"), false, "invalid settings fail before even the free local plan request");
+
+  const unavailable = creationHarness({ ready: false }); await unavailable.ui.activate();
+  await unavailable.click("generate");
+  assert.equal(unavailable.requests.some((request) => request.method === "POST"), false);
+  console.log("ElevenLabs UI: original creation, duplicate clicks, cache/unknown guards, draft reload and legacy playback passed.");
+}
+originalCreationTests().catch((error) => { console.error(error); process.exitCode = 1; });

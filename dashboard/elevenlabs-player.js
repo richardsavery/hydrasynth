@@ -8,7 +8,10 @@ globalThis.HydraElevenPlayer = (() => {
     pan: 0, rate: 1, delayMix: 0, reverbMix: 0 });
   const LIMITS = Object.freeze({ cutoff: [20, 20000], resonance: [0.1, 12], highpass: [20, 2000],
     gain: [0, 1], pan: [-1, 1], rate: [0.75, 1.25], delayMix: [0, 0.65], reverbMix: [0, 0.65] });
+  const STEM_DEFAULTS = Object.freeze({ cutoff: 20000, resonance: 0.7, highpass: 20,
+    gain: 1, pan: 0, delayMix: 0, reverbMix: 0 });
   const MAX_STEMS = 6;
+  const MAX_STEM_CONTROLS = MAX_STEMS * 2;
   const RATE_RAMP = 0.08;
   const MiB = 1024 * 1024;
   const clamp = (value, low, high) => Math.max(low, Math.min(high, value));
@@ -44,7 +47,7 @@ globalThis.HydraElevenPlayer = (() => {
       this._transition = null;
       this._timer = null;
       this._error = null;
-      this._controls = { ...DEFAULTS, stemGains: Object.create(null) };
+      this._controls = { ...DEFAULTS, stemGains: Object.create(null), stemControls: Object.create(null) };
     }
 
     get status() { return this._status; }
@@ -54,9 +57,14 @@ globalThis.HydraElevenPlayer = (() => {
     get currentPosition() { return this._active ? this._position(this._active, this._context.currentTime) : 0; }
     get remainingSeconds() { return this._active ? this._remaining(this._active, this._context.currentTime) : this.duration / this._controls.rate; }
     get stemNames() { return (this._active?.prepared || this._prepared)?.parts.filter((part) => part.name !== null).map((part) => part.name) || []; }
+    get playingStemNames() {
+      const decks = this._decks();
+      return decks.length ? [...new Set(decks.flatMap((deck) => deck.parts.filter((part) => part.name !== null).map((part) => part.name)))] : this.stemNames;
+    }
     get warnings() { return [...((this._active?.prepared || this._prepared)?.warnings || [])]; }
     get sourceValid() { return this._valid; }
-    get controls() { return { ...this._controls, stemGains: { ...this._controls.stemGains } }; }
+    get controls() { return { ...this._controls, stemGains: { ...this._controls.stemGains },
+      stemControls: Object.fromEntries(Object.entries(this._controls.stemControls).map(([name, values]) => [name, { ...values }])) }; }
     get decodedBytes() { return [...this._cache.values()].reduce((total, entry) => total + entry.bytes, 0); }
 
     _emit(status = this._status) {
@@ -143,12 +151,25 @@ globalThis.HydraElevenPlayer = (() => {
         }
       }
       if (values.stemGains && typeof values.stemGains === "object") {
-        // Only six stems can be active, and unrelated names cannot grow state forever.
+        // A crossfade can contain two six-stem sets with different names.
         const next = Object.create(null);
-        for (const [name, value] of Object.entries(values.stemGains).slice(0, MAX_STEMS)) {
+        for (const [name, value] of Object.entries(values.stemGains).slice(0, MAX_STEM_CONTROLS)) {
           if (Number.isFinite(Number(value))) next[name] = clamp(Number(value), 0, 1);
         }
         this._controls.stemGains = next;
+      }
+      if (values.stemControls && typeof values.stemControls === "object") {
+        const next = Object.create(null);
+        for (const [name, incoming] of Object.entries(values.stemControls).slice(0, MAX_STEM_CONTROLS)) {
+          if (!name || name.length > 100 || !incoming || typeof incoming !== "object") continue;
+          const settings = {};
+          for (const key of Object.keys(STEM_DEFAULTS)) {
+            const value = incoming[key];
+            if (typeof value === "number" && Number.isFinite(value)) settings[key] = clamp(value, ...LIMITS[key]);
+          }
+          next[name] = settings;
+        }
+        this._controls.stemControls = next;
       }
       if (this._context) {
         this._smooth(this._lowpass.frequency, Math.min(this._controls.cutoff, this._context.sampleRate * 0.45));
@@ -160,7 +181,7 @@ globalThis.HydraElevenPlayer = (() => {
         this._smooth(this._reverbWet.gain, this._controls.reverbMix);
         for (const deck of this._decks()) {
           this._changeRate(deck, this._controls.rate);
-          for (const part of deck.parts) this._smooth(part.gain.gain, part.name === null ? 1 : (this._controls.stemGains[part.name] ?? 1));
+          for (const part of deck.parts) this._applyPartControls(part);
         }
       }
       return this.controls;
@@ -236,7 +257,7 @@ globalThis.HydraElevenPlayer = (() => {
       return buffer;
     }
 
-    async _prepare(track, operation) {
+    async _prepare(track, operation, options = {}) {
       this._assertValid(operation);
       if (!track || typeof track !== "object") throw new Error("Choose a saved generated track first.");
       const mix = await this._decode(track.audio_url, operation);
@@ -263,16 +284,17 @@ globalThis.HydraElevenPlayer = (() => {
           prepared.duration = Math.min(mix.duration, ...parts.map((part) => part.buffer.duration));
         } catch (error) {
           this._assertValid(operation);
+          if (options.requireStems) throw new Error(`The saved stems could not be loaded: ${error.message}`);
           prepared.warnings.push(`Playing the original mix because the stems could not be prepared: ${error.message}`);
         }
       }
       return prepared;
     }
 
-    _prepareSerial(track, operation) {
+    _prepareSerial(track, operation, options = {}) {
       // Audio decoding cannot be aborted. Serialize preparations to cap outstanding
       // decodes even if a user selects several tracks and stops in quick succession.
-      const task = this._preparation.then(() => this._prepare(track, operation));
+      const task = this._preparation.then(() => this._prepare(track, operation, options));
       this._preparation = task.catch(() => {});
       return task;
     }
@@ -286,7 +308,7 @@ globalThis.HydraElevenPlayer = (() => {
       const operation = this._newOperation();
       this._emit("loading");
       try {
-        const prepared = await this._prepareSerial(track, operation);
+        const prepared = await this._prepareSerial(track, operation, options);
         this._assertValid(operation);
         this._prepared = prepared;
         this._emit("ready");
@@ -300,15 +322,15 @@ globalThis.HydraElevenPlayer = (() => {
       } finally { this._operations.delete(operation); }
     }
 
-    async queueTrack(track) {
+    async queueTrack(track, options = {}) {
       if (this._disposed) throw new Error("This audio player has been disposed.");
-      if (!this._prepared) return this.loadTrack(track);
+      if (!this._prepared) return this.loadTrack(track, options);
       this._queueSequence++;
       for (const operation of this._operations) if (operation.queue) operation.controller.abort();
       this._queued = null;
       const operation = this._newOperation(true);
       try {
-        const prepared = await this._prepareSerial(track, operation);
+        const prepared = await this._prepareSerial(track, operation, options);
         this._assertValid(operation);
         this._queued = prepared;
         this._error = null;
@@ -362,14 +384,46 @@ globalThis.HydraElevenPlayer = (() => {
           source.loopStart = 0;
           source.loopEnd = prepared.duration;
           source.playbackRate.setValueAtTime(this._controls.rate, when);
-          gain.gain.value = part.name === null ? 1 : (this._controls.stemGains[part.name] ?? 1);
-          source.connect(gain);
-          gain.connect(deck.gain);
-          deck.parts.push({ name: part.name, source, gain });
+          const playing = { name: part.name, source, gain, nodes: [source, gain] };
+          deck.parts.push(playing);
+          if (part.name === null) {
+            source.connect(gain); gain.connect(deck.gain);
+          } else {
+            // Each stem is processed before summing into the master chain.
+            // Playback rate stays shared so instrument layers remain aligned.
+            const make = (name, method) => {
+              const node = playing[name] = ctx[method](); playing.nodes.push(node); return node;
+            };
+            const highpass = make("highpass", "createBiquadFilter"), lowpass = make("lowpass", "createBiquadFilter");
+            const pan = make("pan", "createStereoPanner"), delay = make("delay", "createDelay");
+            const feedback = make("feedback", "createGain"), delayWet = make("delayWet", "createGain");
+            const reverb = make("reverb", "createConvolver"), reverbWet = make("reverbWet", "createGain");
+            highpass.type = "highpass"; highpass.Q.value = 0.707; lowpass.type = "lowpass";
+            delay.delayTime.value = 0.24; feedback.gain.value = 0.22;
+            reverb.buffer = this._convolver.buffer;
+            source.connect(highpass); highpass.connect(lowpass); lowpass.connect(gain);
+            lowpass.connect(delay); delay.connect(feedback); feedback.connect(delay); delay.connect(delayWet); delayWet.connect(gain);
+            lowpass.connect(reverb); reverb.connect(reverbWet); reverbWet.connect(gain);
+            gain.connect(pan); pan.connect(deck.gain);
+          }
+          this._applyPartControls(playing, true);
           source.start(when, 0);
         }
       } catch (error) { this._destroyDeck(deck); throw error; }
       return deck;
+    }
+
+    _applyPartControls(part, initial = false) {
+      const set = (param, value) => { if (initial) param.value = value; else this._smooth(param, value); };
+      if (part.name === null) { set(part.gain.gain, 1); return; }
+      const values = { ...STEM_DEFAULTS, ...this._controls.stemControls[part.name] };
+      set(part.gain.gain, values.gain * (this._controls.stemGains[part.name] ?? 1));
+      set(part.lowpass.frequency, Math.min(values.cutoff, this._context.sampleRate * 0.45));
+      set(part.lowpass.Q, values.resonance);
+      set(part.highpass.frequency, values.highpass);
+      set(part.pan.pan, values.pan);
+      set(part.delayWet.gain, values.delayMix);
+      set(part.reverbWet.gain, values.reverbMix);
     }
 
     _clockAt(deck, when) {
@@ -464,8 +518,7 @@ globalThis.HydraElevenPlayer = (() => {
       deck.disposed = true;
       for (const part of deck.parts) {
         try { part.source.stop(); } catch (_) { /* A scheduled source may already have stopped. */ }
-        part.source.disconnect();
-        part.gain.disconnect();
+        for (const node of part.nodes) node.disconnect();
       }
       deck.gain.disconnect();
     }
@@ -502,5 +555,5 @@ globalThis.HydraElevenPlayer = (() => {
     }
   }
 
-  return { Player, DEFAULTS, LIMITS };
+  return { Player, DEFAULTS, LIMITS, STEM_DEFAULTS };
 })();

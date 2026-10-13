@@ -12,7 +12,7 @@ from unittest import mock
 import zipfile
 
 from elevenlabs_analysis import validate_request
-from elevenlabs_realtime import extract_stems, validated_live_request
+from elevenlabs_realtime import extract_stems, validated_continuation_request, validated_live_request
 from elevenlabs_service import ElevenLabsService, GenerationError, ServiceError, STEM_PROVIDER_URL
 import test_elevenlabs_service as fixtures
 
@@ -36,6 +36,132 @@ class RealtimeServiceTests(unittest.TestCase):
         return {"plan_id": self.plan["id"], "session_id": "test_live_session", "sequence": 0,
                 "duration_seconds": 40, "features": {"activity": 0.8, "variability": 0.2, "coverage": 1,
                 "window_seconds": 5.4, "sample_count": 54, "source": "Signal Lab"}, **overrides}
+
+    def prompt_payload(self, **overrides):
+        return {"kind": "prompt", "plan_id": self.plan["id"], "source_job_id": None,
+                "session_id": "test_prompt_session", "sequence": 0, "duration_seconds": 40,
+                "settings": {"style": "spacious jazz", "bpm": 84, "key": "F minor",
+                             "instrument_palette": ["piano", "upright bass"]}, **overrides}
+
+    def test_prompt_next_track_uses_direction_and_saved_audio_without_data(self):
+        self.plan = self.service.create_plan({"kind": "original", "duration_seconds": 20})
+        original = self.complete_stems(self.complete(self.generate()))
+        anchor_before = copy.deepcopy(self.service._read("plans", self.plan["id"]))
+        payload = self.prompt_payload(source_job_id=original["id"], duration_seconds=60)
+        status, job = self.service.dispatch("POST", "/api/elevenlabs/continuations", payload)
+        self.assertEqual(status, 202, job)
+        self.assertTrue(job["separate_stems"])
+        plan = self.service._read("plans", job["plan_id"])
+        self.assertEqual(plan["origin"], "prompt_continuation")
+        self.assertEqual(plan["analysis_settings"]["kind"], "prompt")
+        for key in ("dataset_id", "analysis_id", "dataset_hash"):
+            self.assertIsNone(plan[key])
+        self.assertEqual(plan["baseline"], {})
+        self.assertEqual(plan["thresholds"], {})
+        self.assertEqual(job["realtime"]["kind"], "prompt_continuation")
+        self.assertEqual(job["realtime"]["root_plan_id"], self.plan["id"])
+        self.assertEqual(job["realtime"]["generation_settings"], plan["settings"])
+        self.assertTrue(job["realtime"]["conditioning_applied"])
+        self.assertNotIn("observed_features", job["realtime"])
+        self.assertNotIn("observed_window_seconds", job["realtime"])
+        chunk = plan["request"]["composition_plan"]["chunks"][0]
+        self.assertEqual(chunk["duration_ms"], 60000)
+        self.assertEqual(chunk["text"], "")
+        self.assertEqual(chunk["positive_styles"], ["spacious jazz", "instrumental music", "84 BPM", "F minor", "piano", "upright bass"])
+        self.assertEqual(chunk["negative_styles"], ["vocals", "lyrics"])
+        self.assertEqual(chunk["conditioning_ref"], {"song_id": "song123", "range": {"start_ms": 0, "end_ms": 10000}})
+        self.assertEqual(chunk["condition_strength"], "high")
+        for key in ("activity", "variability", "coverage", "bands"):
+            self.assertNotIn(key, plan["sections"][0])
+        self.assertEqual(self.service._read("plans", self.plan["id"]), anchor_before)
+        self.assertEqual(list((self.service.root / "datasets").iterdir()), [])
+        self.assertEqual(list((self.service.root / "analyses").iterdir()), [])
+        completed = self.complete_stems(self.complete(job))
+        self.assertEqual(len(completed["stem_separation"]["stems"]), 6)
+        self.assertEqual(self.client.calls[-1], plan["request"])
+
+    def test_unchanged_prompt_creates_fresh_next_sequence_without_provider_reference(self):
+        first = self.complete_stems(self.complete(self.service.create_continuation_job(self.prompt_payload())))
+        first["audio"].pop("provider_song_id", None)
+        self.service._write_job(first)
+        first_plan = self.service._read("plans", first["plan_id"])
+        payload = self.prompt_payload(sequence=1, source_job_id=first["id"], plan_id=first["plan_id"])
+        second = self.service.create_continuation_job(payload)
+        second_plan = self.service._read("plans", second["plan_id"])
+        self.assertNotEqual(first["id"], second["id"])
+        self.assertNotEqual(first["cache_key"], second["cache_key"])
+        self.assertEqual(first_plan["request"], second_plan["request"])
+        self.assertEqual(second["realtime"]["root_plan_id"], self.plan["id"])
+        self.assertFalse(second["realtime"]["conditioning_applied"])
+        self.assertEqual(self.service.create_continuation_job(payload)["id"], second["id"])
+        # Prompt continuations do not claim that their recorded-data ancestor
+        # contributed observations, even when it has saved dataset identifiers.
+        self.assertIsNotNone(self.plan["dataset_id"])
+        self.assertIsNone(second_plan["dataset_id"])
+        self.assertIsNone(second_plan["analysis_id"])
+
+    def test_prompt_request_idempotency_binds_direction_and_kind(self):
+        payload = self.prompt_payload()
+        first = self.service.create_continuation_job(payload)
+        equivalent = copy.deepcopy(payload)
+        equivalent["settings"]["bpm"] = 84.0
+        self.assertEqual(self.service.create_continuation_job(equivalent)["id"], first["id"])
+        changed = copy.deepcopy(payload)
+        changed["settings"]["style"] = "acoustic folk"
+        for request in (changed, self.payload(session_id=payload["session_id"])):
+            status, result = self.service.dispatch("POST", "/api/elevenlabs/continuations", request)
+            self.assertEqual(status, 409, result)
+            self.assertIn("different saved", result["error"])
+        self.assertEqual(len(self.service.jobs()), 1)
+        self.assertEqual(self.client.calls, [])
+
+    def test_prompt_unknown_outcome_survives_restart_and_another_sequence_can_follow(self):
+        payload = self.prompt_payload()
+        first = self.service.create_continuation_job(payload)
+        self.client.failure = GenerationError("uncertain", "unknown")
+        self.service._run_job(first["id"])
+        self.service.close()
+        self.service = ElevenLabsService(self.root / "var" / "elevenlabs", self.env, client=self.client, start_worker=False)
+        reused = self.service.create_continuation_job(payload)
+        self.assertEqual(reused["id"], first["id"])
+        self.assertEqual(reused["state"], "unknown")
+        self.assertEqual(len(self.client.calls), 1)
+        next_job = self.service.create_continuation_job(self.prompt_payload(sequence=1))
+        self.assertNotEqual(next_job["id"], first["id"])
+        self.assertEqual(next_job["state"], "queued")
+
+    def test_prompt_inherits_direction_and_rejects_invalid_requests_before_saving(self):
+        self.plan = self.service.create_plan({"kind": "original", "settings": {
+            "style": "gentle jazz", "key": "G minor", "instrument_palette": ["piano", "bass"], "seed": 123,
+        }})
+        plans_before = set((self.service.root / "plans").iterdir())
+        invalid = [
+            {"features": self.payload()["features"]}, {"request": {}}, {"kind": "other"},
+            {"duration_seconds": 25}, {"duration_seconds": True}, {"sequence": -1},
+            {"session_id": ""}, {"settings": None}, {"settings": {"bpm": float("nan")}},
+            {"settings": {"style": ""}}, {"settings": {"instrument_palette": "piano"}},
+            {"settings": {"condition_strength": "high"}},
+        ]
+        for change in invalid:
+            status, result = self.service.dispatch("POST", "/api/elevenlabs/continuations", self.prompt_payload(**change))
+            self.assertEqual(status, 400, result)
+        self.assertEqual(set((self.service.root / "plans").iterdir()), plans_before)
+        self.assertEqual(self.service.jobs(), [])
+        self.assertEqual(self.client.calls, [])
+        job = self.service.create_continuation_job(self.prompt_payload(settings={"bpm": 123, "seed": None}))
+        plan = self.service._read("plans", job["plan_id"])
+        self.assertEqual(plan["settings"]["bpm"], 123)
+        for key in ("style", "key", "instrument_palette"):
+            self.assertEqual(plan["settings"][key], self.plan["settings"][key])
+        self.assertNotIn("seed", plan["request"])
+
+    def test_legacy_live_request_fingerprint_shape_is_preserved(self):
+        payload = self.payload()
+        expected = {**payload, "source_job_id": None,
+                    "features": {**payload["features"], "trend": 0}}
+        self.assertEqual(validated_live_request(payload), expected)
+        self.assertEqual(validated_continuation_request(payload), expected)
+        self.assertEqual(validated_continuation_request({**payload, "kind": "live"}), expected)
 
     def run_stems(self, original):
         self.client.separate_stems = mock.Mock(side_effect=lambda source, destination, variation: destination.write_bytes(stem_archive()))
@@ -64,6 +190,29 @@ class RealtimeServiceTests(unittest.TestCase):
         self.assertNotIn(job["plan_id"], [item["id"] for item in self.service.plans()])
         self.assertEqual(len(self.client.calls), 0)
 
+    def test_original_starting_track_anchors_a_conditioned_data_driven_continuation(self):
+        self.plan = self.service.create_plan({"kind": "original", "duration_seconds": 20,
+                                             "settings": {"style": "gentle jazz", "bpm": 84,
+                                                          "key": "F minor", "instrument_palette": ["piano", "bass"]}})
+        original = self.complete(self.generate())
+        self.complete_stems(original)
+        job = self.service.create_continuation_job(self.payload(source_job_id=original["id"]))
+        plan = self.service._read("plans", job["plan_id"])
+        chunk = plan["request"]["composition_plan"]["chunks"][0]
+        self.assertIsNone(plan["dataset_id"])
+        self.assertIsNone(plan["analysis_id"])
+        self.assertEqual(plan["baseline"], {})
+        self.assertEqual(plan["realtime"]["root_plan_id"], self.plan["id"])
+        self.assertTrue(plan["realtime"]["conditioning_applied"])
+        self.assertEqual(chunk["conditioning_ref"]["song_id"], "song123")
+        for direction in ("gentle jazz", "84 BPM", "F minor", "piano", "bass", "busy percussion"):
+            self.assertIn(direction, chunk["positive_styles"])
+        self.assertEqual(plan["sections"][0]["activity"], 0.8)
+        self.assertEqual(plan["realtime"]["observed_window_seconds"], 5.4)
+        self.assertNotIn("activity", self.service._read("plans", self.plan["id"])["sections"][0])
+        self.assertEqual(self.service.create_continuation_job(self.payload(source_job_id=original["id"]))["id"], job["id"])
+        self.assertEqual(len(self.client.calls), 1, "only the original mock generation has executed")
+
     def test_idempotent_double_click_and_reject_changed_sequence(self):
         results = []
         threads = [threading.Thread(target=lambda: results.append(self.service.create_continuation_job(self.payload()))) for _ in range(8)]
@@ -78,6 +227,51 @@ class RealtimeServiceTests(unittest.TestCase):
         self.assertIn("different saved", result["error"])
         status, _ = self.service.dispatch("POST", "/api/elevenlabs/continuations", self.payload(sequence=1))
         self.assertEqual(status, 409)
+
+    def test_next_direction_overrides_only_the_new_plan_and_is_idempotent(self):
+        anchor_before = copy.deepcopy(self.service._read("plans", self.plan["id"]))
+        settings = {"style": "quiet acoustic textures", "bpm": 72, "key": "A minor",
+                    "instrument_palette": ["piano", "muted bass"], "enable_variability": True,
+                    "context_adherence": "medium", "seed": None}
+        payload = self.payload(settings=settings)
+        job = self.service.create_continuation_job(payload)
+        applied = self.service._read("plans", job["plan_id"])
+        chunk = applied["request"]["composition_plan"]["chunks"][0]
+        for value in ("quiet acoustic textures", "72 BPM", "A minor", "piano", "muted bass"):
+            self.assertIn(value, chunk["positive_styles"])
+        self.assertEqual(chunk["context_adherence"], "medium")
+        self.assertNotIn("seed", applied["request"])
+        self.assertTrue(applied["settings"]["enable_variability"])
+        self.assertEqual(applied["realtime"]["generation_settings"], applied["settings"])
+        self.assertEqual(self.service._read("plans", self.plan["id"]), anchor_before)
+        self.assertEqual(self.service.create_continuation_job(payload)["id"], job["id"])
+        changed = copy.deepcopy(payload)
+        changed["settings"]["bpm"] = 100
+        with self.assertRaisesRegex(ServiceError, "different saved"):
+            self.service.create_continuation_job(changed)
+        self.assertEqual(len(self.service.jobs()), 1)
+        self.assertEqual(self.client.calls, [], "preparing editable direction does not itself call the provider")
+
+    def test_partial_next_direction_keeps_unspecified_anchor_settings(self):
+        self.plan["settings"] = {"style": "gentle jazz", "key": "G minor", "instrument_palette": ["piano", "bass"]}
+        self.plan = self.service._save("plans", self.plan)
+        job = self.service.create_continuation_job(self.payload(settings={"bpm": 123}))
+        settings = self.service._read("plans", job["plan_id"])["settings"]
+        self.assertEqual(settings["bpm"], 123)
+        for name in ("style", "key", "instrument_palette"):
+            self.assertEqual(settings[name], self.plan["settings"][name])
+
+    def test_invalid_next_direction_never_creates_a_job(self):
+        for settings in (None, [], {"style": ""}, {"style": "x" * 301}, {"key": "x\nsecret"},
+                         {"bpm": True}, {"bpm": float("nan")}, {"bpm": 301},
+                         {"instrument_palette": "bass"}, {"instrument_palette": [""]},
+                         {"negative_styles": ["x"] * 21}, {"seed": False}, {"seed": -1},
+                         {"context_adherence": "arbitrary"}, {"enable_variability": 1},
+                         {"request": {"model_id": "other"}}):
+            status, _ = self.service.dispatch("POST", "/api/elevenlabs/continuations", self.payload(settings=settings))
+            self.assertEqual(status, 400, settings)
+        self.assertEqual(self.service.jobs(), [])
+        self.assertEqual(self.client.calls, [])
 
     def test_unknown_survives_restart_without_resubmission(self):
         first = self.service.create_continuation_job(self.payload())

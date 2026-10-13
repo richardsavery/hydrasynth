@@ -320,6 +320,148 @@ class ServiceTests(unittest.TestCase):
         _, body = self.service.dispatch("GET", "/api/elevenlabs/generations?plan_id=unrelated")
         self.assertEqual(body["jobs"], [])
 
+    def test_original_track_uses_direction_without_dataset_or_analysis(self):
+        settings = {"style": "spacious acoustic jazz", "bpm": 84, "key": "F minor",
+                    "instrument_palette": ["piano", "upright bass"], "negative_styles": ["distortion"],
+                    "enable_variability": True, "context_adherence": "medium", "seed": 123}
+        for duration in (20, 40, 60):
+            status, plan = self.service.dispatch("POST", "/api/elevenlabs/plans", {
+                "kind": "original", "duration_seconds": duration, "settings": settings,
+            })
+            self.assertEqual(status, 201, plan)
+            self.assertEqual(plan["origin"], "original")
+            self.assertIsNone(plan["dataset_id"])
+            self.assertIsNone(plan["analysis_id"])
+            self.assertIsNone(plan["dataset_hash"])
+            self.assertEqual(plan["baseline"], {})
+            self.assertEqual(plan["settings"], settings)
+            self.assertEqual(plan["duration_seconds"], duration)
+            self.assertEqual(len(plan["request"]["composition_plan"]["chunks"]), 1)
+            chunk = plan["request"]["composition_plan"]["chunks"][0]
+            self.assertEqual(chunk["duration_ms"], duration * 1000)
+            self.assertEqual(chunk["text"], "")
+            self.assertEqual(chunk["context_adherence"], "medium")
+            for direction in ("spacious acoustic jazz", "instrumental music", "84 BPM", "F minor", "piano", "upright bass"):
+                self.assertIn(direction, chunk["positive_styles"])
+            self.assertEqual(chunk["negative_styles"], ["vocals", "lyrics", "distortion"])
+            self.assertEqual(plan["request"]["seed"], 123)
+            self.assertTrue(plan["request"]["store_for_inpainting"])
+            self.assertIsNone(plan["sections"][0]["source_start"])
+            for observation in ("activity", "variability", "coverage", "bands"):
+                self.assertNotIn(observation, plan["sections"][0])
+        self.assertEqual(list((self.service.root / "datasets").iterdir()), [])
+        self.assertEqual(list((self.service.root / "analyses").iterdir()), [])
+        self.assertEqual(self.service.jobs(), [])
+        self.assertEqual(self.client.calls, [])
+
+    def test_original_track_rejects_invalid_settings_and_durations_before_saving(self):
+        initial_plans = len(self.service.plans())
+        for duration in (True, 0, 10, 20.0, "20", 80, None):
+            status, _ = self.service.dispatch("POST", "/api/elevenlabs/plans", {
+                "kind": "original", "duration_seconds": duration,
+            })
+            self.assertEqual(status, 400, duration)
+        for settings in (None, [], {"style": ""}, {"style": "x" * 301}, {"key": "x\ny"},
+                         {"bpm": True}, {"bpm": float("nan")}, {"bpm": 301},
+                         {"instrument_palette": "piano"}, {"instrument_palette": [""]},
+                         {"negative_styles": ["x"] * 21}, {"seed": False}, {"seed": -1},
+                         {"context_adherence": "arbitrary"}, {"enable_variability": 1},
+                         {"request": {"model_id": "other"}}):
+            status, _ = self.service.dispatch("POST", "/api/elevenlabs/plans", {
+                "kind": "original", "settings": settings,
+            })
+            self.assertEqual(status, 400, settings)
+        status, _ = self.service.dispatch("POST", "/api/elevenlabs/plans", {
+            "kind": "original", "request": self.plan["request"],
+        })
+        self.assertEqual(status, 400)
+        self.assertEqual(len(self.service.plans()), initial_plans)
+        self.assertEqual(self.service.jobs(), [])
+        self.assertEqual(self.client.calls, [])
+
+    def test_original_track_restores_lists_and_exports_without_source_records(self):
+        plan = self.service.create_plan({"kind": "original", "duration_seconds": 40})
+        self.service.close()
+        self.service = ElevenLabsService(self.root / "var" / "elevenlabs", self.env, client=self.client, start_worker=False)
+        status, restored = self.service.dispatch("GET", "/api/elevenlabs/plans/" + plan["id"])
+        self.assertEqual(status, 200)
+        self.assertEqual(restored, plan)
+        status, listed = self.service.dispatch("GET", "/api/elevenlabs/plans")
+        self.assertEqual(status, 200)
+        self.assertIn(plan, listed["plans"])
+        status, exported = self.service.dispatch("GET", "/api/elevenlabs/plans/" + plan["id"] + "/export")
+        self.assertEqual(status, 200)
+        with zipfile.ZipFile(exported.path) as archive:
+            manifest = json.loads(archive.read("manifest.json"))
+            features = json.loads(archive.read("features.json"))
+            self.assertEqual(manifest["origin"], "original")
+            self.assertIsNone(manifest["dataset_id"])
+            self.assertIsNone(manifest["analysis_id"])
+            self.assertEqual(manifest["analysis_settings"], {"kind": "original", "channels": []})
+            self.assertEqual(features["baseline"], {})
+            self.assertNotIn("activity", features["sections"][0])
+            self.assertEqual(json.loads(archive.read("request.json")), plan["request"])
+        self.assertEqual(self.client.calls, [])
+
+    def test_equivalent_original_tracks_reuse_audio_and_automatic_stems(self):
+        plan = self.service.create_plan({"kind": "original"})
+        same = self.service.create_plan({"kind": "original", "duration_seconds": 20,
+                                         "settings": {**plan["settings"], "bpm": 100.0, "seed": None}})
+        self.assertEqual(plan["cache_key"], same["cache_key"])
+        first = self.service.create_generation({"plan_id": plan["id"]})
+        repeated = self.service.create_generation({"plan_id": same["id"]})
+        self.assertEqual(first["id"], repeated["id"])
+        self.assertTrue(first["separate_stems"])
+        self.assertEqual(self.client.calls, [])
+        completed = self.complete(first)
+        self.assertEqual(completed["stem_separation"]["state"], "queued")
+        completed = self.complete_stems(completed)
+        reused = self.service.create_generation({"plan_id": same["id"]})
+        self.assertEqual(completed["id"], reused["id"])
+        self.assertEqual(len(reused["stem_separation"]["stems"]), 6)
+        self.assertEqual(self.client.calls, [plan["request"]])
+        self.assertEqual(len(self.client.stem_calls), 1)
+        exported = self.service.export(plan, completed)
+        with zipfile.ZipFile(exported.path) as archive:
+            self.assertEqual(json.loads(archive.read("manifest.json"))["origin"], "original")
+            self.assertEqual(archive.read("audio.mp3"), b"mock valid audio")
+            self.assertIn("stems/drums.mp3", archive.namelist())
+        changed = self.service.create_plan({"kind": "original", "settings": {"bpm": 90}})
+        self.assertNotEqual(plan["cache_key"], changed["cache_key"])
+
+    def test_prompt_track_history_and_export_retain_truthful_provenance(self):
+        plan = self.service.create_plan({"kind": "original"})
+        job = self.service.create_continuation_job({
+            "kind": "prompt", "plan_id": plan["id"], "source_job_id": None,
+            "session_id": "prompt_export", "sequence": 0, "duration_seconds": 20,
+            "settings": {"style": "slow piano and strings", "bpm": 72},
+        })
+        completed = self.complete_stems(self.complete(job))
+        self.service.close()
+        self.service = ElevenLabsService(self.root / "var" / "elevenlabs", self.env, client=self.client, start_worker=False)
+        status, history = self.service.dispatch("GET", "/api/elevenlabs/generations")
+        self.assertEqual(status, 200)
+        saved = next(item for item in history["jobs"] if item["id"] == job["id"])
+        self.assertEqual(saved["realtime"]["kind"], "prompt_continuation")
+        self.assertEqual(saved["stem_separation"]["state"], "complete")
+        prompt_plan = self.service._read("plans", job["plan_id"])
+        exported = self.service.export(prompt_plan, saved)
+        with zipfile.ZipFile(exported.path) as archive:
+            manifest = json.loads(archive.read("manifest.json"))
+            features = json.loads(archive.read("features.json"))
+            self.assertEqual(manifest["origin"], "prompt_continuation")
+            self.assertEqual(manifest["realtime"]["generation_settings"]["style"], "slow piano and strings")
+            self.assertIsNone(manifest["dataset_id"])
+            self.assertIsNone(manifest["analysis_id"])
+            self.assertIsNone(manifest["dataset_hash"])
+            self.assertNotIn("observed_features", manifest["realtime"])
+            self.assertNotIn("activity", features["sections"][0])
+            self.assertEqual(features["baseline"], {})
+            self.assertEqual(json.loads(archive.read("request.json")), prompt_plan["request"])
+            self.assertIn("stems/drums.mp3", archive.namelist())
+        self.assertEqual(len(self.client.calls), 1)
+        self.assertEqual(len(self.client.stem_calls), 1)
+
     def test_browser_numeric_roundtrip_and_old_cache_migration_reuse_audio(self):
         dataset = self.service.create_dataset({"synthetic": True})
         analysis = self.service.create_analysis({"dataset_id": dataset["id"], "settings": dataset["defaults"]})

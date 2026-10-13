@@ -181,7 +181,7 @@ globalThis.HydraSonification = (() => {
       }
       const sources = inputFields.map((input) => ({ sourceKey: input.key,
         reducer: pick(input.reducers.filter((reducer) => reducer !== "index")), index: 0,
-        weight: pick([0.5, 1, 2, 3]) }));
+        weight: pick([0.5, 1, 2, 3]), rangeMode: "auto", inputMin: -1, inputMax: 1 }));
       let minimum = destination.from;
       let maximum = destination.to;
       if (target === "pitch") { minimum = pick([36, 42, 48]); maximum = pick([72, 84, 96]); }

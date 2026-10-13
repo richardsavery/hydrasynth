@@ -1,7 +1,9 @@
 # Movement drums
 
 Signal Lab can turn recorded or live RAPP movement into an electronic drum groove.
-Choose **Movement drums** in the sound output selector, then press **Preview**.
+Choose an input in **Connections**, open the **Drums** tab, then press **Preview**.
+Basic keeps the main kit, style, sensitivity, and volume controls visible.
+Advanced reveals detailed rhythm settings, source selection, and presets.
 The kit plays through the browser's speakers or headphones. It needs no
 Hydrasynth, MIDI device, sample downloads, or additional dependencies.
 
@@ -11,9 +13,9 @@ Web Audio support. Playback begins after a user presses Preview.
 
 ## Choose the movement
 
-Select a recording from the library, or connect under **Live RAPP** using the
+Select a recording in **Connections**, or choose **Live stream** using the
 WebSocket address supplied by the RAPP producer. See [Live input](live_streaming.md)
-for the protocol and replay-server setup. Select **Movement drums** after
+for the protocol and replay-server setup. Open **Drums** after
 choosing either source. A live connection still needs incoming numeric fields
 before the groove can follow movement.
 

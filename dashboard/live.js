@@ -5,6 +5,7 @@ globalThis.HydraLive = (() => {
   const REDUCERS = ["mean", "rms", "minimum", "maximum", "index"];
   const MAX_VALUES = 262144;
   const finite = (value) => typeof value === "number" && Number.isFinite(value);
+  const sourceId = (source) => `${source.sourceKey}|${source.reducer}|${source.index}`;
   const display = (value) => value.replaceAll("_", " ").replaceAll("-", " ");
   function flatten(raw) {
     if (!Array.isArray(raw)) return null;
@@ -37,9 +38,9 @@ globalThis.HydraLive = (() => {
     return finite(value) ? value : null;
   }
   class Stream {
-    constructor() { this.channels = new Map(); this.fieldIndex = new Map(); this.samples = new Map(); this.lastAt = null; this.frames = 0; this.invalid = 0; }
+    constructor() { this.channels = new Map(); this.fieldIndex = new Map(); this.samples = new Map(); this.ranges = new Map(); this.lastAt = null; this.frames = 0; this.invalid = 0; }
     ingest(frame, now) {
-      if (!frame || typeof frame !== "object" || typeof frame.channel !== "string" || frame.channel.length > 160) { this.invalid++; return false; }
+      if (!finite(now) || !frame || typeof frame !== "object" || typeof frame.channel !== "string" || frame.channel.length > 160) { this.invalid++; return false; }
       if (frame.channel === "__status__") return false;
       const channelId = frame.channel;
       if (!this.channels.has(channelId) && this.channels.size >= 32) { this.invalid++; return false; }
@@ -58,6 +59,7 @@ globalThis.HydraLive = (() => {
       }
       if (!size || size > MAX_VALUES) { this.invalid++; return false; }
       const previous = this.channels.get(channelId);
+      if (previous && now < previous.at) { this.invalid++; return false; }
       const channel = { arrays, at: now, revision: (previous?.revision || 0) + 1 };
       this.channels.set(channelId, channel); this.lastAt = now; this.frames++;
       let discovered = false;
@@ -74,19 +76,44 @@ globalThis.HydraLive = (() => {
           values.slice(0, 256).forEach((_, index) => add(`${key}:${index}`, `${String(frame.labels[index]).slice(0, 80)} ${key === "data" ? "position" : "velocity"}`, key === "data" ? "position" : "velocity", true));
         } else add(key, display(key.replace(/^tensor:/, "")), key.startsWith("tensor:") ? "tensor" : "array");
       }
+      // Learn every incoming frame for registered mapping inputs, even between UI/audio ticks.
+      const reductions = new Map();
+      for (const [source, range] of this.ranges) {
+        const field = this.fieldIndex.get(source.sourceKey);
+        if (source.rangeMode === "fixed" || range.key !== sourceId(source) || field?.channelId !== channelId) continue;
+        if (!reductions.has(range.key)) reductions.set(range.key, this.valueFor(source, field, channel));
+        const value = reductions.get(range.key);
+        if (value !== null) this.learn(source, value, channel.revision);
+      }
       return discovered;
+    }
+    valueFor(source, field, channel) {
+      const indexed = /^(data|velocity):\d+$/.exec(field.fieldId);
+      const base = indexed ? field.fieldId.split(":")[0] : field.fieldId;
+      const index = indexed ? Number(field.fieldId.split(":")[1]) : source.index;
+      return reduce(channel.arrays.get(base), indexed ? "index" : source.reducer, index);
+    }
+    learn(source, value, revision) {
+      const key = sourceId(source);
+      let range = this.ranges.get(source);
+      if (!range || range.key !== key) {
+        if (this.ranges.size >= 512) this.ranges.delete(this.ranges.keys().next().value);
+        range = { key, minimum: value, maximum: value, revision };
+        this.ranges.set(source, range);
+      } else if (source.rangeMode !== "fixed" && range.revision !== revision) {
+        range.minimum = Math.min(range.minimum, value); range.maximum = Math.max(range.maximum, value);
+        range.revision = revision;
+      }
+      return range;
     }
     read(source, now, timeout = 3000) {
       const field = this.fieldIndex.get(source.sourceKey);
       const channel = field && this.channels.get(field.channelId);
-      if (!channel || now - channel.at > timeout) return null;
-      const key = `${source.sourceKey}|${source.reducer}|${source.index}`;
+      if (!finite(now) || !channel || now < channel.at || now - channel.at > timeout) return null;
+      const key = sourceId(source);
       let sample = this.samples.get(key);
       if (!sample || sample.revision !== channel.revision) {
-        const indexed = /^(data|velocity):\d+$/.exec(field.fieldId);
-        const base = indexed ? field.fieldId.split(":")[0] : field.fieldId;
-        const index = indexed ? Number(field.fieldId.split(":")[1]) : source.index;
-        const value = reduce(channel.arrays.get(base), indexed ? "index" : source.reducer, index);
+        const value = this.valueFor(source, field, channel);
         if (value === null) return null;
         if (!sample) {
           if (this.samples.size >= 512) this.samples.delete(this.samples.keys().next().value);
@@ -98,13 +125,20 @@ globalThis.HydraLive = (() => {
         if (sample.points.length > 256) sample.points.shift();
         this.samples.set(key, sample);
       }
-      const minimum = source.rangeMode === "fixed" ? Number(source.inputMin) : sample.minimum;
-      const maximum = source.rangeMode === "fixed" ? Number(source.inputMax) : sample.maximum;
+      // Explicit mapping range modes belong to each input; legacy readers retain shared history.
+      const range = source.rangeMode ? this.learn(source, sample.value, channel.revision) : sample;
+      const minimum = source.rangeMode === "fixed" ? Number(source.inputMin) : range.minimum;
+      const maximum = source.rangeMode === "fixed" ? Number(source.inputMax) : range.maximum;
       if (!finite(minimum) || !finite(maximum) || (source.rangeMode === "fixed" && maximum <= minimum)) return null;
       const normalized = maximum > minimum ? Math.max(0, Math.min(1, (sample.value - minimum) / (maximum - minimum))) : 0.5;
       return { ...sample, minimum, maximum, normalized };
     }
-    resetRanges() { this.samples.clear(); }
+    getRange(source) {
+      const range = this.ranges.get(source);
+      return range?.key === sourceId(source) ? { minimum: range.minimum, maximum: range.maximum } : null;
+    }
+    resetRange(source) { this.ranges.delete(source); }
+    resetRanges() { this.samples.clear(); this.ranges.clear(); }
     get fields() { return [...this.fieldIndex.values()]; }
   }
   return { Stream, reduce, flatten };

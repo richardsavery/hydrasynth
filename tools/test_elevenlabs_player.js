@@ -164,6 +164,30 @@ async function main() {
     player.stop();
   }
   {
+    const { player, tick } = fixture();
+    const firstStems = Array.from({ length: 6 }, (_, index) => ({ name: `Old ${index}`, audio_url: `/old-stem-${index}` }));
+    const nextStems = Array.from({ length: 6 }, (_, index) => ({ name: `New ${index}`, audio_url: `/new-stem-${index}` }));
+    await player.loadTrack(track("old-mute-set", { stems: firstStems }));
+    await player.start();
+    const names = [...firstStems, ...nextStems].map((stem) => stem.name);
+    player.updateControls({ stemGains: Object.fromEntries(names.map((name) => [name, 0])),
+      stemControls: Object.fromEntries(names.map((name) => [name, { gain: 1, cutoff: 1200 }])) });
+    await player.queueTrack(track("new-mute-set", { stems: nextStems }));
+    tick(18);
+    const fading = player._transition;
+    assert.equal(player.playingStemNames.length, 12, "both sides of a crossfade expose their stem names");
+    tick(fading.start + 0.01);
+    assert.equal(player.currentTrack.id, "new-mute-set");
+    assert.equal(player.playingStemNames.length, 12, "old names remain visible until their fade completes");
+    for (const deck of [fading.old, fading.next]) for (const part of deck.parts) {
+      assert.equal(part.gain.gain.value, 0, "all twelve stem controls survive a crossfade between different names");
+      assert.equal(part.lowpass.frequency.value, 1200);
+    }
+    tick(fading.end + 0.03);
+    assert.deepEqual([...player.playingStemNames], nextStems.map((stem) => stem.name));
+    player.stop();
+  }
+  {
     const { player, assets, tick } = fixture();
     const stems = [{ name: "bass", audio_url: "/bass" }, { name: "drums", audio_url: "/drums" }];
     await player.loadTrack(track("stems", { stems }));
@@ -202,6 +226,92 @@ async function main() {
     assert.equal(player.status, "playing", "a failed replacement leaves the current audio playing");
     assert.equal(player.currentTrack.id, "fallback");
     player.stop();
+  }
+  {
+    const { player, assets, tick } = fixture();
+    const stems = [{ name: "Bass", audio_url: "/strict-bass" }, { name: "Drums", audio_url: "/strict-drums" }];
+    await player.loadTrack(track("strict-current", { stems }), { requireStems: true });
+    player.updateControls({ stemGains: { Bass: 0, Drums: 0.7 } }); await player.start();
+    assets.set("/unavailable-stem", { error: "File unavailable" });
+    const broken = track("strict-next", { stems: [{ name: "Bass", audio_url: "/unavailable-stem" }] });
+    await assert.rejects(player.queueTrack(broken, { requireStems: true }), /saved stems could not be loaded/);
+    assert.equal(player.queuedTrack, null, "strict queue failures cannot install a fullmix replacement");
+    assert.equal(player.currentTrack.id, "strict-current");
+    assert.equal(player._active.parts[0].gain.gain.value, 0, "failed preparation leaves current mutes intact");
+    tick(18); tick(18.1);
+    assert.equal(player._transition.reason, "loop", "the last working stems repeat when replacement preparation fails");
+    assert.equal(player._transition.next.parts[0].gain.gain.value, 0);
+    tick(20.1);
+    assets.delete("/unavailable-stem");
+    await player.queueTrack(broken, { requireStems: true });
+    assert.equal(player.queuedTrack.id, "strict-next", "a later valid replacement remains possible after failure");
+    player.stop();
+    assets.set("/missing-first-stem", { error: "File unavailable" });
+    await assert.rejects(player.loadTrack(track("strict-load", { stems: [{ name: "Bass", audio_url: "/missing-first-stem" }] }),
+      { requireStems: true }), /saved stems could not be loaded/);
+    assert.equal(player.currentTrack, null, "strict initial loads also cannot install an unmuted fullmix");
+    player.dispose();
+  }
+  {
+    const { player, tick } = fixture();
+    const stems = [{ name: "Bass", audio_url: "/isolated-bass" }, { name: "Drums", audio_url: "/isolated-drums" }];
+    await player.loadTrack(track("stem-effects", { stems }));
+    player.updateControls({ cutoff: 9000, stemGains: { Bass: 0.5 }, stemControls: {
+      Bass: { cutoff: 450, resonance: 3, highpass: 80, gain: 0.4, pan: -0.6, delayMix: 0.2, reverbMix: 0.3 },
+      Drums: { cutoff: 11000, pan: 0.2 }
+    } });
+    await player.start();
+    const [bass, drums] = player._active.parts;
+    assert.equal(bass.lowpass.frequency.value, 450, "a Bass filter acts on the Bass graph");
+    assert.equal(drums.lowpass.frequency.value, 11000, "Drums has a separate filter");
+    assert.equal(player._lowpass.frequency.value, 9000, "the master remains independent");
+    assert.equal(bass.highpass.frequency.value, 80);
+    assert.equal(bass.lowpass.Q.value, 3);
+    near(bass.gain.gain.value, 0.2, "mapping volume multiplies the manual stem mixer");
+    assert.equal(bass.pan.pan.value, -0.6);
+    assert.equal(bass.delayWet.gain.value, 0.2);
+    assert.equal(bass.reverbWet.gain.value, 0.3);
+    assert.ok(bass.source.connections.includes(bass.highpass));
+    assert.ok(bass.reverbWet.connections.includes(bass.gain), "stem volume controls effect tails too");
+    assert.ok(bass.pan.connections.includes(player._active.gain), "every stem effect still passes through the master and stale-input gate");
+    assert.equal(bass.reverb.buffer, player._convolver.buffer, "stems share the immutable impulse buffer");
+    const copy = player.controls;
+    copy.stemControls.Bass.cutoff = 1;
+    assert.equal(player.controls.stemControls.Bass.cutoff, 450, "control snapshots cannot mutate live settings");
+    player.updateControls({ stemGains: { Bass: 0 }, stemControls: {
+      Bass: { gain: 1, delayMix: 0.65, reverbMix: 0.65 }, Drums: { gain: 0.7 }
+    } });
+    assert.equal(bass.gain.gain.value, 0, "a manual mute overrides mapped volume and both stem wet paths");
+    assert.equal(drums.gain.gain.value, 0.7, "muting one stem leaves other stems audible");
+    player.updateControls({ stemGains: { Bass: 0.5 } });
+    assert.equal(bass.gain.gain.value, 0.5, "unmute can restore the remembered mix level without resetting the mapping");
+    player.updateControls({ stemControls: { Bass: { cutoff: 800, resonance: 900, delayMix: 3, rate: 0.5 } } });
+    assert.equal(bass.lowpass.frequency.value, 800);
+    assert.equal(bass.lowpass.Q.value, 12, "stem resonance is bounded");
+    assert.equal(bass.delayWet.gain.value, 0.65, "stem wet levels are bounded");
+    assert.equal(drums.lowpass.frequency.value, 20000, "removing a mapped stem effect restores its default");
+    assert.equal(bass.source.playbackRate.value, drums.source.playbackRate.value, "per-stem speed cannot break alignment");
+    assert.equal(player.controls.stemControls.Bass.rate, undefined);
+    await player.queueTrack(track("replacement-stems", { stems }));
+    tick(18);
+    const transition = player._transition;
+    assert.equal(transition.next.parts[0].lowpass.frequency.value, 800, "stem mappings carry across generated segments");
+    player.updateControls({ stemControls: { Bass: { cutoff: 1200, pan: 0.5 } } });
+    for (const deck of [transition.old, transition.next]) {
+      assert.equal(deck.parts[0].lowpass.frequency.value, 1200, "both sides of a crossfade follow mapped stem effects");
+      assert.equal(deck.parts[0].pan.pan.value, 0.5);
+    }
+    player.updateControls({ stemGains: { Bass: 0 } });
+    assert.equal(transition.old.parts[0].gain.gain.value, 0);
+    assert.equal(transition.next.parts[0].gain.gain.value, 0, "a mute covers both sides of a segment crossfade");
+    player.updateControls({ stemControls: { Missing: { cutoff: 20 } } });
+    assert.equal(bass.lowpass.frequency.value, 20000);
+    assert.equal(player._lowpass.frequency.value, 9000, "an unavailable stem never redirects its effect to master");
+    player.updateControls({}, false);
+    assert.equal(player._gate.gain.value, 0, "stale data silences the master after all stem effects");
+    const parts = [...transition.old.parts, ...transition.next.parts];
+    player.stop();
+    assert.ok(parts.every(part => part.nodes.every(node => node.disconnected)), "stop disconnects all per-stem effects, including feedback loops");
   }
   {
     const { player, tick, timers } = fixture();

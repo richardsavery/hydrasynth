@@ -87,6 +87,48 @@ const invalidBefore = live.invalid;
 live.ingest({channel: "oversized", data: new Array(262145).fill(0)}, 4200);
 assert.equal(live.invalid, invalidBefore + 1);
 live.resetRanges(); assert.equal(live.samples.size, 0);
+// Each mapping input learns independently, including peaks between playback ticks.
+const calibrated = new L.Stream();
+const firstInput = { sourceKey: "sensor|data", reducer: "mean", index: 0, rangeMode: "auto" };
+const secondInput = { ...firstInput };
+calibrated.ingest({ channel: "sensor", data: [10] }, 100);
+assert.equal(calibrated.read(firstInput, 100).normalized, 0.5);
+calibrated.read(secondInput, 100);
+const reduceValue = calibrated.valueFor.bind(calibrated);
+let reductions = 0;
+calibrated.valueFor = (...args) => { reductions++; return reduceValue(...args); };
+calibrated.ingest({ channel: "sensor", data: [80] }, 200);
+assert.equal(reductions, 1, "duplicate input mappings reduce a tensor only once per incoming frame");
+calibrated.valueFor = reduceValue;
+calibrated.ingest({ channel: "sensor", data: [30] }, 300);
+assert.deepEqual(calibrated.getRange(firstInput), { minimum: 10, maximum: 80 });
+assert.equal(calibrated.read(firstInput, 300).normalized, 2 / 7);
+calibrated.resetRange(firstInput);
+assert.equal(calibrated.read(firstInput, 300).normalized, 0.5);
+assert.deepEqual(calibrated.getRange(firstInput), { minimum: 30, maximum: 30 });
+assert.deepEqual(calibrated.getRange(secondInput), { minimum: 10, maximum: 80 }, "relearn must leave other inputs alone");
+Object.assign(secondInput, { rangeMode: "fixed", inputMin: 10, inputMax: 80 });
+calibrated.ingest({ channel: "sensor", data: [100] }, 400);
+assert.equal(calibrated.read(secondInput, 400).normalized, 1, "fixed ranges clamp outliers");
+assert.deepEqual(calibrated.getRange(secondInput), { minimum: 10, maximum: 80 }, "frozen input ranges must stop expanding");
+assert.deepEqual(calibrated.getRange(firstInput), { minimum: 30, maximum: 100 });
+calibrated.ingest({ channel: "sensor", data: ["bad", null] }, 500);
+assert.equal(calibrated.read(firstInput, 500), null);
+assert.deepEqual(calibrated.getRange(firstInput), { minimum: 30, maximum: 100 }, "invalid samples cannot poison learning");
+calibrated.ingest({ channel: "sensor", data: [-1000] }, 200);
+assert.equal(calibrated.read(firstInput, 500), null, "out-of-order frames cannot replace the current sample");
+assert.equal(calibrated.read(firstInput, 4000), null);
+assert.deepEqual(calibrated.getRange(firstInput), { minimum: 30, maximum: 100 }, "stale reads cannot change learned bounds");
+calibrated.ingest({ channel: "sensor", data: [2, 6] }, 4100);
+firstInput.reducer = "maximum";
+assert.equal(calibrated.read(firstInput, 4100).normalized, 0.5);
+assert.deepEqual(calibrated.getRange(firstInput), { minimum: 6, maximum: 6 }, "changing the reducer starts a new input range");
+firstInput.reducer = "index"; firstInput.index = 0;
+assert.equal(calibrated.read(firstInput, 4100).value, 2);
+firstInput.index = 1;
+assert.deepEqual(calibrated.getRange(firstInput), null);
+assert.equal(calibrated.read(firstInput, 4100).value, 6);
+assert.deepEqual(calibrated.getRange(firstInput), { minimum: 6, maximum: 6 });
 // A preset keeps independent targets and missing live sources through a round trip.
 const mappings = [{sources: [source], operator: "direct", targets: [
   {destination: "pitch", minimum: 40, maximum: 90, curve: "inverse", enabled: true},

@@ -1,4 +1,4 @@
-"""Pure live-summary planning and bounded, validated stem archive handling."""
+"""Pure musical-direction/live-summary planning and validated stem archives."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ import stat
 from typing import Any, Callable
 import zipfile
 
-from elevenlabs_analysis import compile_plan
+from elevenlabs_analysis import SCHEMA_VERSION, compile_plan, validate_request
 
 SESSION_ID = re.compile(r"^[A-Za-z0-9_-]{1,80}$")
 STEM_ID = re.compile(r"^[a-z][a-z0-9_-]{0,63}$")
@@ -21,8 +21,42 @@ MAX_UNPACKED_BYTES = 384 * 1024 * 1024
 AUDIO_SUFFIXES = {".mp3", ".wav", ".flac", ".ogg", ".m4a", ".aac"}
 
 
-def validated_live_request(payload: dict[str, Any]) -> dict[str, Any]:
-    """Only bounded summaries, never browser-supplied provider instructions."""
+def validated_generation_settings(settings: Any) -> dict[str, Any]:
+    """Validate editable musical direction before allocating any paid job."""
+    allowed = {"style", "bpm", "key", "instrument_palette", "negative_styles",
+               "enable_variability", "context_adherence", "seed"}
+    if not isinstance(settings, dict) or set(settings) - allowed:
+        raise ValueError("settings must contain only supported musical direction fields.")
+    result = copy.deepcopy(settings)
+    for name, maximum in (("style", 300), ("key", 80)):
+        if name in result:
+            value = result[name]
+            if not isinstance(value, str) or not value.strip() or len(value) > maximum or any(ord(char) < 32 for char in value):
+                raise ValueError(f"settings.{name} must be a nonempty printable string of at most {maximum} characters.")
+            result[name] = value.strip()
+    if "bpm" in result:
+        value = result["bpm"]
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or not 20 <= value <= 300:
+            raise ValueError("settings.bpm must be a finite number from 20 to 300.")
+    for name in ("instrument_palette", "negative_styles"):
+        if name in result:
+            values = result[name]
+            if not isinstance(values, list) or len(values) > 20 or any(
+                not isinstance(value, str) or not value.strip() or len(value) > 300
+                or any(ord(char) < 32 for char in value) for value in values
+            ):
+                raise ValueError(f"settings.{name} must contain at most 20 nonempty style strings of at most 300 characters.")
+            result[name] = [value.strip() for value in values]
+    if "enable_variability" in result and type(result["enable_variability"]) is not bool:
+        raise ValueError("settings.enable_variability must be true or false.")
+    if "context_adherence" in result and result["context_adherence"] not in ("low", "medium", "high"):
+        raise ValueError("settings.context_adherence must be low, medium, or high.")
+    if "seed" in result and result["seed"] is not None and (type(result["seed"]) is not int or not 0 <= result["seed"] <= 2147483647):
+        raise ValueError("settings.seed must be null or an integer from 0 to 2147483647.")
+    return result
+
+
+def _validated_continuation_envelope(payload: dict[str, Any]) -> dict[str, Any]:
     session = payload.get("session_id")
     sequence = payload.get("sequence")
     duration = payload.get("duration_seconds", 40)
@@ -32,6 +66,29 @@ def validated_live_request(payload: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("sequence must be an integer from 0 to 1000000.")
     if type(duration) is not int or duration not in {20, 40, 60}:
         raise ValueError("duration_seconds must be 20, 40 or 60.")
+    result = {"session_id": session, "sequence": sequence, "duration_seconds": duration,
+              "plan_id": payload.get("plan_id"), "source_job_id": payload.get("source_job_id")}
+    # Omit absent settings to retain fingerprints for saved live requests.
+    if "settings" in payload:
+        result["settings"] = validated_generation_settings(payload["settings"])
+    return result
+
+
+def validated_continuation_request(payload: dict[str, Any]) -> dict[str, Any]:
+    """Keep prompt-driven requests distinct from measured live-input summaries."""
+    if payload.get("kind") == "prompt":
+        allowed = {"kind", "plan_id", "source_job_id", "session_id", "sequence", "duration_seconds", "settings"}
+        if set(payload) - allowed:
+            raise ValueError("Prompt continuations accept musical settings and track references, without live features or provider requests.")
+        return {"kind": "prompt", **_validated_continuation_envelope(payload)}
+    if payload.get("kind") not in (None, "live"):
+        raise ValueError("Continuation kind must be prompt or live.")
+    return validated_live_request(payload)
+
+
+def validated_live_request(payload: dict[str, Any]) -> dict[str, Any]:
+    """Accept bounded summaries and editable direction, never raw provider requests."""
+    result = _validated_continuation_envelope(payload)
     incoming = payload.get("features")
     if not isinstance(incoming, dict):
         raise ValueError("Provide the recent live feature summary.")
@@ -57,9 +114,72 @@ def validated_live_request(payload: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(source, str) or not 1 <= len(source) <= 80 or any(ord(char) < 32 for char in source):
             raise ValueError("features.source must be a short, printable input label.")
         features["source"] = source
-    return {"session_id": session, "sequence": sequence, "duration_seconds": duration,
-            "features": features, "plan_id": payload.get("plan_id"),
-            "source_job_id": payload.get("source_job_id")}
+    result["features"] = features
+    return result
+
+
+def original_music_plan(payload: dict[str, Any]) -> dict[str, Any]:
+    """Build an instrumental starting track without inventing source observations."""
+    if set(payload) - {"kind", "duration_seconds", "settings"}:
+        raise ValueError("Original music accepts only kind, duration_seconds and musical settings.")
+    duration = payload.get("duration_seconds", 20)
+    if type(duration) is not int or duration not in {20, 40, 60}:
+        raise ValueError("duration_seconds must be 20, 40 or 60.")
+    settings = {
+        "style": "instrumental electronic music", "key": "D minor", "bpm": 100,
+        "instrument_palette": ["warm synthesizer tones", "soft electronic percussion"],
+        "negative_styles": [], "enable_variability": False, "context_adherence": "high",
+        **validated_generation_settings(payload.get("settings", {})),
+    }
+    if settings.get("seed") is None:
+        settings.pop("seed", None)
+    anchors = [settings["style"], "instrumental music", f"{settings['bpm']:g} BPM", settings["key"],
+               *settings["instrument_palette"]]
+    chunk = {
+        "text": "", "duration_ms": duration * 1000,
+        "positive_styles": list(dict.fromkeys(anchors)),
+        "negative_styles": list(dict.fromkeys(["vocals", "lyrics", *settings["negative_styles"]])),
+        "context_adherence": settings["context_adherence"],
+    }
+    request = {"model_id": "music_v2_5", "composition_plan": {"chunks": [chunk]},
+               "store_for_inpainting": True}
+    if "seed" in settings:
+        request["seed"] = settings["seed"]
+    validate_request(request)
+    return {
+        "schema_version": SCHEMA_VERSION, "origin": "original", "mapping_version": "original-music-v1",
+        "analysis_id": None, "dataset_id": None, "dataset_name": "Original music", "dataset_hash": None,
+        "settings": settings, "request": request, "duration_seconds": duration,
+        "analysis_settings": {"kind": "original", "channels": []}, "baseline": {}, "thresholds": {},
+        "sections": [{"index": 0, "source_start": None, "source_end": None,
+                      "audio_start": 0, "audio_end": duration, **copy.deepcopy(chunk),
+                      "descriptors": {"direction": list(dict.fromkeys(anchors))}}],
+        "manual_edits": False, "warnings": [], "blocking_reasons": [], "can_generate": True,
+    }
+
+
+def compile_prompt_plan(anchor: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
+    """Create a fresh musical direction plan without fabricating data observations."""
+    plan = original_music_plan({
+        "kind": "original", "duration_seconds": payload["duration_seconds"],
+        "settings": {**copy.deepcopy(anchor["settings"]), **payload.get("settings", {})},
+    })
+    provenance = {
+        "kind": "prompt_continuation", "root_plan_id": anchor["id"],
+        "source_job_id": payload["source_job_id"], "session_id": payload["session_id"],
+        "sequence": payload["sequence"], "generation_settings": copy.deepcopy(plan["settings"]),
+        "provenance_note": "This track follows musical direction without a live-input summary. Saved provider audio is used for conditioning when available; matching beats and melody is not guaranteed.",
+    }
+    # Each explicit sequence is a fresh track, even if direction is unchanged
+    # or the source has no retained provider song ID. Keep the sequence in the
+    # plan's actual prompt metadata, never in a fabricated source-data hash.
+    plan.update(origin="prompt_continuation", mapping_version="prompt-music-v1",
+                dataset_name="Next track", realtime=provenance,
+                analysis_settings={"kind": "prompt", "root_plan_id": anchor["id"],
+                                   "session_id": payload["session_id"], "sequence": payload["sequence"],
+                                   "channels": []})
+    plan["sections"][0]["provenance"] = provenance
+    return plan
 
 
 def compile_live_plan(anchor: dict[str, Any], payload: dict[str, Any], feature_hash: str) -> dict[str, Any]:
@@ -85,7 +205,10 @@ def compile_live_plan(anchor: dict[str, Any], payload: dict[str, Any], feature_h
         "baseline": copy.deepcopy(anchor["baseline"]), "dataset_hash": feature_hash,
         "duration_seconds": duration, "warnings": [provenance["provenance_note"]], "blocking_reasons": [],
     }
-    plan = compile_plan(analysis, copy.deepcopy(anchor["settings"]))
+    settings = {**copy.deepcopy(anchor["settings"]), **payload.get("settings", {})}
+    plan = compile_plan(analysis, settings)
+    if payload.get("settings"):
+        provenance["generation_settings"] = copy.deepcopy(plan["settings"])
     plan.update(analysis_id=anchor.get("analysis_id"), dataset_id=anchor.get("dataset_id"),
                 dataset_name="Live input · next segment", manual_edits=False, realtime=provenance)
     return plan

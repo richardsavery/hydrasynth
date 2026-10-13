@@ -60,6 +60,7 @@ assert.equal(applyCurve(0.5, "exponential"), 0.25);
 assert.equal(clamp(-2, 0, 127), 0);
 assert.equal(clamp(200, 0, 127), 127);
 assert.equal(combineValues([0.2, 0.8], "average"), 0.5);
+assert.equal(combineValues([0.2, 0.8], "direct"), 0.2);
 assert.ok(Math.abs(combineValues([0.2, 0.8], "weighted", [3, 1]) - 0.35) < 1e-12);
 assert.ok(Math.abs(combineValues([0.8, 0.2], "difference") - 0.6) < 1e-12);
 assert.deepEqual(
@@ -77,6 +78,18 @@ assert.equal(fixedComposite.minimum, 0);
 assert.equal(fixedComposite.maximum, 1);
 assert.equal(fixedComposite.points[0][1], .375);
 assert.equal(fixedComposite.points[1][1], .625);
+// Combining learned ranges must preserve partial output excursions, as live mappings do.
+for (const operator of ["average", "weighted", "sum", "difference", "minimum", "maximum"]) {
+  const composite = combineSeries([
+    { points: [[0, 0], [.5, 8], [1, 10]], minimum: 0, maximum: 10 },
+    { points: [[0, 0], [.5, 2], [1, 10]], minimum: 0, maximum: 10 }
+  ], operator, [3, 1]);
+  let expected = combineValues([.8, .2], operator, [3, 1]);
+  if (operator === "sum") expected /= 2;
+  if (operator === "difference") expected = (expected + 1) / 2;
+  const actual = (composite.points[1][1] - composite.minimum) / (composite.maximum - composite.minimum);
+  assert.ok(Math.abs(actual - expected) < 1e-12, `${operator} should normalize identically for live and recorded inputs`);
+}
 assert.equal(destinationFor("cutoff").cc, 74);
 assert.equal(destinationFor("reverb").cc, 91);
 assert.equal(destinationFor("macro8").cc, 23);

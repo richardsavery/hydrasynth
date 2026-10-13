@@ -65,6 +65,13 @@ const invalid = [{ destination: "unknown" }, null, { ...generated[0], minimum: N
 const sanitized = Music.restoreMappings(invalid, fields, allocateId);
 assert.equal(sanitized.length, 1);
 assert.ok(Number.isFinite(sanitized[0].minimum) && Number.isFinite(sanitized[0].maximum));
+const calibratedMappings = Music.restoreMappings([{ ...generated[0], operator: "weighted", sources: [
+  { sourceKey: fields[0].key, reducer: "value", rangeMode: "fixed", inputMin: 10, inputMax: 80, weight: 3 },
+  { sourceKey: fields[1].key, reducer: "value", rangeMode: "auto", weight: 1 }
+] }], fields, allocateId);
+const calibratedReload = Music.restoreMappings(JSON.parse(JSON.stringify(calibratedMappings)), fields, allocateId);
+assert.equal(calibratedReload[0].operator, "weighted");
+assert.deepEqual(plain(calibratedReload[0].sources), plain(calibratedMappings[0].sources), "input combinations and frozen/auto choices persist together");
 const exportFile = { format: "hydra-signal-lab-presets", version: 1, presets: [{ ...snapshot, recording: "Robot" }] };
 const imported = Music.parsePresetFile(JSON.parse(JSON.stringify(exportFile)));
 assert.deepEqual(plain(imported[0].mappings), plain(snapshot.mappings));

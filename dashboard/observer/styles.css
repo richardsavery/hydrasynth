@@ -1,26 +1,27 @@
 :root {
   color-scheme: dark;
-  --ink: #e9edf2;
-  --ink-muted: #a8b3c2;
-  --ink-dim: #8e9aaa;
-  --graphite-0: #07090d;
-  --graphite-1: #0a0d13;
-  --graphite-2: #0e131b;
-  --graphite-3: #141b24;
-  --panel: rgba(15, 20, 28, 0.9);
-  --panel-raised: rgba(20, 27, 37, 0.94);
-  --line: rgba(179, 197, 217, 0.12);
-  --line-bright: rgba(211, 226, 242, 0.2);
-  --amber: #f3ac46;
-  --amber-soft: #d99135;
-  --amber-glow: rgba(243, 172, 70, 0.2);
-  --cyan: #59dce7;
-  --cyan-soft: #39aeba;
-  --cyan-glow: rgba(89, 220, 231, 0.18);
-  --violet: #9e8aff;
-  --danger: #ff746c;
-  --success: #75e5ad;
-  --unknown: #8e99a6;
+  --ink: #e7edf5;
+  --ink-muted: #a4b0c1;
+  --ink-dim: #8c9aad;
+  --graphite-0: #10141b;
+  --graphite-1: #12171e;
+  --graphite-2: #171c24;
+  --graphite-3: #1b2028;
+  --panel: rgba(27, 32, 40, 0.94);
+  --panel-raised: rgba(37, 45, 56, 0.96);
+  --line: #3b4655;
+  --line-bright: #526176;
+  --amber: #f1b66a;
+  --amber-soft: #c8914e;
+  --amber-glow: rgba(241, 182, 106, 0.2);
+  --cyan: #78aaff;
+  --cyan-soft: #547cbf;
+  --cyan-glow: rgba(120, 170, 255, 0.18);
+  --violet: #b7a0ff;
+  --danger: #ed8faa;
+  --success: #78aaff;
+  --silver: #bdcad9;
+  --unknown: #8c9aad;
   --radius-lg: 18px;
   --radius-md: 12px;
   --shadow: 0 24px 64px rgba(0, 0, 0, 0.34);
@@ -45,7 +46,7 @@ body {
   background:
     linear-gradient(rgba(255, 255, 255, 0.014) 1px, transparent 1px),
     linear-gradient(90deg, rgba(255, 255, 255, 0.011) 1px, transparent 1px),
-    radial-gradient(circle at 44% -10%, #172433 0, transparent 43%),
+    radial-gradient(circle at 44% -10%, #252d38 0, transparent 43%),
     var(--graphite-0);
   background-size: 34px 34px, 34px 34px, auto;
   font-family: var(--display);
@@ -261,8 +262,8 @@ h2 {
 
 .observer-source button.is-active {
   color: var(--amber);
-  border-color: rgba(243, 172, 70, 0.32);
-  background: rgba(243, 172, 70, 0.09);
+  border-color: rgba(241, 182, 106, 0.32);
+  background: rgba(241, 182, 106, 0.09);
 }
 
 .connection-cluster {
@@ -313,7 +314,7 @@ h2 {
 .connection-light.is-live {
   color: var(--success);
   background: var(--success);
-  box-shadow: 0 0 13px rgba(117, 229, 173, 0.55);
+  box-shadow: 0 0 13px rgba(120, 170, 255, 0.55);
 }
 
 .connection-light.is-live::after {
@@ -323,13 +324,13 @@ h2 {
 .connection-light.is-demo {
   color: var(--violet);
   background: var(--violet);
-  box-shadow: 0 0 13px rgba(158, 138, 255, 0.5);
+  box-shadow: 0 0 13px rgba(183, 160, 255, 0.5);
 }
 
 .connection-light.is-signal-lab {
   color: var(--amber);
   background: var(--amber);
-  box-shadow: 0 0 13px rgba(243, 172, 70, 0.52);
+  box-shadow: 0 0 13px rgba(241, 182, 106, 0.52);
 }
 
 .connection-light.is-signal-lab::after {
@@ -339,7 +340,7 @@ h2 {
 .connection-light.is-error {
   color: var(--danger);
   background: var(--danger);
-  box-shadow: 0 0 13px rgba(255, 116, 108, 0.45);
+  box-shadow: 0 0 13px rgba(237, 143, 170, 0.45);
 }
 
 .connection-light.is-pending {
@@ -357,10 +358,10 @@ main {
   gap: 13px;
   margin-bottom: 18px;
   padding: 12px 15px;
-  color: #ffd4d1;
-  border: 1px solid rgba(255, 116, 108, 0.32);
+  color: #f4c3d2;
+  border: 1px solid rgba(237, 143, 170, 0.32);
   border-radius: var(--radius-md);
-  background: rgba(89, 22, 25, 0.4);
+  background: rgba(81, 34, 50, 0.4);
   box-shadow: inset 0 1px rgba(255, 255, 255, 0.04);
 }
 
@@ -447,9 +448,9 @@ main {
   min-height: 23px;
   padding: 3px 9px;
   color: var(--cyan);
-  border: 1px solid rgba(89, 220, 231, 0.2);
+  border: 1px solid rgba(120, 170, 255, 0.2);
   border-radius: 999px;
-  background: rgba(89, 220, 231, 0.07);
+  background: rgba(120, 170, 255, 0.07);
   font-family: var(--mono);
   font-size: 0.62rem;
   letter-spacing: 0.08em;
@@ -457,15 +458,15 @@ main {
 }
 
 .mode-badge.is-demo {
-  color: #c2b7ff;
-  border-color: rgba(158, 138, 255, 0.27);
-  background: rgba(158, 138, 255, 0.09);
+  color: #cbbaff;
+  border-color: rgba(183, 160, 255, 0.27);
+  background: rgba(183, 160, 255, 0.09);
 }
 
 .mode-badge.is-signal-lab {
   color: var(--amber);
-  border-color: rgba(243, 172, 70, 0.3);
-  background: rgba(243, 172, 70, 0.09);
+  border-color: rgba(241, 182, 106, 0.3);
+  background: rgba(241, 182, 106, 0.09);
 }
 
 .patch-display {
@@ -474,12 +475,12 @@ main {
   gap: 1px;
   margin: 15px 0 17px;
   overflow: hidden;
-  border: 1px solid rgba(243, 172, 70, 0.15);
+  border: 1px solid rgba(241, 182, 106, 0.15);
   border-radius: 8px;
-  background: rgba(4, 6, 8, 0.7);
+  background: rgba(18, 23, 30, 0.9);
   box-shadow:
     inset 0 0 28px rgba(0, 0, 0, 0.8),
-    0 0 24px rgba(243, 172, 70, 0.035);
+    0 0 24px rgba(241, 182, 106, 0.035);
 }
 
 .patch-display > div {
@@ -487,7 +488,7 @@ main {
   align-content: center;
   min-height: 89px;
   padding: 12px 15px;
-  border-right: 1px solid rgba(243, 172, 70, 0.11);
+  border-right: 1px solid rgba(241, 182, 106, 0.11);
 }
 
 .patch-display > div:last-child {
@@ -495,7 +496,7 @@ main {
 }
 
 .lcd-label {
-  color: #9a6d35;
+  color: #b58b58;
   font-family: var(--mono);
   font-size: 0.55rem;
   letter-spacing: 0.17em;
@@ -567,7 +568,7 @@ main {
   position: relative;
   width: 40px;
   height: 40px;
-  border: 1px solid rgba(89, 220, 231, 0.18);
+  border: 1px solid rgba(120, 170, 255, 0.18);
   border-radius: 50%;
 }
 
@@ -580,7 +581,7 @@ main {
 
 .stream-orbit::before {
   inset: 7px;
-  border: 1px solid rgba(89, 220, 231, 0.13);
+  border: 1px solid rgba(120, 170, 255, 0.13);
 }
 
 .stream-orbit::after {
@@ -658,7 +659,7 @@ main {
 
 .health-track span.has-alert {
   background: var(--danger);
-  box-shadow: 0 0 10px rgba(255, 116, 108, 0.25);
+  box-shadow: 0 0 10px rgba(237, 143, 170, 0.25);
 }
 
 .health-caption {
@@ -687,7 +688,7 @@ main {
   overflow: hidden;
   border: 1px solid var(--line);
   border-radius: 6px 6px 10px 10px;
-  background: #0b0e12;
+  background: var(--graphite-1);
   box-shadow: inset 0 7px 14px rgba(0, 0, 0, 0.45);
 }
 
@@ -717,14 +718,14 @@ main {
 }
 
 .key.is-active.key--white {
-  background: linear-gradient(105deg, #48b5bd, #8ff6f4 55%, #358991);
-  box-shadow: inset 0 -10px 16px rgba(0, 0, 0, 0.18), 0 0 18px rgba(89, 220, 231, 0.4);
+  background: linear-gradient(105deg, #547cbf, #adcaff 55%, #466597);
+  box-shadow: inset 0 -10px 16px rgba(0, 0, 0, 0.18), 0 0 18px rgba(120, 170, 255, 0.4);
 }
 
 .key.is-active.key--black {
-  border-color: #29898f;
-  background: linear-gradient(105deg, #21676c, #5de4e6 65%, #164146);
-  box-shadow: 0 0 18px rgba(89, 220, 231, 0.6);
+  border-color: #547cbf;
+  background: linear-gradient(105deg, #294b80, #78aaff 65%, #243a5c);
+  box-shadow: 0 0 18px rgba(120, 170, 255, 0.6);
 }
 
 .performance-footer {
@@ -795,7 +796,7 @@ main {
   padding: 9px;
   border: 1px solid var(--line);
   border-radius: 14px;
-  background: rgba(9, 12, 17, 0.68);
+  background: rgba(18, 23, 30, 0.85);
   box-shadow: inset 0 1px rgba(255, 255, 255, 0.025);
 }
 
@@ -812,8 +813,8 @@ main {
 }
 
 .search-field:focus-within {
-  border-color: rgba(89, 220, 231, 0.32);
-  background: rgba(89, 220, 231, 0.04);
+  border-color: rgba(120, 170, 255, 0.32);
+  background: rgba(120, 170, 255, 0.04);
 }
 
 .search-field svg {
@@ -913,7 +914,7 @@ input:focus-visible {
 }
 
 .chip-dot--catalog {
-  background: var(--success);
+  background: var(--silver);
 }
 
 .loading-state,
@@ -1090,7 +1091,7 @@ input:focus-visible {
   border-color: rgba(179, 197, 217, 0.09);
   background:
     linear-gradient(145deg, rgba(255, 255, 255, 0.018), transparent 40%),
-    rgba(16, 22, 30, 0.82);
+    rgba(27, 32, 40, 0.9);
 }
 
 .parameter-card.is-unobserved .dial,
@@ -1101,11 +1102,11 @@ input:focus-visible {
 
 .parameter-card.is-ambiguous {
   border-style: dashed;
-  border-color: rgba(243, 172, 70, 0.42);
+  border-color: rgba(241, 182, 106, 0.42);
 }
 
 .parameter-card.is-takeover {
-  border-color: rgba(255, 116, 108, 0.34);
+  border-color: rgba(237, 143, 170, 0.34);
 }
 
 .parameter-card.is-takeover::after {
@@ -1113,7 +1114,7 @@ input:focus-visible {
   inset: 5px;
   content: "";
   pointer-events: none;
-  border: 1px solid rgba(255, 116, 108, 0.13);
+  border: 1px solid rgba(237, 143, 170, 0.13);
   border-radius: 8px;
 }
 
@@ -1194,7 +1195,7 @@ input:focus-visible {
   place-items: center;
   border-radius: 50%;
   background:
-    radial-gradient(circle, #202a35 0 47%, transparent 49%),
+    radial-gradient(circle, #252d38 0 47%, transparent 49%),
     conic-gradient(
       from 225deg,
       var(--source-color) 0deg calc(var(--level) * 270deg),
@@ -1214,7 +1215,7 @@ input:focus-visible {
   border-radius: 50%;
   background:
     radial-gradient(circle at 38% 30%, rgba(255, 255, 255, 0.12), transparent 30%),
-    #151b23;
+    #1b2028;
   box-shadow: inset -3px -5px 11px rgba(0, 0, 0, 0.55);
 }
 
@@ -1238,9 +1239,9 @@ input:focus-visible {
   z-index: 2;
   width: 7px;
   height: 7px;
-  border: 2px solid #2e3946;
+  border: 2px solid #3b4655;
   border-radius: 50%;
-  background: #090c11;
+  background: var(--graphite-1);
 }
 
 .value-stack {
@@ -1408,19 +1409,19 @@ input:focus-visible {
 
 .event-item.source-user .timeline-mark {
   background: var(--cyan);
-  box-shadow: 0 0 0 4px rgba(89, 220, 231, 0.07);
+  box-shadow: 0 0 0 4px rgba(120, 170, 255, 0.07);
 }
 
 .event-item.source-agent .timeline-mark,
 .event-item.source-agent-echo .timeline-mark {
   background: var(--violet);
-  box-shadow: 0 0 0 4px rgba(158, 138, 255, 0.07);
+  box-shadow: 0 0 0 4px rgba(183, 160, 255, 0.07);
 }
 
 .event-item.source-signal-lab .timeline-mark {
   border-color: var(--amber);
   background: var(--amber);
-  box-shadow: 0 0 10px rgba(243, 172, 70, 0.5);
+  box-shadow: 0 0 10px rgba(241, 182, 106, 0.5);
 }
 
 .event-copy {
@@ -1497,14 +1498,14 @@ input:focus-visible {
 
 .source-symbol--user {
   color: var(--cyan);
-  border-color: rgba(89, 220, 231, 0.2);
-  background: rgba(89, 220, 231, 0.05);
+  border-color: rgba(120, 170, 255, 0.2);
+  background: rgba(120, 170, 255, 0.05);
 }
 
 .source-symbol--agent {
   color: var(--violet);
-  border-color: rgba(158, 138, 255, 0.22);
-  background: rgba(158, 138, 255, 0.05);
+  border-color: rgba(183, 160, 255, 0.22);
+  background: rgba(183, 160, 255, 0.05);
 }
 
 .source-symbol--echo {

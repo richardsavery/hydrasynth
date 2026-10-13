@@ -31,10 +31,11 @@ import uuid
 import zipfile
 
 from elevenlabs_analysis import (
-    analyze_dataset, compile_plan, parse_dataset, synthetic_dataset, validate_request,
+    SCHEMA_VERSION, analyze_dataset, compile_plan, parse_dataset, synthetic_dataset, validate_request,
 )
 from elevenlabs_realtime import (
-    STEM_ID, STEM_VARIATIONS, compile_live_plan, extract_stems, validated_live_request,
+    STEM_ID, STEM_VARIATIONS, compile_live_plan, compile_prompt_plan, extract_stems,
+    original_music_plan, validated_continuation_request,
 )
 
 
@@ -466,6 +467,11 @@ class ElevenLabsService:
         return self._save("analyses", analysis)
 
     def create_plan(self, payload: dict[str, Any]) -> dict[str, Any]:
+        if payload.get("kind") == "original":
+            plan = original_music_plan(payload)
+            plan["cache_key"] = plan_cache_key(plan)
+            plan["cache_key_version"] = CACHE_KEY_VERSION
+            return self._save("plans", plan)
         analysis = self._read("analyses", payload.get("analysis_id"))
         dataset = self._read("datasets", analysis["dataset_id"])
         settings = payload.get("settings", {key: value for key, value in payload.items() if key not in {"analysis_id", "request"}})
@@ -545,7 +551,7 @@ class ElevenLabsService:
                    for job in (json.loads(row[0]) for row in rows))
 
     def create_continuation_job(self, payload: dict[str, Any]) -> dict[str, Any]:
-        validated = validated_live_request(payload)
+        validated = validated_continuation_request(payload)
         fingerprint = digest(semantic_hash_value(validated))
         with self._lock:
             saved = self._db.execute("SELECT request_hash,job_id,plan_id FROM live_requests WHERE session_id=? AND sequence=?",
@@ -585,7 +591,8 @@ class ElevenLabsService:
                     source_root = self._read("plans", source_plan["realtime"]["root_plan_id"]) if source_plan.get("realtime") else source_plan
                     if source_root["id"] != anchor["id"] and source_root["cache_key"] != anchor["cache_key"]:
                         raise ServiceError("The current track must use this session's original plan.")
-                plan = compile_live_plan(anchor, validated, fingerprint)
+                plan = (compile_prompt_plan(anchor, validated) if validated.get("kind") == "prompt"
+                        else compile_live_plan(anchor, validated, fingerprint))
                 # Conditioning is optional and only references provider IDs
                 # saved by this backend from explicitly retained generations.
                 plan["request"]["store_for_inpainting"] = True
@@ -907,6 +914,7 @@ class ElevenLabsService:
     def _manifest(self, plan: dict[str, Any], job: dict[str, Any] | None) -> dict[str, Any]:
         return {
             "schema_version": 1, "mapping_version": plan["mapping_version"],
+            "origin": plan.get("origin", "live_extrapolation" if plan.get("realtime") else "recording"),
             "plan_id": plan["id"], "analysis_id": plan["analysis_id"], "dataset_id": plan["dataset_id"],
             "dataset_name": plan.get("dataset_name"),
             "dataset_hash": plan["dataset_hash"], "cache_key": plan["cache_key"],

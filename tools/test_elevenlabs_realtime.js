@@ -7,7 +7,7 @@ const vm = require("node:vm");
 const source = fs.readFileSync(path.join(__dirname, "../dashboard/elevenlabs-realtime.js"), "utf8");
 const context = vm.createContext({ URL });
 vm.runInContext(source, context);
-const { normalize, mapValue, replayValue, summarize, shouldGenerate, validateSettings } = context.HydraElevenRealtime;
+const { normalize, mapValue, replayValue, summarize, shouldGenerate, validateSettings, normalizeSource, resetLearning, combineInputs, routeControl } = context.HydraElevenRealtime;
 
 assert.equal(normalize(null, 0, 1), null, "missing source data must not become zero");
 assert.equal(normalize(NaN, 0, 1), null);
@@ -22,24 +22,69 @@ assert.equal(mapValue(1, { target: "gain", outputMin: 0, outputMax: 50 }), 1, "a
 assert.equal(mapValue(0.5, { target: "stem:drums", outputMin: 0, outputMax: 1 }), 0.5);
 
 const validated = validateSettings({ mode: "unexpected", address: "javascript:alert(1)", duration: 9999, budget: 9999,
-  starterId: "<script>", armed: true, autoStems: true, mappings: Array.from({ length: 8 }, () => ({ target: "__proto__",
+  starterId: "<script>", armed: true, autoStems: true, mappings: Array.from({ length: 20 }, () => ({ target: "__proto__",
     sourceKey: "x".repeat(2000), index: -2, reducer: "unknown", inputMin: 10, inputMax: 1, outputMin: -999, outputMax: 999999, smoothing: 999 })) });
 assert.equal(validated.mode, "replay");
 assert.equal(validated.address, "ws://127.0.0.1:8765");
 assert.equal(validated.duration, 60);
 assert.equal(validated.budget, 20);
 assert.equal(validated.starterId, null);
-assert.equal(validated.mappings.length, 6, "stored mappings must stay within the UI and processing bound");
+assert.equal(validated.mappings.length, 16, "stored mappings must stay within the UI and processing bound");
 assert.equal(validated.mappings[0].target, "cutoff");
-assert.equal(validated.mappings[0].sourceKey, "activity");
-assert.equal(validated.mappings[0].inputMin, 0);
-assert.equal(validated.mappings[0].inputMax, 1);
+assert.equal(validated.mappings[0].sources[0].sourceKey, "activity");
+assert.equal(validated.mappings[0].sources[0].inputMin, 0);
+assert.equal(validated.mappings[0].sources[0].inputMax, 1);
 assert.equal(validated.mappings[0].outputMin, 20);
 assert.equal(validated.mappings[0].outputMax, 20000);
 assert.equal(validated.mappings[0].smoothing, 5);
 assert.equal("armed" in validated, false, "credit authorization must never be restored or persisted");
 assert.equal("autoStems" in validated, false);
 assert.equal(validateSettings({ address: "wss://example.test/live" }).address, "wss://example.test/live");
+const validatedMix = validateSettings({ stemMix: { bass: 10, drums: -2, invalid: "loud" }, mutedStems: ["bass", "bass", "", "bad\nname", 42] });
+assert.equal(validatedMix.stemMix.bass, 1);
+assert.equal(validatedMix.stemMix.drums, 0);
+assert.equal(validatedMix.stemMix.invalid, undefined);
+assert.deepEqual([...validatedMix.mutedStems], ["bass"]);
+assert.equal(validateSettings({ mutedStems: Array.from({ length: 40 }, (_, i) => `stem-${i}`) }).mutedStems.length, 16);
+
+const legacyMapping = validateSettings({ mappings: [{ sourceKey: "pulse", target: "stem:Bass", inputMin: 10, inputMax: 50 }] }).mappings[0];
+assert.equal(legacyMapping.audioSource, "Bass");
+assert.equal(legacyMapping.target, "gain");
+assert.equal(legacyMapping.sources[0].rangeMode, "fixed", "existing mappings preserve deliberate fixed calibration");
+assert.equal(legacyMapping.sources[0].inputMin, 10);
+const bounded = validateSettings({ mappings: [{ audioSource: "Bass", target: "rate", sources: Array.from({ length: 12 }, () => ({ sourceKey: "x", rangeMode: "auto" })) }] }).mappings[0];
+assert.equal(bounded.sources.length, 6);
+assert.equal(bounded.target, "cutoff", "stem speed must not break synchronized playback");
+const learning = { rangeMode: "auto", inputMin: 0, inputMax: 1, learnedMin: null, learnedMax: null };
+assert.equal(normalizeSource(learning, { value: 50, at: 0 }, 0), 0.5, "a constant learned source produces a neutral midpoint");
+assert.equal(normalizeSource(learning, { value: 100, at: 50 }, 50), 1);
+assert.equal(normalizeSource(learning, { value: 75, at: 100 }, 100), 0.5);
+assert.equal(normalizeSource(learning, { value: -500, at: 0 }, 4000), null, "stale input cannot modify calibration");
+assert.equal(learning.learnedMin, 50);
+assert.equal(normalizeSource(learning, null, 4000), null);
+learning.rangeMode = "fixed";
+assert.equal(normalizeSource(learning, { value: 200, at: 4000 }, 4000), 1);
+assert.equal(learning.inputMax, 100, "fixed bounds never drift");
+learning.rangeMode = "auto"; resetLearning(learning);
+assert.equal(normalizeSource(learning, { value: -10, at: 5000 }, 5000), 0.5);
+assert.equal(learning.learnedMax, -10, "relearning discards the previous capture");
+assert.equal(combineInputs([0.2, 0.8], [{}, {}], "average"), 0.5);
+assert.ok(Math.abs(combineInputs([0.2, 0.8], [{ weight: 3 }, { weight: 1 }], "weighted") - 0.35) < 1e-12);
+assert.equal(combineInputs([0.2, 0.8], [{}, {}], "sum"), 0.5);
+assert.equal(combineInputs([0.2, 0.8], [{ weight: 0 }, { weight: 0 }], "weighted"), 0.5, "zero weights are a neutral midpoint, matching Synth");
+assert.ok(Math.abs(combineInputs([0.2, 0.8], [{}, {}], "difference") - 0.2) < 1e-12);
+assert.equal(combineInputs([0.2, 0.8], [{}, {}], "minimum"), 0.2);
+assert.equal(combineInputs([0.2, null], [{}, {}], "average"), null, "a missing combined constituent invalidates the entire mapping");
+const routed = { cutoff: 20000, stemControls: {} };
+routeControl(routed, { audioSource: "Bass", target: "cutoff" }, 600);
+routeControl(routed, { audioSource: "Bass", target: "pan" }, -0.5);
+assert.equal(routed.cutoff, 20000, "stem filters must not change the master filter");
+assert.equal(routed.stemControls.Bass.cutoff, 600);
+assert.equal(routed.stemControls.Bass.pan, -0.5);
+routeControl(routed, { audioSource: "Bass", target: "rate" }, 0.8);
+assert.equal(routed.stemControls.Bass.rate, undefined);
+routeControl(routed, { audioSource: "__proto__", target: "gain" }, 0.5);
+assert.equal(Object.prototype.gain, undefined, "provider stem names cannot modify object prototypes");
 
 const analysis = { duration_seconds: 3, settings: { start_seconds: 20, max_gap_seconds: 1.1 },
   timeline: { times: [20, 21, 22], signal: [0, 1, null], channels: { movement: [0.1, 0.5, 0.7] }, valid: [true, true, false] } };
@@ -67,7 +112,9 @@ for (const guard of [{ running: false }, { armed: false }, { pending: {} }, { qu
 
 function harness(fetchHandler, options = {}) {
   const elements = new Map(), players = [], requests = [], timeouts = [];
-  let now = 0, tick, pauseCount = 0, prepareCount = 0, sourceValue = 0.5, stored = JSON.stringify(options.settings || {});
+  let now = 0, tick, pauseCount = 0, prepareCount = 0, createCount = 0, sourceValue = 0.5, stored = JSON.stringify(options.settings || {});
+  let sourceValues = options.sourceValues;
+  let sourceFields = options.fields || [{ key: "activity", name: "activity" }];
   class Element {
     constructor(id) { this.id = id; this.value = id === "budget" ? "3" : id === "duration" ? "60" : ""; this.checked = false; this.dataset = {}; this.listeners = {}; this.classList = { add() {}, toggle() {} }; }
     addEventListener(name, callback) { this.listeners[name] = callback; }
@@ -79,11 +126,11 @@ function harness(fetchHandler, options = {}) {
     constructor(options) { this.options = options; this.stemNames = []; this.warnings = []; this.remainingSeconds = 15; this.currentPosition = 5; players.push(this); }
     async loadTrack(track) { this.currentTrack = track; this.stemNames = (track.stems || []).map((stem) => stem.name); }
     async resume() {}
-    async start() { this.playing = true; }
+    async start() { this.initialControls = JSON.parse(JSON.stringify(this.controls || {})); this.initialValid = this.valid; this.playing = true; }
     stop() { this.playing = false; this.queuedTrack = null; }
     dispose() { this.stop(); }
     setSourceValid(value) { this.valid = value; }
-    updateControls(controls, valid) { this.controls = controls; this.valid = valid; }
+    updateControls(controls, valid) { this.controls = { ...this.controls, ...controls }; this.valid = valid; }
     async queueTrack(track) { this.queuedTrack = track; }
     transition() { const track = this.queuedTrack; this.currentTrack = track; this.stemNames = (track.stems || []).map((stem) => stem.name); this.queuedTrack = null; this.options.onTransition(track); }
   }
@@ -98,17 +145,192 @@ function harness(fetchHandler, options = {}) {
     } });
   vm.runInContext(source, sandbox);
   const selection = { plan: { id: "plan" }, currentJob: options.starter || { id: "starter", plan_id: "plan", state: "complete", audio_url: "/saved.mp3", stems: [{ name: "bass", audio_url: "/bass.mp3" }] }, analysis, jobs: options.jobs || [] };
-  sandbox.HydraElevenRealtime.init({ container: root, getSelection: () => selection, pauseOriginal() { pauseCount++; },
-    sourceBridge: { describe: () => ({ mode: "recording", label: "test source", fields: [{ key: "activity", name: "activity" }] }),
-      read: () => sourceValue === null ? null : ({ value: sourceValue, at: now }), async prepare() { prepareCount++; }, reset() {} } });
+  sandbox.HydraElevenRealtime.init({ container: root, getSelection: () => selection, getGenerationSettings: options.getGenerationSettings, pauseOriginal() { pauseCount++; }, createTrack() { createCount++; },
+    sourceBridge: { describe: () => ({ mode: options.sourceMode || "recording", label: "test source", fields: sourceFields }),
+      bounds: () => options.sourceBounds || null,
+      read: (source) => { const value = sourceValues ? sourceValues[source.sourceKey] : sourceValue; return value === null || value === undefined ? null : typeof value === "object" ? value : { value, at: now }; }, async prepare() { prepareCount++; }, reset() {} } });
   sandbox.HydraElevenRealtime.activate();
-  return { app: sandbox.HydraElevenRealtime, elements, element, players, requests, get pauseCount() { return pauseCount; }, get prepareCount() { return prepareCount; }, set sourceValue(value) { sourceValue = value; }, get saved() { return JSON.parse(stored); },
+  return { app: sandbox.HydraElevenRealtime, elements, element, players, requests, get html() { return root.innerHTML; }, get pauseCount() { return pauseCount; }, get prepareCount() { return prepareCount; }, get createCount() { return createCount; }, set sourceValue(value) { sourceValue = value; }, set sourceFields(value) { sourceFields = value; }, set sourceValues(value) { sourceValues = value; }, get saved() { return JSON.parse(stored); },
+    async toggleStem(name) { await element("stems").event("click", { target: { closest: () => ({ dataset: { stemMute: name } }) } }); },
+    async volumeStem(name, value) { await element("stems").event("input", { target: { dataset: { stem: name }, value: String(value) } }); },
+    async mappingAction(action, index = 0, sourceIndex = 0) {
+      const ids = [...element("mappings").innerHTML.matchAll(/data-mapping="([^"]+)"/g)].map((match) => match[1]);
+      const row = { dataset: { mapping: ids[index] } }, button = { dataset: { action, sourceIndex }, closest: () => row };
+      await element("mappings").event("click", { target: { closest: () => button } });
+    },
     async advance(milliseconds) { now += milliseconds; for (const timeout of timeouts.splice(0)) { if (timeout.at <= now) timeout.callback(); else timeouts.push(timeout); } tick?.(); for (let i = 0; i < 32; i++) await Promise.resolve(); } };
 }
 
 (async () => {
+  const sharedDefault = harness(async () => { throw new Error("Opening simplified UI must not spend credits"); }, {
+    fields: [{ key: "motion", name: "Motion", default_reducer: "rms", minimum: 10, maximum: 30 }] });
+  assert.equal(sharedDefault.element("source").value, "shared", "a fresh workspace uses the Connections input");
+  assert.equal(sharedDefault.saved.mappings[0].sources[0].sourceKey, "motion");
+  assert.equal(sharedDefault.saved.mappings[0].sources[0].inputMin, 10, "new mapping bounds should use the recording's fixed range");
+  assert.equal(sharedDefault.saved.mappings[0].sources[0].inputMax, 30);
+  sharedDefault.sourceValue = 20;
+  await sharedDefault.element("play").event("click"); await sharedDefault.advance(2000);
+  for (let i = 0; i < 40; i++) await sharedDefault.advance(50);
+  assert.equal(sharedDefault.players[0].valid, true);
+  assert.ok(Math.abs(sharedDefault.players[0].controls.gain - 0.525) < 0.00001, "Basic should map raw recorded values over the whole useful range");
+  await sharedDefault.element("create").event("click");
+  assert.equal(sharedDefault.createCount, 1, "the no-track action opens the creation workflow");
+  assert.equal(sharedDefault.requests.length, 0);
+
+  const lateChannel = harness(async () => { throw new Error("Preparing input must not spend credits"); }, {
+    fields: [{ key: "late-channel", name: "Late channel" }], sourceBounds: { minimum: -8, maximum: 12 } });
+  lateChannel.sourceValue = null;
+  await lateChannel.advance(50);
+  assert.equal(lateChannel.saved.mappings[0].sources[0].inputMin, -8, "recorded bounds remain available before a later channel's first sample");
+  assert.equal(lateChannel.saved.mappings[0].sources[0].inputMax, 12);
+
+  const delayedSource = harness(async () => { throw new Error("Source discovery must not spend credits"); }, { fields: [] });
+  const reloadedBeforeDiscovery = harness(async () => { throw new Error("Reload must not spend credits"); }, {
+    settings: delayedSource.saved, fields: [{ key: "on-reload", name: "Reloaded field", minimum: -2, maximum: 2 }] });
+  assert.match(reloadedBeforeDiscovery.element("mappings").innerHTML, /value="on-reload" selected/, "unresolved default sources must still be discovered after a reload");
+  delayedSource.sourceFields = [{ key: "late", name: "Late field", reducers: ["value"], inputMin: -1, inputMax: 1 }];
+  await delayedSource.advance(300);
+  await delayedSource.element("play").event("click"); await delayedSource.advance(500);
+  assert.equal(delayedSource.players[0].valid, true, "sources loaded after initialization should fill new mappings");
+  assert.match(delayedSource.element("mappings").innerHTML, /value="late" selected/);
+
+  const combined = harness(async () => { throw new Error("Local mappings must not use credits"); }, {
+    sourceMode: "live", fields: [{ key: "a", name: "A" }, { key: "b", name: "B" }], sourceValues: { a: 20, b: 200 },
+    settings: { mode: "shared", mappings: [{ audioSource: "bass", target: "cutoff", outputMin: 200, outputMax: 20000, smoothing: 0,
+      operator: "average", sources: [{ sourceKey: "a", rangeMode: "auto" }, { sourceKey: "b", rangeMode: "auto" }] }] }
+  });
+  await combined.element("play").event("click"); await combined.advance(50);
+  assert.equal(combined.players[0].controls.stemControls.bass.cutoff, 2000);
+  assert.equal(combined.players[0].controls.cutoff, 20000);
+  combined.sourceValues = { a: 40, b: 400 }; await combined.advance(50);
+  assert.equal(combined.players[0].controls.stemControls.bass.cutoff, 20000);
+  combined.sourceValues = { a: 30, b: 300 }; await combined.advance(50);
+  assert.equal(combined.players[0].controls.stemControls.bass.cutoff, 2000);
+  combined.sourceValues = { a: 30, b: null }; await combined.advance(50);
+  assert.equal(combined.players[0].valid, false, "missing one combined input must close the audio gate");
+  combined.sourceValues = { a: 30, b: { value: 300, at: -10000 } }; await combined.advance(50);
+  assert.equal(combined.players[0].valid, false, "stale combined input must close the audio gate");
+  combined.sourceValues = { a: 30, b: 300 }; await combined.advance(50);
+  assert.equal(combined.players[0].valid, true);
+  assert.match(combined.element("mappings").innerHTML, /Audio source/);
+  assert.match(combined.element("mappings").innerHTML, /Combine input/);
+  assert.match(combined.element("mappings").innerHTML, /Adjust input range/);
+  await combined.element("learn-all").event("click"); await combined.advance(50);
+  assert.equal(combined.players[0].controls.stemControls.bass.cutoff, 2000, "relearn resets both sources to their neutral constant value");
+
+  await combined.mappingAction("freeze", 0, 0);
+  assert.equal(combined.saved.mappings[0].sources[0].rangeMode, "fixed");
+  assert.ok(combined.saved.mappings[0].sources[0].inputMax > combined.saved.mappings[0].sources[0].inputMin, "freezing a constant value adds a small centered range");
+  assert.equal(combined.saved.mappings[0].sources[1].rangeMode, "auto", "freezing one input must not change its combined partner");
+  await combined.mappingAction("relearn", 0, 0);
+  assert.equal(combined.saved.mappings[0].sources[0].rangeMode, "auto");
+  await combined.mappingAction("add-input");
+  assert.equal(combined.saved.mappings[0].sources.length, 3);
+  await combined.mappingAction("remove-input", 0, 2);
+  assert.equal(combined.saved.mappings[0].sources.length, 2);
+
+  const muteMix = harness(async () => ({ id: "next-mix", plan_id: "plan", state: "complete", audio_url: "/next.mp3",
+    stem_separation: { state: "complete", stems: [{ name: "bass", audio_url: "/next-bass.mp3" }, { name: "drums", audio_url: "/next-drums.mp3" }] } }), {
+    settings: { mode: "shared", stemMix: { bass: 0.6 }, mappings: [
+      { sourceKey: "activity", audioSource: "bass", target: "gain", outputMin: 0.7, outputMax: 0.7, smoothing: 0 },
+      { sourceKey: "activity", audioSource: "bass", target: "delayMix", outputMin: 0.5, outputMax: 0.5, smoothing: 0 },
+      { sourceKey: "activity", audioSource: "bass", target: "reverbMix", outputMin: 0.4, outputMax: 0.4, smoothing: 0 }
+    ] }
+  });
+  assert.match(muteMix.html, /<section class="el-rt-stem-mixer" aria-labelledby=/, "stem mixer must remain visible in Basic");
+  assert.match(muteMix.element("stems").innerHTML, /data-stem-mute="bass" aria-pressed="false"/);
+  await muteMix.toggleStem("bass");
+  assert.deepEqual(muteMix.saved.mutedStems, ["bass"], "mute can be set before playback");
+  await muteMix.element("play").event("click"); await muteMix.advance(50);
+  assert.equal(muteMix.players[0].initialControls.stemGains.bass, 0, "mute must be seeded before the initial audio deck is constructed");
+  assert.equal(muteMix.players[0].initialValid, false, "source gate must stay closed while the muted deck starts");
+  assert.equal(muteMix.players[0].controls.stemGains.bass, 0, "mute overrides an active stem volume mapping");
+  assert.equal(muteMix.players[0].controls.stemControls.bass.gain, 0.7);
+  assert.equal(muteMix.players[0].controls.stemControls.bass.delayMix, 0.5, "effect mappings continue while the post-effects stem gain is muted");
+  assert.equal(muteMix.players[0].controls.stemControls.bass.reverbMix, 0.4);
+  await muteMix.volumeStem("bass", 0.35); await muteMix.advance(500);
+  assert.equal(muteMix.players[0].controls.stemGains.bass, 0, "editing volume while muted must not unmute");
+  await muteMix.toggleStem("bass");
+  assert.equal(muteMix.players[0].controls.stemGains.bass, 0.35, "unmute immediately restores manual volume alongside mapped gain");
+  assert.equal(muteMix.players[0].controls.stemControls.bass.gain, 0.7);
+  await muteMix.toggleStem("bass");
+  muteMix.element("auto").checked = true; await muteMix.element("auto").event("change");
+  await muteMix.advance(2000);
+  assert.equal(muteMix.players[0].queuedTrack.id, "next-mix");
+  assert.equal(muteMix.players[0].controls.stemGains.bass, 0, "queued decks receive the mute before their crossfade starts");
+  muteMix.players[0].transition(); await muteMix.advance(300);
+  assert.equal(muteMix.players[0].controls.stemGains.bass, 0, "automatic track promotion must not clear a mute");
+  assert.equal(muteMix.players[0].controls.stemGains.drums, 1, "new unmuted stems keep their normal volume");
+  assert.match(muteMix.element("stems").innerHTML, /data-stem-mute="bass" aria-pressed="true"/);
+  assert.equal(muteMix.saved.stemMix.bass, 0.35);
+  await muteMix.element("stop").event("click");
+  await muteMix.element("play").event("click"); await muteMix.advance(50);
+  assert.equal(muteMix.players[1].controls.stemGains.bass, 0, "Stop and Play preserve the user's mix");
+  await muteMix.toggleStem("bass"); await muteMix.advance(50);
+  assert.equal(muteMix.players[1].controls.stemGains.bass, 0.35);
+  await muteMix.toggleStem("unavailable");
+  assert.deepEqual(muteMix.saved.mutedStems, [], "unavailable stem names cannot create invisible mute controls");
+  await muteMix.element("stop").event("click"); await muteMix.toggleStem("bass");
+  const restoredMix = harness(async () => { throw new Error("Restoring a stem mix must not spend credits"); }, { settings: muteMix.saved });
+  assert.match(restoredMix.element("stems").innerHTML, /data-stem-mute="bass" aria-pressed="true"/);
+  await restoredMix.element("play").event("click"); await restoredMix.advance(50);
+  assert.equal(restoredMix.players[0].controls.stemGains.bass, 0, "reloading restores deliberate mute settings");
+  await restoredMix.toggleStem("bass");
+  assert.equal(restoredMix.players[0].controls.stemGains.bass, 0.35);
+  const fullMix = harness(async () => { throw new Error("Unresolved separation must not be resubmitted"); }, {
+    settings: { mode: "shared", mutedStems: ["bass"], stemMix: { bass: 0.2 }, mappings: [{ sourceKey: "activity", target: "gain", outputMin: 0.6, outputMax: 0.6 }] },
+    starter: { id: "full-mix", plan_id: "plan", state: "complete", audio_url: "/full.mp3", stem_separation: { state: "unknown", error: "unresolved" } }
+  });
+  await fullMix.element("play").event("click"); await fullMix.advance(50);
+  assert.equal(fullMix.players[0].controls.gain, 0.6, "an absent muted stem must not mute the master full mix");
+  assert.equal(fullMix.players[0].valid, true);
+  assert.equal(fullMix.element("stems").innerHTML, "");
+  const previousMix = harness(async () => { throw new Error("Manual stem mix must stay local"); }, { settings: { mode: "shared", stemMix: { bass: 0.45 } } });
+  await previousMix.element("play").event("click"); await previousMix.advance(50);
+  assert.equal(previousMix.players[0].controls.stemGains.bass, 0.45, "manual stem volume works without any mute settings");
+
+  const handoff = harness(async () => { throw new Error("Track selection must never submit generation"); });
+  const originalTrack = { id: "original-track", plan_id: "original-plan", state: "complete", audio_url: "/original.mp3" };
+  handoff.app.setSelection({ plan: { id: "original-plan" }, currentJob: null, analysis: null });
+  assert.equal(handoff.element("track").value, "starter", "building a new plan keeps the current starter until its job exists");
+  handoff.app.setSelection({ plan: { id: "original-plan" }, currentJob: originalTrack, jobs: [originalTrack], analysis: null });
+  assert.equal(handoff.element("track").value, "original-track", "a newly generated original becomes the starter after a null-job handoff");
+  handoff.element("track").value = "starter"; await handoff.element("track").event("change");
+  handoff.app.setSelection({ plan: { id: "original-plan" }, currentJob: originalTrack, jobs: [originalTrack], analysis: null });
+  assert.equal(handoff.element("track").value, "starter", "refreshing the same original must preserve a deliberate starter selection");
+  assert.equal(handoff.requests.length, 0);
+
+  const generationSelection = harness(async () => ({ id: "selected-next", state: "complete", audio_url: "/next.mp3", stem_separation: { state: "complete", stems: [{ name: "bass", audio_url: "/bass.mp3" }] } }), {
+    sourceValues: { a: 0.2, b: 0.8 }, fields: [{ key: "a", name: "A" }, { key: "b", name: "B" }],
+    settings: { mode: "shared", generationInput: 0, mappings: [
+      { audioSource: "master", target: "gain", sources: [{ sourceKey: "a", rangeMode: "fixed", inputMin: 0, inputMax: 1 }] },
+      { audioSource: "bass", target: "cutoff", sources: [{ sourceKey: "b", rangeMode: "fixed", inputMin: 0, inputMax: 1 }] }
+    ] }
+  });
+  await generationSelection.element("play").event("click");
+  generationSelection.element("auto").checked = true; await generationSelection.element("auto").event("change");
+  await generationSelection.advance(2000);
+  assert.equal(generationSelection.requests[0].body.features.activity, 0.2, "selected generation input must be independent from other audio mappings");
+  await generationSelection.mappingAction("remove", 0);
+  assert.equal(generationSelection.saved.generationInput, "all", "removing the selected mapping returns upcoming music to the explicit default");
+
+  let validGenerationSettings = false;
+  const invalidGeneration = harness(async () => ({ id: "valid-settings", state: "complete", audio_url: "/next.mp3", stem_separation: { state: "complete", stems: [{ name: "bass", audio_url: "/bass.mp3" }] } }), {
+    settings: { mode: "demo", budget: 1 }, getGenerationSettings() { if (!validGenerationSettings) throw new Error("BPM is invalid"); return { bpm: 90 }; }
+  });
+  await invalidGeneration.element("play").event("click");
+  invalidGeneration.element("auto").checked = true; await invalidGeneration.element("auto").event("change");
+  await invalidGeneration.advance(2000);
+  assert.equal(invalidGeneration.requests.length, 0);
+  assert.match(invalidGeneration.element("budget-note").textContent, /^0 \/ 1/);
+  assert.equal(invalidGeneration.element("auto").checked, false);
+  validGenerationSettings = true;
+  invalidGeneration.element("auto").checked = true; await invalidGeneration.element("auto").event("change"); await invalidGeneration.advance(50);
+  assert.equal(invalidGeneration.requests.length, 1, "correcting invalid next settings must leave the paid request budget available");
+  assert.equal(invalidGeneration.requests[0].body.sequence, 0);
+
   const savedStems = [{ name: "drums", audio_url: "/drums.mp3" }];
-  const app = harness(async (request) => ({ id: `segment-${request.body.sequence}`, plan_id: "next-plan", state: "complete", audio_url: "/next.mp3", generation_latency_seconds: 2, stem_separation: { state: "complete", stems: savedStems } }));
+  const app = harness(async (request) => ({ id: `segment-${request.body.sequence}`, plan_id: "next-plan", state: "complete", audio_url: "/next.mp3", generation_latency_seconds: 2, stem_separation: { state: "complete", stems: savedStems } }), { getGenerationSettings: () => ({ style: "minimal", bpm: 90 }) });
   app.element("source").value = "demo";
   await app.element("source").event("change");
   await app.element("play").event("click");
@@ -123,6 +345,7 @@ function harness(fetchHandler, options = {}) {
   assert.equal(app.requests.length, 1);
   assert.equal(app.requests[0].url, "/api/elevenlabs/continuations");
   assert.equal(app.requests[0].body.source_job_id, "starter");
+  assert.equal(app.requests[0].body.settings.style, "minimal", "upcoming music reads the current shared generation settings");
   assert.equal(app.requests[0].body.sequence, 0);
   assert.equal(app.requests[0].body.features.source, "demo");
   await app.advance(50);
@@ -194,6 +417,9 @@ function harness(fetchHandler, options = {}) {
     jobs: [{ id: "saved-stems", state: "complete", audio_url: "/saved-with-stems.mp3", realtime: { conditioning_applied: false }, stem_separation: { state: "complete", stems: [{ name: "drums", audio_url: "/saved-drums.mp3" }] } }] });
   assert.equal(restored.element("track").value, "saved-stems", "reactive starter selection must survive initial offline-plan restoration");
   assert.equal(restored.element("source").value, "demo");
+  restored.app.deactivate(); restored.sourceFields = [{ key: "new-shared", name: "New shared input" }]; restored.app.activate();
+  assert.equal(restored.element("source").value, "demo", "reopening must preserve an intentional instrument source override");
+  assert.equal(restored.element("shared").hidden, false, "saved overrides have an explicit route back to the Connections input");
   assert.equal(restored.element("duration").value, "40");
   assert.equal(restored.element("budget").value, "7");
   assert.equal(restored.element("address").value, "wss://example.test/live");
@@ -202,14 +428,14 @@ function harness(fetchHandler, options = {}) {
   assert.equal(restored.element("audio-download").href, "/saved-with-stems.mp3");
   assert.equal(restored.element("export").href, "/api/elevenlabs/generations/saved-stems/export");
   assert.match(restored.element("track-context").textContent, /generated independently/);
-  assert.match(restored.element("mappings").innerHTML, /value="stem:drums" selected/);
+  assert.match(restored.element("mappings").innerHTML, /value="drums" selected/);
   assert.doesNotMatch(restored.element("mappings").innerHTML, /drums · unavailable/, "saved stems from the jobs list must populate mappings even when not the offline currentJob");
   await restored.element("play").event("click"); await restored.advance(2000);
   assert.equal(restored.players[0].currentTrack.stems[0].name, "drums");
   assert.equal(restored.requests.length, 0);
   restored.element("budget").value = "9"; await restored.element("budget").event("change");
   assert.equal(restored.saved.budget, 9);
-  assert.equal(restored.saved.mappings[0].target, "stem:drums");
+  assert.equal(restored.saved.mappings[0].target, "gain");
   assert.equal("id" in restored.saved.mappings[0], false, "transient row state should not be persisted");
   assert.equal("armed" in restored.saved, false);
   assert.equal("autoStems" in restored.saved, false);
@@ -219,6 +445,9 @@ function harness(fetchHandler, options = {}) {
   restored.element("auto").checked = true; await restored.element("auto").event("change");
   await restored.element("disconnect").event("click");
   assert.equal(restored.element("auto").checked, false, "explicit source disconnection must disarm future spending");
+  await restored.element("shared").event("click");
+  assert.equal(restored.element("source").value, "shared");
+  assert.equal(restored.saved.mappings[0].sources[0].sourceKey, "new-shared");
 
   const legacyStarter = { id: "legacy", plan_id: "plan", state: "complete", audio_url: "/legacy.mp3" };
   const legacy = harness(async (request) => request.options.method === "GET" ? { state: "not_requested", stems: [] } : { state: "complete", stems: savedStems }, { starter: legacyStarter, settings: { mode: "demo", armed: true } });
@@ -232,7 +461,7 @@ function harness(fetchHandler, options = {}) {
   assert.equal(legacy.requests[0].options.method, "GET");
   assert.equal(legacy.requests[1].options.method, "POST", "first playback should prepare missing legacy stems once");
   assert.equal(legacy.players[0].queuedTrack.stems[0].name, "drums");
-  assert.match(legacy.element("mappings").innerHTML, /value="stem:drums"/, "ready stems should populate mapping options before their boundary transition");
+  assert.match(legacy.element("mappings").innerHTML, /value="drums"/, "ready stems should populate mapping options before their boundary transition");
   legacy.players[0].transition();
   await legacy.element("stop").event("click");
   await legacy.element("play").event("click"); await legacy.advance(50);

@@ -13,7 +13,7 @@ dashboard reads the compressed files directly, discovers their channels and
 numeric fields, and reduces large tensors to a bounded series before they reach
 the browser.
 
-Choose **Movement drums** to turn overall motion into the tempo and density of
+Choose the **Drums** tab to turn overall motion into the tempo and density of
 an electronic drum groove played in the browser, with no MIDI hardware needed.
 See [Movement drums](docs/movement_drums.md) for sources, kit controls and presets.
 
@@ -26,14 +26,24 @@ make dashboard-sonify
 
 The same service provides these workspaces:
 
-- **Signal Lab** at <http://127.0.0.1:8790/> for mapping JSON data to sound.
-- **ElevenLabs** at <http://127.0.0.1:8790/#elevenlabs> for generating music,
-  controlling it with live data, and preparing upcoming segments in the background.
+- **Connections** at <http://127.0.0.1:8790/> for choosing a recording or live
+  stream, testing browser audio, and connecting a MIDI device.
+- **Synth** at <http://127.0.0.1:8790/#synth> for mapping data to notes and sound.
+- **Drums** at <http://127.0.0.1:8790/#drums> for movement-driven drum grooves.
+- **Music mixer** at <http://127.0.0.1:8790/#mixer> for creating tracks and
+  mixing their stems with combined input signals, faders, and effect mappings.
 - **Observer** at <http://127.0.0.1:8790/observer/> for the original live
   Hydrasynth telemetry view.
 
-The dashboard has a switcher in its header, so all remain available while the
-service is running. Observer's **Auto** source follows Signal Lab whenever its
+Start in **Connections**, then open a sonification tab. **Basic** shows the
+main playback, sound, and mapping controls; **Advanced** reveals presets,
+detailed ranges, analysis, and technical settings. The detail preference is
+remembered without changing mappings or playback. Switching workspace stops
+playback but keeps the input and MIDI connections available. Synth remembers
+its browser/MIDI output choice independently; Drums and Music mixer always
+use browser audio. Loading a preset does not change that connection choice.
+
+Observer remains available in Advanced. Observer's **Auto** source follows Signal Lab whenever its
 preview is playing, then falls back to native/demo telemetry after the preview
 stops. Choose **Signal Lab** in Observer to keep that view locked to the
 sonification feed. This works for browser audio as well as MIDI output and does
@@ -44,7 +54,7 @@ controller. When a larger or newer external dataset is preferred, pass
 `RECORDINGS_DIR=/path/to/recordings` or set `RAPP_RECORDINGS_DIR`; an explicit
 folder takes priority over the bundled copies.
 
-The working surface lets you:
+With Advanced enabled, the working surface lets you:
 
 - keep up to 12 named mapping tabs for each recording, with separate voice,
   scale, tempo and rhythm settings; audition one tab at a time;
@@ -67,7 +77,8 @@ The working surface lets you:
   and send notes plus catalog-based CC/NRPN mappings to the Hydrasynth later.
 
 For MIDI output, connect and power on the synth, set `PARAM RX` to `NRPN`
-(the dashboard’s default format), click
+(the dashboard’s default format), choose **MIDI device** under **Synth output**
+in **Connections**, click
 **Connect MIDI device**, grant browser MIDI access, and select the Hydrasynth.
 The dashboard sends on MIDI channel 1 and provides a dedicated all-notes-off
 control. Mapping tabs save automatically in browser storage for each recording.
@@ -75,33 +86,90 @@ Existing saved mappings migrate to an **Original** tab, including their sound
 settings. Browser storage is specific to the browser and page origin; use
 **Export** to move saved presets to another browser or machine.
 
-### ElevenLabs recorded-data sonification
+### Music mixer
 
-Start with `make dashboard-sonify` and open the **ElevenLabs** header tab. This
+The **Music mixer** tab opens the mixer, with **Create instrumental music** at the top.
+The next-track prompt, BPM, key, instruments, and length stay visible.
+**Generate & play** requests original instrumental music and separates its
+stems. The mixer plays and shows only instrumental stems; the separated vocal
+stem is excluded from playback and mappings. **Recent tracks** recalls saved music;
+**Play** starts the selected track.
+The previous interface remains available through **Previous version** in Advanced
+or directly at <http://127.0.0.1:8790/#elevenlabs>.
+
+While playing, the mixer automatically prepares one spare track, including
+stems. Each transition frees the slot for another generation, with no session
+cap. Prompt changes apply to the next submitted request. Tracks share the
+requested musical direction and use the preceding provider audio as a
+conditioning reference when available. Ready tracks crossfade near the loop
+boundary; tempo and beat alignment depend on the generated audio. The current
+track repeats while its replacement is late, and keeps repeating after an error
+until **Retry next track** succeeds. Failed or uncertain submissions are never
+automatically resubmitted. Every new track and its stem separation use credits.
+
+Use **Connections input** for live or recorded signals, or explicitly choose
+**Simulated demo signals**. Add up to four signal mixes, each combining up to six
+inputs using average, weighted blend, difference, minimum, or maximum. Inputs
+learn their ranges; expand an input to freeze, relearn, or enter fixed bounds.
+Input names distinguish joint position from velocity and show their source channel.
+Each mix identifies whether it uses a single input or combines several inputs.
+
+Each channel has a volume fader, mute, pan, filters, delay, and reverb; stems also
+have solo. **Map a signal** routes a combined signal mix to a channel effect.
+Reuse one mix across channels, or add several effect mappings to one channel.
+Mapped volume multiplies the manual fader, and mute/solo takes priority. The
+vertical meters show effective volume settings, not measured audio loudness.
+An audible mapped channel waits for all its input signals; missing inputs on
+muted or solo-excluded channels do not silence the other channels.
+
+Mixer preferences save separately from the existing interface. Switching tabs
+stops playback and keeps Connections available. Reloading restores the mix
+without starting audio or generation. Stop also stops future generation;
+already submitted work can finish and remains in recent tracks. Pending work is
+recovered by checking its saved result when playback resumes.
+
+### Previous generated music interface
+
+Start with `make dashboard-sonify`, open **Music mixer**, switch to **Advanced**,
+and choose **Previous version**. This
 workspace uses the existing local server and works without MIDI hardware.
-It has its own generated-audio mappings and saved music, and can share Signal
-Lab's selected recording or live RAPP stream. Existing browser/MIDI/drum recipes
-remain available in Signal Lab.
+It has its own generated-audio mappings and saved music, and defaults to the
+recording or live RAPP stream selected in Connections. Playback, **What creates
+next**, inline **Create a starting track**, and realtime mappings share one page.
+Existing browser/MIDI recipes remain in Synth and
+movement grooves in Drums.
 
 Set `ELEVENLABS_API_KEY` in the repository's ignored `.env` file or the process
 environment (the environment takes precedence). Install `ffmpeg` and `ffprobe`
 on `PATH`, or place executable copies in `var/bin/`. The workspace reports
-missing setup requirements and permits planning before generation is ready.
+missing setup requirements before generation.
 Only the backend reads the key. Original recordings, feature tables, and local
 paths are never included in the provider request.
 
 **Realtime playback:** choose a saved track as the starting sound, choose a
-control source, and press **Play reactive**. Use **Signal Lab source** to share
-the main workspace's recording or connected stream, **RAPP / player WebSocket**
-to connect directly, **Replay this recording** for the analyzed flat file, or
-the clearly labeled demo movement to try the controls. Nested RAPP recordings
-work directly through the shared source; flattening is only needed for the
-separate recorded composition planner below.
+control source, and press **Play**. The shared Connections input is the
+default. Advanced source settings also offer **Separate RAPP WebSocket**
+to connect directly, **Replay this track's recording** for the analyzed flat file, or
+the clearly labeled demo movement to try the controls. Replay of a track's
+recording is available for older tracks that have a saved analysis. New starting
+music is generated directly from musical direction, without a recording or
+example dataset. RAPP recordings still work as mapping inputs through Connections.
 
-Live mapping rows connect an input to low-pass cutoff, resonance, high-pass
-cutoff, volume, stereo pan, speed/pitch, delay, reverb, or an available stem's
-volume. Configure fixed input/output bounds, inversion, and smoothing per row.
-**Calibrate** measures five seconds then freezes the input bounds. Controls
+Each live mapping follows **input(s) → audio source → filter/effect**. Choose
+the master or an available stem, then low-pass cutoff, resonance, high-pass
+cutoff, volume, stereo pan, delay, or reverb. Speed/pitch applies to the master
+so stems stay synchronized. Create up to 16 mappings, combining up to six
+inputs in each with average, weighted average, normalized sum, difference,
+minimum, or maximum. Each input is normalized before combining; later rows win
+when they address the same audio source and control.
+
+New inputs use **Auto learn**: incoming values expand the observed minimum and
+maximum, and constant signals map to the midpoint. Recordings use their full
+saved range. **Freeze** keeps the learned range fixed; **Relearn** starts it
+again. **Adjust input range** also accepts manual bounds, and output range,
+inversion, and smoothing remain editable. Existing saved fixed ranges are kept.
+The Synth tab exposes the same combine, auto-learning, freeze, and manual-range
+workflow under each input in Basic. Controls
 update at 20 Hz with audio-parameter smoothing. Missing or stale input fades
 the audio and prevents new automatic generation. Playback speed also changes
 pitch; tempo and key in a generation plan remain musical requests.
@@ -115,14 +183,24 @@ tracks without stems are separated on their first reactive playback; selecting
 or reopening a track alone does not start a paid request. Saved stems are reused.
 Saved stems play in sync and replace the full mix. Their
 sliders and mapping destinations control each layer independently; separation
-quality and instrument isolation depend on the provider. Filters and effects
-apply to the resulting mix. A failed separation leaves the original audio
+quality and instrument isolation depend on the provider. Stem filters and
+effects run before the layers reach the master filters and effects. A missing
+stem is marked unavailable and its mappings never redirect to the master.
+The **Stem mixer** is visible in Basic and includes a **Mute/Unmute** button
+for each stem. Mute overrides the stem's mapped volume; unmute restores its
+manual level while mappings keep working. Mutes and volume preferences are
+remembered by stem name across Stop/Play, upcoming segments, and reloads.
+A failed separation leaves the original audio
 available. Failed or unknown stem outcomes are not automatically retried.
 
 **Generate upcoming music automatically** is an explicit, initially disabled
 credit-using option. Choose 20, 40, or 60 seconds (default 60) and a session cap
-(default three new segments). Recent normalized input changes the next segment's
-arrangement while preserving the starting plan's style, tempo, key and palette.
+(default three new segments). **What creates next** sets style, requested BPM,
+key, and instruments for the next submitted request. **Input for new music**
+chooses the average of all mappings or one mapping to drive arrangement density;
+variability can also shape articulation. Editing these directions does not alter
+current playback or submit a request. Directions are saved in the browser, and
+each generated segment records the settings used.
 The next request starts early using measured generation latency. Only one
 request and one ready segment can be pending; current audio loops while waiting
 and crossfades when the replacement is ready. Every upcoming segment includes
@@ -138,33 +216,29 @@ conditioning; a following segment can reference up to its last 30 seconds.
 Older tracks without retained provider audio use the shared musical directions
 and a local crossfade. Neither path guarantees beat or melody continuity.
 
-**Create a starting track from recorded data:**
+**Create an original starting track:**
 
-1. Load the built-in 60-second alternating-activity example, or import a flat
-   CSV/JSONL file. Select the timestamp field and units explicitly. Nested RAPP
-   recordings need conversion to this flat format first.
-2. Choose numeric channels, their meaning (velocity, position, or scalar), and
-   normalization bounds. Crop the source and inspect coverage and section
-   features. Saved baseline bounds can be reused for comparisons.
-3. Build a plan. Activity controls arrangement density; variability-to-
-   articulation is optional and off initially. Inspect the section directions
-   and exact JSON before sending. Plan downloads do not contact ElevenLabs.
-4. **Generate** submits one whole composition using `music_v2_5`, then
-   automatically separates its stems. Both steps consume account credits.
-   The duration and attempt history are visible first.
-   Repeated requests reuse an in-flight job or completed result; **Generate
-   another variation** deliberately creates a new attempt. Editing settings
-   never starts generation.
-5. Play or seek saved attempts, compare their planned sections with the source,
-   and export audio plus the exact request, features, and manifest as a ZIP.
+1. Set the music description, requested BPM, key, and instruments in **What
+   creates next**.
+2. Open **Create a starting track**, choose 20, 40, or 60 seconds, and generate.
+   This creates original music directly from those choices and automatically
+   separates its stems. Both steps consume credits; no file import or recording
+   analysis is required.
+3. Play the saved result and map your input to its master or stems. Enable
+   upcoming music when you want data to guide later segments.
+
+Editing settings never submits a generation request. Duplicate requests reuse
+an existing attempt; generating another version is a deliberate paid action.
+Previously saved music remains available, including older tracks created from
+recordings. Downloads and exports remain available in Advanced.
 
 Jobs, inputs, immutable plan revisions, and audio persist under ignored
 `var/elevenlabs/`. One worker sends generation requests at a time. Interrupted
 or ambiguous provider outcomes become **unknown**, with no automatic retry;
 another attempt may incur another charge. Successful responses must fully
 decode before playback becomes available. Duration mismatches remain visible.
-Tempo, key, articulation, and density are requested musical properties; the
-playhead uses planned boundaries, and listening is needed to assess the mapping.
+Tempo, key, articulation, and density are requested musical properties;
+listening is needed to assess the musical result.
 
 The provider timeout defaults to 300 seconds and can be configured with
 `ELEVENLABS_TIMEOUT_SECONDS`. Music routes accept same-origin JSON requests

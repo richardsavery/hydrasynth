@@ -1,6 +1,6 @@
 "use strict";
 
-// Shares Signal Lab's raw inputs, while keeping the generated-audio transport independent.
+// Shares Connections inputs, while keeping the generated-audio transport independent.
 globalThis.HydraElevenSource = (() => {
   const finite = (value) => typeof value === "number" && Number.isFinite(value);
   const key = (source) => JSON.stringify([source.sourceKey, source.reducer, source.index || 0]);
@@ -37,8 +37,8 @@ globalThis.HydraElevenSource = (() => {
     function describe() {
       const state = getState();
       const live = state.sourceMode === "live";
-      return { mode: live ? "live" : "recording", label: live ? "Signal Lab live stream" :
-        state.recording ? `${state.recording.name} · replay` : "Choose a recording in Signal Lab",
+      return { mode: live ? "live" : "recording", label: live ? "Live RAPP stream" :
+        state.recording ? `${state.recording.name} · replay` : "Choose an input in Connections",
       fields: state.fields || [] };
     }
     async function prepare(sources) {
@@ -47,10 +47,10 @@ globalThis.HydraElevenSource = (() => {
       if (state.sourceMode === "live") {
         revision = currentRevision; origin = now(); return;
       }
-      if (!state.recording) throw new Error("Choose a recording in Signal Lab first.");
-      const unique = new Map(sources.slice(0, 6).map((source) => [key(source), source]));
+      if (!state.recording) throw new Error("Choose a recording in Connections first.");
+      const unique = new Map(sources.flatMap((source) => Array.isArray(source.sources) ? source.sources : [source]).slice(0, 96).map((source) => [key(source), source]));
       const loaded = await Promise.all([...unique].map(async ([id, source]) => [id, prepareSeries(await loadSeries(source))]));
-      if (token !== generation || revisionFor(getState()) !== currentRevision) throw new Error("The Signal Lab source changed while loading. Press Play again.");
+      if (token !== generation || revisionFor(getState()) !== currentRevision) throw new Error("The Connections input changed while loading. Press Play again.");
       prepared = new Map(loaded);
       const starts = loaded.map(([, series]) => series.start_time_seconds).filter(finite);
       start = finite(state.recording.start_time_seconds) ? state.recording.start_time_seconds : Math.min(...starts);
@@ -72,7 +72,13 @@ globalThis.HydraElevenSource = (() => {
       const value = sample(series, start + position);
       return finite(value) ? { value, at, minimum: series.minimum, maximum: series.maximum } : null;
     }
-    return { describe, prepare, read, reset(at = now()) { origin = at; } };
+    function bounds(source) {
+      const state = getState();
+      if (state.sourceMode === "live" || revision !== revisionFor(state)) return null;
+      const series = prepared.get(key(source));
+      return series ? { minimum: series.minimum, maximum: series.maximum } : null;
+    }
+    return { describe, prepare, read, bounds, resetRange(source) { getState().live?.resetRange?.(source); }, reset(at = now()) { origin = at; } };
   }
   return { create, sample, prepareSeries };
 })();

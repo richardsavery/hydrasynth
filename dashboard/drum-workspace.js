@@ -105,7 +105,7 @@ function renderOutputMode() {
     button.setAttribute("aria-checked", String(selected));
   });
   for (const id of ["melodic-rhythm-panel", "preview-synth", "harmony-panel", "sound-palette-panel", "melodic-output-note",
-    "transport-tempo", "transport-subdivision", "mapping-panel", "catalog-status", "mapping-help", "connect-midi"]) {
+    "transport-tempo", "transport-subdivision", "mapping-panel", "catalog-status", "mapping-help"]) {
     const element = document.getElementById(id);
     if (element) element.hidden = drums;
   }
@@ -115,8 +115,14 @@ function renderOutputMode() {
     if (element) element.hidden = !drums;
   }
   document.body.classList.toggle("drum-mode", drums);
-  dom["midi-panel"].hidden = state.output !== "midi";
-  dom["panic-button"].hidden = state.output !== "midi";
+  if (!state.workspaceView) {
+    dom["connect-midi"].hidden = drums;
+    dom["midi-panel"].hidden = state.output !== "midi";
+    dom["panic-button"].hidden = state.output !== "midi";
+  } else {
+    dom["connect-midi"].hidden = false;
+    if (document.getElementById("preview-synth")) document.getElementById("preview-synth").hidden = state.output !== "audio";
+  }
   if (drums) { renderDrumSources(); renderDrumReadout(state.drumActivity); }
   renderPlaybackAvailability();
 }

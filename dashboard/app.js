@@ -50,12 +50,16 @@ const state = {
   nextTickAt: 0,
   nextMappingId: 1,
   seriesCache: new Map(),
+  mappingRanges: new WeakMap(),
+  openInputRanges: new WeakSet(),
   focusedMappingId: null,
   playing: false,
   playTimer: null,
   cursor: 0,
   maxSteps: SERIES_LIMIT,
   output: "audio",
+  workspaceView: null,
+  synthOutput: "audio",
   drumSources: [], drumMuted: [], drumSeries: new Map(), drumMotion: null,
   drumActivity: 0, drumEngine: null, drumOrigin: 0, drumDuration: 1, drumRevision: 0,
   audio: null,
@@ -77,8 +81,8 @@ document.addEventListener("DOMContentLoaded", () => {
   bindLiveInput();
   bindDrumInterface();
   bindDashboardSwitcher();
-  bindSonificationWorkspaces();
   applySavedControls();
+  bindSonificationWorkspaces();
   renderScale();
   renderRhythm();
   updateClock();
@@ -90,31 +94,97 @@ document.addEventListener("DOMContentLoaded", () => {
 });
 
 function bindSonificationWorkspaces() {
-  const links = [...document.querySelectorAll("[data-workspace]")];
-  const signalLab = document.getElementById("signal-lab-workspace");
-  const elevenLabs = document.getElementById("elevenlabs-workspace");
-  if (!signalLab || !elevenLabs || !globalThis.HydraElevenLabs) return;
   const sourceBridge = globalThis.HydraElevenSource?.create({
     getState: () => state, loadSeries: loadSourceSeries
   });
-  globalThis.HydraElevenLabs.init({ sourceBridge });
-  const selectWorkspace = () => {
-    const generatedMusic = window.location.hash === "#elevenlabs";
-    if (generatedMusic) stopPlayback();
-    signalLab.hidden = generatedMusic;
-    elevenLabs.hidden = !generatedMusic;
-    document.body.classList.toggle("elevenlabs-mode", generatedMusic);
-    document.querySelector(".skip-link").href = generatedMusic ? "#elevenlabs-workspace" : "#stage";
-    links.forEach((link) => {
-      const selected = link.dataset.workspace === (generatedMusic ? "elevenlabs" : "signal-lab");
-      link.classList.toggle("is-active", selected);
-      if (selected) link.setAttribute("aria-current", "page"); else link.removeAttribute("aria-current");
-    });
-    if (generatedMusic) globalThis.HydraElevenLabs.activate();
-    else globalThis.HydraElevenLabs.deactivate();
+  globalThis.HydraElevenLabs?.init({ sourceBridge });
+  const mixerInput = globalThis.HydraElevenSource?.create({
+    getState: () => state, loadSeries: loadSourceSeries
+  });
+  const mixerBridge = mixerInput && {
+    ...mixerInput,
+    describe: () => ({ ...mixerInput.describe(),
+      revision: `${state.sourceMode}|${state.recording?.id}|${state.selectionGeneration}|${state.liveGeneration}` })
   };
-  window.addEventListener("hashchange", selectWorkspace);
-  selectWorkspace();
+  globalThis.HydraMusicMixer?.init({
+    container: document.getElementById("music-mixer-workspace"), sourceBridge: mixerBridge
+  });
+  globalThis.HydraWorkspace?.init({
+    onNavigate: selectSonificationWorkspace,
+    onOutputChange: selectConnectionOutput,
+    onTestAudio: testConnectionAudio
+  });
+  updateConnectionSummary();
+}
+
+function selectSonificationWorkspace(view, previous) {
+  if (view === state.workspaceView) return;
+  stopPlayback();
+  if (previous === "elevenlabs") globalThis.HydraElevenLabs?.deactivate();
+  if (previous === "mixer") globalThis.HydraMusicMixer?.deactivate();
+  state.workspaceView = view;
+  state.selectionGeneration += 1;
+  state.output = view === "drums" ? "drums" : view === "mixer" ? "audio" : state.synthOutput;
+  state.midiPacer?.reset();
+  renderSoundControls();
+  renderOutputMode();
+  if (view === "elevenlabs") globalThis.HydraElevenLabs?.activate();
+  if (view === "mixer") globalThis.HydraMusicMixer?.activate();
+  if ((view === "synth" || view === "drums") && state.recording) loadFocusedSeries();
+  updateConnectionSummary();
+}
+
+function selectConnectionOutput(output) {
+  if (!["audio", "midi"].includes(output)) return;
+  setOutput(output);
+}
+
+function updateConnectionSummary() {
+  if (!globalThis.HydraWorkspace || !state.workspaceView) return;
+  const live = state.sourceMode === "live";
+  const connected = state.liveSocket?.readyState === 1;
+  const fresh = connected && Number.isFinite(state.live?.lastAt) && performance.now() - state.live.lastAt <= 3000;
+  const browserOnly = ["drums", "elevenlabs", "mixer"].includes(state.workspaceView);
+  globalThis.HydraWorkspace.updateConnections({
+    inputMode: state.sourceMode,
+    inputLabel: live ? "Live RAPP stream" : state.recording?.name || "Choose an input",
+    inputState: live ? fresh ? "ready" : connected ? "waiting" : state.liveWanted ? "connecting" : "offline"
+      : state.recording ? "ready" : "offline",
+    output: state.synthOutput,
+    outputLabel: browserOnly || state.synthOutput === "audio" ? "Browser audio" : state.midiOutput?.name || "MIDI · connect a device",
+    outputState: browserOnly || state.synthOutput === "audio" || state.midiOutput ? "ready" : "warning",
+    midiReady: Boolean(state.midiOutput)
+  });
+}
+
+async function testConnectionAudio() {
+  try {
+    await ensureAudioEngine();
+    const { context, master } = state.audio;
+    const oscillator = context.createOscillator(), gain = context.createGain();
+    const now = context.currentTime;
+    oscillator.frequency.value = 440;
+    gain.gain.setValueAtTime(0, now);
+    gain.gain.linearRampToValueAtTime(0.12, now + 0.02);
+    gain.gain.linearRampToValueAtTime(0, now + 0.3);
+    oscillator.connect(gain); gain.connect(master);
+    oscillator.addEventListener("ended", () => { oscillator.disconnect(); gain.disconnect(); }, { once: true });
+    oscillator.start(now); oscillator.stop(now + 0.31);
+    showToast("Browser audio test played");
+  } catch (error) {
+    showToast(error.message || "Browser audio is unavailable");
+    throw error;
+  }
+}
+
+function handlePlaybackShortcut(event) {
+  if (event.defaultPrevented || document.body.classList.contains("observer-overlay-open")) return;
+  if (state.workspaceView && !["synth", "drums"].includes(state.workspaceView)) return;
+  if (event.key === "Escape" && (state.playing || state.preparing)) stopPlayback();
+  if (event.code === "Space" && !event.repeat && !isEditable(event.target)) {
+    event.preventDefault();
+    togglePlayback();
+  }
 }
 
 function bindDashboardSwitcher() {
@@ -237,13 +307,7 @@ function bindInterface() {
       updatePlayhead();
     }
   });
-  document.addEventListener("keydown", (event) => {
-    if (event.key === "Escape" && (state.playing || state.preparing)) stopPlayback();
-    if (event.code === "Space" && !isEditable(event.target)) {
-      event.preventDefault();
-      togglePlayback();
-    }
-  });
+  document.addEventListener("keydown", handlePlaybackShortcut);
   window.addEventListener("beforeunload", () => { disconnectLive(); stopPlayback(); panicMidi(); });
 }
 
@@ -365,7 +429,7 @@ function applyMusicalControls(raw) {
     else dom[id].value = String(controls[key]);
   });
   applyDrumControls(controls);
-  state.output = controls.output;
+  state.output = state.workspaceView ? state.workspaceView === "drums" ? "drums" : state.workspaceView === "mixer" ? "audio" : state.synthOutput : controls.output;
   renderOutputMode();
   updateControlReadouts();
   renderScale();
@@ -650,7 +714,10 @@ function createMappingSource(field) {
     sourceKey: field.key,
     reducer: field.default_reducer,
     index: 0,
-    weight: 1
+    weight: 1,
+    rangeMode: "auto",
+    inputMin: -1,
+    inputMax: 1
   };
 }
 
@@ -718,6 +785,7 @@ function renderMappings() {
     });
     removeButton.addEventListener("click", (event) => {
       event.stopPropagation();
+      mapping.sources.forEach(resetMappingSourceRange);
       state.mappings = state.mappings.filter((candidate) => candidate.id !== mapping.id);
       if (state.focusedMappingId === mapping.id) state.focusedMappingId = state.mappings[0]?.id || null;
       renderMappings();
@@ -740,6 +808,13 @@ function renderMappingSource(mapping, source, sourceIndex) {
   const weightControl = fragment.querySelector(".weight-control");
   const weightInput = fragment.querySelector('[data-role="weight"]');
   const removeSourceButton = fragment.querySelector('[data-role="remove-source"]');
+  const rangeDetails = fragment.querySelector(".source-range");
+  rangeDetails.open = state.openInputRanges.has(source);
+  rangeDetails.addEventListener("toggle", () => {
+    if (rangeDetails.open) state.openInputRanges.add(source);
+    else state.openInputRanges.delete(source);
+  });
+  sourceRow.dataset.sourceIndex = String(sourceIndex);
   sourceNumber.textContent = String(sourceIndex + 1);
   appendGroupedOptions(sourceSelect, state.fields, "channelName", "key", "optionLabel");
   if (!state.fieldIndex.has(source.sourceKey)) sourceSelect.add(new Option(`Waiting for ${source.sourceKey}`, source.sourceKey));
@@ -762,14 +837,17 @@ function renderMappingSource(mapping, source, sourceIndex) {
     const nextField = state.fieldIndex.get(source.sourceKey);
     source.reducer = nextField.default_reducer;
     source.index = 0;
+    resetMappingSourceRange(source);
     mappingChanged(mapping, true);
   });
   reducerSelect.addEventListener("change", () => {
     source.reducer = reducerSelect.value;
+    resetMappingSourceRange(source);
     mappingChanged(mapping, true);
   });
   indexInput.addEventListener("change", () => {
     source.index = Math.round(clamp(Number(indexInput.value) || 0, 0, 1_000_000));
+    resetMappingSourceRange(source);
     mappingChanged(mapping, true);
   });
   weightInput.addEventListener("change", () => {
@@ -779,6 +857,7 @@ function renderMappingSource(mapping, source, sourceIndex) {
   removeSourceButton.addEventListener("click", (event) => {
     event.stopPropagation();
     if (mapping.sources.length === 1) return;
+    resetMappingSourceRange(source);
     mapping.sources.splice(sourceIndex, 1);
     if (mapping.sources.length === 1) mapping.operator = "direct";
     mappingChanged(mapping, true);
@@ -791,7 +870,11 @@ function renderMappingSource(mapping, source, sourceIndex) {
   inputMin.disabled = inputMax.disabled = rangeMode.value !== "fixed";
   rangeMode.addEventListener("change", () => {
     source.rangeMode = rangeMode.value;
-    source.inputMin = Number(inputMin.value); source.inputMax = Number(inputMax.value);
+    if (source.rangeMode === "fixed") {
+      const bounds = usableFixedRange(learnedMappingRange(source));
+      source.inputMin = bounds?.minimum ?? source.inputMin ?? -1;
+      source.inputMax = bounds?.maximum ?? source.inputMax ?? 1;
+    } else resetMappingSourceRange(source);
     mappingChanged(mapping, true);
   });
   [inputMin, inputMax].forEach((input) => input.addEventListener("change", () => {
@@ -801,7 +884,74 @@ function renderMappingSource(mapping, source, sourceIndex) {
     }
     source.inputMin = minimum; source.inputMax = maximum; mappingChanged(mapping, true);
   }));
+  fragment.querySelector('[data-role="freeze-range"]').addEventListener("click", () => {
+    const bounds = usableFixedRange(learnedMappingRange(source));
+    if (!bounds) return;
+    Object.assign(source, { rangeMode: "fixed", inputMin: bounds.minimum, inputMax: bounds.maximum });
+    mappingChanged(mapping, true);
+  });
+  fragment.querySelector('[data-role="relearn-range"]').addEventListener("click", () => {
+    source.rangeMode = "auto"; resetMappingSourceRange(source); mappingChanged(mapping, true);
+  });
+  updateMappingSourceRange(sourceRow, source);
+  if (state.sourceMode !== "live") {
+    loadMappingSourceSeries(source).then(() => {
+      if (sourceRow.isConnected) updateMappingSourceRange(sourceRow, source);
+    }).catch(() => {}); // The waveform and transport report source loading failures.
+  }
   return sourceRow;
+}
+
+function mappingSourceIdentity(source) {
+  return JSON.stringify([state.recording?.id, source.sourceKey, source.reducer, source.index]);
+}
+
+function learnedMappingRange(source) {
+  if (state.sourceMode === "live") return state.live?.getRange(source) || null;
+  const range = state.mappingRanges.get(source);
+  return range?.identity === mappingSourceIdentity(source) ? range : null;
+}
+
+function resetMappingSourceRange(source) {
+  state.mappingRanges.delete(source);
+  state.live?.resetRange(source);
+}
+
+function usableFixedRange(range) {
+  if (!range || !Number.isFinite(range.minimum) || !Number.isFinite(range.maximum)) return null;
+  if (range.maximum > range.minimum) return range;
+  const padding = Math.max(0.001, Math.abs(range.minimum) * 0.01);
+  return { minimum: range.minimum - padding, maximum: range.maximum + padding };
+}
+
+function updateMappingSourceRange(row, source) {
+  if (state.sourceMode === "live" && state.liveSocket?.readyState === 1) state.live?.read(source, performance.now());
+  const range = learnedMappingRange(source), fixed = source.rangeMode === "fixed";
+  const text = (minimum, maximum) => `${formatNumber(minimum)} to ${formatNumber(maximum)}`;
+  row.querySelector('[data-role="range-summary"]').textContent = fixed
+    ? `Fixed · ${text(source.inputMin, source.inputMax)}`
+    : range ? `Auto learn · ${text(range.minimum, range.maximum)}` : "Auto learn · waiting for data";
+  row.querySelector('[data-role="range-status"]').textContent = fixed
+    ? "Values outside this range are limited to its ends. Relearn starts automatic mapping again."
+    : !range ? (state.sourceMode === "live" ? "Waiting for fresh input. A constant signal maps to the middle." : "Learning the full recording range…")
+    : state.sourceMode === "live" ? "Learns each fresh sample. Freeze to keep this range, or Relearn to start again."
+    : "Learned from the full recording. Freeze to edit the input range.";
+  row.querySelector('[data-role="freeze-range"]').disabled = fixed || !range;
+  if (!fixed && range) {
+    row.querySelector('[data-role="input-min"]').value = range.minimum;
+    row.querySelector('[data-role="input-max"]').value = range.maximum;
+  }
+}
+
+function updateMappingRangeReadouts() {
+  dom["mapping-rows"]?.querySelectorAll(".mapping-row").forEach((row) => {
+    const mapping = state.mappings.find((candidate) => candidate.id === Number(row.dataset.mappingId));
+    if (!mapping) return;
+    row.querySelectorAll(".mapping-source").forEach((sourceRow) => {
+      const source = mapping.sources[Number(sourceRow.dataset.sourceIndex)];
+      if (source) updateMappingSourceRange(sourceRow, source);
+    });
+  });
 }
 
 function mappingChanged(mapping, signalChanged) {
@@ -848,12 +998,22 @@ async function loadFocusedSeries() {
 
 async function loadSeries(mapping) {
   const series = await Promise.all(mapping.sources.map(async (source) => {
-    const loaded = await loadSourceSeries(source);
-    return source.rangeMode === "fixed" && source.inputMax > source.inputMin
-      ? { ...loaded, minimum: source.inputMin, maximum: source.inputMax } : loaded;
+    const loaded = await loadMappingSourceSeries(source);
+    if (source.rangeMode !== "fixed") return loaded;
+    if (!Number.isFinite(source.inputMin) || !Number.isFinite(source.inputMax) || source.inputMax <= source.inputMin)
+      throw new Error("Input range To must be greater than From.");
+    return { ...loaded, minimum: source.inputMin, maximum: source.inputMax };
   }));
-  return combineSeries(series, mapping.operator, mapping.sources.map((source) => source.weight),
-    mapping.sources.some((source) => source.rangeMode === "fixed"));
+  return combineSeries(series, mapping.operator, mapping.sources.map((source) => source.weight));
+}
+
+async function loadMappingSourceSeries(source) {
+  const identity = mappingSourceIdentity(source), generation = state.selectionGeneration;
+  const loaded = await loadSourceSeries(source);
+  if (generation === state.selectionGeneration && identity === mappingSourceIdentity(source)
+      && state.sourceMode !== "live" && Number.isFinite(loaded.minimum) && Number.isFinite(loaded.maximum))
+    state.mappingRanges.set(source, { identity, minimum: loaded.minimum, maximum: loaded.maximum });
+  return loaded;
 }
 
 async function loadMappingSet(mappings) {
@@ -912,7 +1072,7 @@ async function loadSourceSeries(source) {
   catch (error) { cache.delete(cacheKey); throw error; }
 }
 
-function combineSeries(seriesList, operator = "direct", weights = [], preserveInputRange = false) {
+function combineSeries(seriesList, operator = "direct", weights = []) {
   const usable = seriesList.filter((series) => Array.isArray(series?.points) && series.points.length);
   if (!usable.length) return { points: [], minimum: 0, maximum: 0, composite: true };
   if (usable.length === 1 || operator === "direct") return usable[0];
@@ -932,11 +1092,10 @@ function combineSeries(seriesList, operator = "direct", weights = [], preserveIn
     });
     return [progress, combineValues(values, operator, activeWeights)];
   });
-  const values = points.map((point) => point[1]);
   return {
     points,
-    minimum: preserveInputRange ? (operator === "difference" ? -1 : 0) : Math.min(...values),
-    maximum: preserveInputRange ? (operator === "sum" ? usable.length : 1) : Math.max(...values),
+    minimum: operator === "difference" ? -1 : 0,
+    maximum: operator === "sum" ? usable.length : 1,
     composite: true,
     source_count: usable.length,
     operator
@@ -945,6 +1104,7 @@ function combineSeries(seriesList, operator = "direct", weights = [], preserveIn
 
 function combineValues(values, operator, weights = []) {
   if (!values.length) return 0.5;
+  if (operator === "direct") return values[0];
   if (operator === "weighted") {
     const totalWeight = values.reduce((sum, _value, index) => sum + (weights[index] ?? 1), 0);
     if (totalWeight <= 0) return 0.5;
@@ -1019,6 +1179,7 @@ function updateSourceSummary() {
 }
 
 function playbackUnavailableReason() {
+  if (state.workspaceView === "synth" && state.synthOutput === "midi" && !state.midiOutput) return "Connect a MIDI device in Connections before playing.";
   if (!state.recording) return "Choose a recording or connect live movement data to enable Preview.";
   if (state.sourceMode === "live") {
     if (state.liveSocket?.readyState !== 1) return "Live input is disconnected. Connect live or return to a recording to enable Preview.";
@@ -1033,6 +1194,7 @@ function playbackUnavailableReason() {
 }
 
 function renderPlaybackAvailability() {
+  updateConnectionSummary();
   const reason = playbackUnavailableReason();
   const active = state.playing || state.preparing;
   if (dom["preview-button"]) {
@@ -1054,6 +1216,7 @@ function renderPlaybackAvailability() {
 }
 
 async function togglePlayback() {
+  if (state.workspaceView && !["synth", "drums"].includes(state.workspaceView)) return;
   if (state.playing || state.preparing) { stopPlayback(); return; }
   const unavailable = playbackUnavailableReason();
   if (unavailable) {
@@ -1635,9 +1798,12 @@ async function connectMidi() {
     state.midiAccess = state.midiAccess || await navigator.requestMIDIAccess({ sysex: false });
     state.midiAccess.onstatechange = renderMidiOutputs;
     renderMidiOutputs();
-    dom["midi-panel"].hidden = false;
-    dom["panic-button"].hidden = false;
-    if (state.midiOutput && state.output !== "midi") setOutput("midi");
+    if (!state.workspaceView) {
+      dom["midi-panel"].hidden = false;
+      dom["panic-button"].hidden = false;
+      if (state.midiOutput && state.output !== "midi") setOutput("midi");
+    }
+    updateConnectionSummary();
   } catch (error) {
     showToast(error instanceof Error ? error.message : "MIDI permission was not granted");
   }
@@ -1652,7 +1818,10 @@ function renderMidiOutputs() {
   const selected = outputs.find((output) => output.id === previousId) || hydra || null;
   dom["midi-output"].value = selected?.id || "";
   if (state.midiOutput?.id !== selected?.id) {
-    if (state.midiOutput) stopPlayback();
+    if (state.midiOutput) {
+      if (state.output === "midi") stopPlayback();
+      else stopActiveMidiNotes();
+    }
     state.currentPatch = null;
   }
   state.midiOutput = selected;
@@ -1676,8 +1845,12 @@ function updateMidiStatus() {
     dom["midi-status"].textContent = "Connect the Hydrasynth, then choose it here.";
     dom["midi-choice-detail"].textContent = "No output selected";
     dom["connect-midi"].innerHTML = `Connect MIDI device <span>→</span>`;
-    if (state.output === "midi") setOutput("audio");
+    if (state.output === "midi") {
+      if (state.workspaceView) stopPlayback();
+      else setOutput("audio");
+    }
   }
+  renderPlaybackAvailability();
 }
 
 function playMidiNote(note, velocity, durationMs) {
@@ -1721,13 +1894,17 @@ function setOutput(output) {
   if (!['audio', 'midi', 'drums'].includes(output)) return;
   if (state.playing || state.preparing) stopPlayback();
   state.selectionGeneration += 1;
-  state.output = output;
+  if (state.workspaceView) {
+    if (output !== "drums") state.synthOutput = output;
+    state.output = state.workspaceView === "drums" ? "drums" : state.workspaceView === "mixer" ? "audio" : state.synthOutput;
+  } else state.output = output;
   state.midiPacer?.reset();
   renderSoundControls();
   renderOutputMode();
-  if (output === "midi" && !state.midiAccess) connectMidi();
+  if (!state.workspaceView && output === "midi" && !state.midiAccess) connectMidi();
   saveSettings();
-  loadFocusedSeries();
+  if (state.recording) loadFocusedSeries();
+  updateConnectionSummary();
 }
 
 function seekFromPointer(event) {
@@ -1780,6 +1957,8 @@ function updateControlReadouts() {
 }
 
 function applySavedControls() {
+  const savedOutput = state.saved.connections?.synthOutput ?? state.saved.controls?.output;
+  state.synthOutput = savedOutput === "midi" ? "midi" : "audio";
   applyMusicalControls(state.saved.controls);
   renderSoundControls();
   dom.outputButtons.forEach((button) => {
@@ -1801,6 +1980,7 @@ function loadSavedSettings() {
 function saveSettings() {
   commitActiveTab();
   state.saved.controls = { ...readMusicalControls(), output: state.output };
+  state.saved.connections = { synthOutput: state.synthOutput };
   if (state.recording) {
     if (state.sourceMode !== "live") state.saved.lastRecording = state.recording.id;
     if (!state.saved.workspaces || typeof state.saved.workspaces !== "object" || Array.isArray(state.saved.workspaces)) state.saved.workspaces = {};
@@ -1924,7 +2104,7 @@ function clamp(value, minimum, maximum) {
 }
 
 function isEditable(target) {
-  return target instanceof Element && Boolean(target.closest("input, select, textarea, button, [contenteditable]"));
+  return target instanceof Element && Boolean(target.closest("input, select, textarea, button, a, summary, [contenteditable]"));
 }
 
 function escapeHtml(value) {
@@ -2231,7 +2411,7 @@ function refreshLiveView() {
     renderWorkspaces(); renderMappings(); renderDrumSources(); saveSettings();
   }
   dom["recording-detail"].textContent = `${state.liveUrl} · ${state.live?.channels.size || 0} channels · latest values`;
-  updateLiveStatus(); drawLiveWaveform();
+  updateLiveStatus(); drawLiveWaveform(); updateMappingRangeReadouts();
   state.liveRenderTimer = window.setTimeout(refreshLiveView, 250);
 }
 
