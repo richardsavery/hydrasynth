@@ -9,6 +9,25 @@ globalThis.HydraLive = (() => {
   const display = (value) => value.replaceAll("_", " ").replaceAll("-", " ");
   const fieldLabel = (value, index) => ["string", "number", "boolean"].includes(typeof value)
     ? String(value).slice(0, 80) : `Input ${index + 1}`;
+  function recordFrame(frame, arrays, now, revision, result) {
+    if (!globalThis.HydraStudy?.emit) return;
+    try {
+      const frameId = `${frame.channel}:${revision}:${now}`;
+      const scalar = value => finite(value) || typeof value === "boolean" ? value : typeof value === "string" ? value.slice(0, 160) : null;
+      globalThis.HydraStudy.emit("live.input.frame", { frame_id: frameId, channel: frame.channel, revision, received_performance_ms: now,
+        timestamp: scalar(frame.timestamp), time: scalar(frame.time), sequence: scalar(frame.sequence),
+        labels: Array.isArray(frame.labels) ? frame.labels.slice(0, 256).map(fieldLabel) : [], labels_truncated: Array.isArray(frame.labels) && frame.labels.length > 256,
+        arrays: [...arrays].map(([key, values]) => ({ key, value_count: values.length,
+          shape: key.startsWith("tensor:") && Array.isArray(frame.tensors?.[key.slice(7)]?.shape) ? frame.tensors[key.slice(7)].shape.slice(0, 8).map(scalar) : null })),
+        result, encoding: "flattened_numeric_chunks", chunk_size: 512 });
+      // Preserve every validated numeric value; chunking bounds each event
+      // without reducing the incoming frame rate or sampling the signals.
+      for (const [key, values] of arrays) for (let offset = 0; offset < values.length; offset += 512) {
+        globalThis.HydraStudy.emit("live.input.values", { frame_id: frameId, channel: frame.channel, revision, received_performance_ms: now,
+          array_key: key, offset, values: values.slice(offset, offset + 512).map(value => finite(value) ? value : null) });
+      }
+    } catch (_) { /* Recording must not interrupt live movement processing. */ }
+  }
   function flatten(raw) {
     if (!Array.isArray(raw)) return null;
     const values = [];
@@ -42,7 +61,12 @@ globalThis.HydraLive = (() => {
   class Stream {
     constructor() { this.channels = new Map(); this.fieldIndex = new Map(); this.samples = new Map(); this.ranges = new Map(); this.lastAt = null; this.frames = 0; this.invalid = 0; this.lastResult = null; }
     ingest(frame, now) {
-      const reject = (reason) => { this.invalid++; this.lastResult = { accepted: false, kind: "invalid", reason }; return false; };
+      const reject = (reason) => {
+        this.invalid++; this.lastResult = { accepted: false, kind: "invalid", reason };
+        try { globalThis.HydraStudy?.emit?.("live.input.rejected", { reason, channel: typeof frame?.channel === "string" ? frame.channel.slice(0, 160) : null,
+          received_performance_ms: finite(now) ? now : null, invalid_count: this.invalid }); } catch (_) {}
+        return false;
+      };
       if (!finite(now) || !frame || typeof frame !== "object" || typeof frame.channel !== "string" || frame.channel.length > 160) return reject("shape");
       if (frame.channel === "__status__") { this.lastResult = { accepted: false, kind: "status" }; return false; }
       const channelId = frame.channel;
@@ -97,6 +121,7 @@ globalThis.HydraLive = (() => {
         if (value !== null) this.learn(source, value, channel.revision);
       }
       this.lastResult = { accepted: true, kind: "data", channelId, discovered, fieldLimitReached };
+      recordFrame(frame, arrays, now, channel.revision, this.lastResult);
       return discovered;
     }
     valueFor(source, field, channel) {

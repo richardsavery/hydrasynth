@@ -190,7 +190,7 @@ function fixture({ hash = "", saved, unavailableStorage = false } = {}) {
   assert.deepEqual(workspaceLinks(useNavigation), ["synth-mixer", "mixer", "rap-response", "robot-control"]);
   assert.equal(workspaceLinks(navigation).filter(view => view.startsWith("rap-")).length, 1, "rap has one primary tab");
   const rapResponse = fs.readFileSync(path.join(__dirname, "../dashboard/rap-response.js"), "utf8");
-  assert.match(rapResponse, /href="#rap-experiment" data-workspace="rap-experiment">Voice experiments/);
+  assert.doesNotMatch(rapResponse, /href="#rap-experiment"|Voice experiments/, "voice choices belong in the main rap workspace");
   assert.match(navigation, /href="#robot-setup"[^>]*>Keirzo setup<\/a>/);
   assert.match(navigation, /href="#robot-control"[^>]*>Keirzo control <span data-robot-live-indicator hidden>Live<\/span><\/a>/);
   assert.doesNotMatch(html, /<a[^>]*data-workspace="drums"/);

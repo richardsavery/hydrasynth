@@ -1,0 +1,77 @@
+{
+  "created": "2026-10-19",
+  "description": "The six approved rap voice auditions, copied without changes for local playback.",
+  "model_id": "eleven_multilingual_sts_v2",
+  "source_sha256": "a3780d9265cbba0e3cf41b1cf1669a0ede5c891ed7a0cf650c581b71054ff888",
+  "source_note": "Same isolated music-model rap performance for every target voice; original music-model identity is replaced using Voice Changer.",
+  "processing": "Constant gain only; no pitch shifting, formant changes, EQ, compression, or added effects.",
+  "target_lufs": -19.78,
+  "voices": [
+    {
+      "key": "eva",
+      "name": "Eva",
+      "voice_id": "weA4Q36twV5kwSaTEL0Q",
+      "file": "eva.wav",
+      "sha256": "fce642d92c8d222dc5cca909c30e0b68646e66d5abac288005027da768f61878",
+      "duration_seconds": 10.216791666666667,
+      "sample_rate": 24000,
+      "channels": 1,
+      "bits": 16
+    },
+    {
+      "key": "cold_android",
+      "name": "Cold Android",
+      "voice_id": "nPijfmaNgvm5OSN4xM8H",
+      "file": "cold_android.wav",
+      "sha256": "87d215fe24a9ff05fc5ea525372293df5072934691bbfbb4188c31d7497b1233",
+      "duration_seconds": 10.216791666666667,
+      "sample_rate": 24000,
+      "channels": 1,
+      "bits": 16
+    },
+    {
+      "key": "peter",
+      "name": "Peter",
+      "voice_id": "TumdjBNWanlT3ysvclWh",
+      "file": "peter.wav",
+      "sha256": "7c67d77b7bdded7fb27359564451eaf6332bcc0e49ededc07c28d24c612ac681",
+      "duration_seconds": 10.216791666666667,
+      "sample_rate": 24000,
+      "channels": 1,
+      "bits": 16
+    },
+    {
+      "key": "elowen",
+      "name": "Elowen",
+      "voice_id": "dvbL7qkNGZY1IqPGZAjM",
+      "file": "elowen.wav",
+      "sha256": "38ef643a22a0c72bd5baf0b566e8f97f462d2ef2269641b7e9270ef608719c9e",
+      "duration_seconds": 10.216791666666667,
+      "sample_rate": 24000,
+      "channels": 1,
+      "bits": 16
+    },
+    {
+      "key": "maisie",
+      "name": "Maisie",
+      "voice_id": "QtY3JBOUKEB5xzrRfOKc",
+      "file": "maisie.wav",
+      "sha256": "e5622b22bd5810e77f441a7b32a73dc6c2e1fe74782ff6fbdf5ee4e934e6dc8e",
+      "duration_seconds": 10.216791666666667,
+      "sample_rate": 24000,
+      "channels": 1,
+      "bits": 16
+    },
+    {
+      "key": "warren",
+      "name": "Warren",
+      "voice_id": "7QN34D2r3hCNwbOYIeK0",
+      "file": "warren.wav",
+      "sha256": "7e9af4f6a3daaabbc812a6eaef1521847c0f3f2daf19ab5e8a3d0a105c455577",
+      "duration_seconds": 10.216791666666667,
+      "sample_rate": 24000,
+      "channels": 1,
+      "bits": 16
+    }
+  ]
+}

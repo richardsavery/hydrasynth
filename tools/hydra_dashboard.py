@@ -34,10 +34,16 @@ from rap_service import RapService
 from rap_experiment_service import RapExperimentService
 from rap_response_service import RapResponseService
 from robot_control import RobotControlService
+from study_recording import StudyRecorder
+from study_backup import StudyBackup
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DASHBOARD_DIR = PROJECT_ROOT / "dashboard"
+RAP_VOICE_DEMO_FILES = {
+    f"/rap-voice-demos/{voice}.wav": f"rap-voice-demos/{voice}.wav"
+    for voice in ("eva", "cold_android", "peter", "elowen", "maisie", "warren")
+}
 CATALOG_PATH = PROJECT_ROOT / "data" / "hydrasynth_parameters.json"
 DEFAULT_HYDRACTL = PROJECT_ROOT / "build" / "hydractl"
 EVENT_HISTORY_LIMIT = 80
@@ -920,6 +926,9 @@ class SnapshotStore:
             self.updated_at = utc_now()
 
     def set_error(self, message: str) -> None:
+        study = getattr(self, "study_recorder", None)
+        if study is not None:
+            study.record("hardware.error", {"message": message, "mode": self.mode})
         with self.lock:
             self.error = message
             self.updated_at = utc_now()
@@ -928,6 +937,9 @@ class SnapshotStore:
         line = line.strip()
         if not line:
             return
+        study = getattr(self, "study_recorder", None)
+        if study is not None:
+            study.record("hardware.stderr", {"message": line, "mode": self.mode})
         with self.lock:
             self.stderr_tail.append(line)
             self.updated_at = utc_now()
@@ -1478,6 +1490,9 @@ class SnapshotStore:
     def accept(
         self, message: dict[str, Any], response_kind: str | None = None
     ) -> None:
+        study = getattr(self, "study_recorder", None)
+        if study is not None and self.mode != "demo":
+            study.record("hardware.telemetry", {"message": message, "response_kind": response_kind})
         with self.lock:
             message_type = message.get("type")
             if message_type == "ready":
@@ -2781,6 +2796,29 @@ class DashboardHTTPServer(ThreadingHTTPServer):
     allow_reuse_address = True
 
 
+def default_study_directory() -> Path:
+    """Keep live study databases out of source checkouts and cloud-sync folders."""
+    configured = os.environ.get("KEIRZO_STUDY_DIR")
+    if configured:
+        return Path(configured).expanduser()
+    if sys.platform == "darwin":
+        return Path.home() / "Library" / "Application Support" / "Keirzo" / "study-data"
+    if os.name == "nt":
+        return Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local")) / "Keirzo" / "study-data"
+    return Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local" / "share")) / "keirzo" / "study-data"
+
+
+def study_app_version() -> str:
+    try:
+        revision = subprocess.run(["git", "rev-parse", "HEAD"], cwd=PROJECT_ROOT,
+                                  capture_output=True, text=True, timeout=2, check=True).stdout.strip()
+        dirty = subprocess.run(["git", "diff", "--quiet", "HEAD", "--"], cwd=PROJECT_ROOT,
+                               capture_output=True, timeout=2).returncode != 0
+        return revision + ("+modified" if dirty else "")
+    except (OSError, subprocess.SubprocessError):
+        return "unversioned"
+
+
 def handler_for(
     store: SnapshotStore,
     catalog_payload: bytes | None = None,
@@ -2791,6 +2829,7 @@ def handler_for(
     rap_experiment: RapExperimentService | None = None,
     robot: RobotControlService | None = None,
     rap_response: RapResponseService | None = None,
+    study: StudyRecorder | None = None,
 ) -> type[BaseHTTPRequestHandler]:
     class DashboardHandler(BaseHTTPRequestHandler):
         server_version = "HydraDashboard/1"
@@ -2798,6 +2837,9 @@ def handler_for(
         def do_GET(self) -> None:  # noqa: N802
             request_url = urlsplit(self.path)
             path = unquote(request_url.path)
+            if path.startswith("/api/study/"):
+                self._local_audio_request("GET", path, study, "Study recording")
+                return
             if path.startswith("/api/robot/"):
                 self._local_audio_request("GET", path, robot, "Robot control")
                 return
@@ -2925,11 +2967,24 @@ def handler_for(
             if path == "/favicon.ico":
                 self._send(204, b"", "image/x-icon", "public, max-age=86400")
                 return
+            demo_filename = RAP_VOICE_DEMO_FILES.get(path)
+            if demo_filename is not None:
+                # Packaged auditions are ordinary local files, independent of
+                # generation services, API credentials, and participant jobs.
+                try:
+                    self._send_elevenlabs_file(FileResponse(DASHBOARD_DIR / demo_filename, "audio/wav"))
+                except (BrokenPipeError, ConnectionResetError):
+                    pass
+                except OSError:
+                    self._send(500, b"Voice demo unavailable\n", "text/plain; charset=utf-8", "no-store")
+                return
             static_files = {
                 "/": "index.html",
                 "/index.html": "index.html",
                 "/styles.css": "styles.css",
                 "/app.js": "app.js",
+                "/study-recorder.js": "study-recorder.js",
+                "/study-recorder.css": "study-recorder.css",
                 "/workspace-shell.js": "workspace-shell.js",
                 "/workspace-shell.css": "workspace-shell.css",
                 "/sonification.js": "sonification.js",
@@ -3007,6 +3062,9 @@ def handler_for(
 
         def do_POST(self) -> None:  # noqa: N802
             path = unquote(urlsplit(self.path).path)
+            if path.startswith("/api/study/"):
+                self._local_audio_request("POST", path, study, "Study recording")
+                return
             if path.startswith("/api/robot/"):
                 self._local_audio_request("POST", path, robot, "Robot control")
                 return
@@ -3043,6 +3101,9 @@ def handler_for(
                 except ValueError as error:
                     self._json_error(400, str(error) or "invalid_signal_lab_event")
                     return
+                if study is not None:
+                    study.record("output.signal", {"input": document, "result": response},
+                                 session_id=self.headers.get("X-Study-Session"))
                 payload = json.dumps(
                     response, separators=(",", ":"), allow_nan=False
                 ).encode("utf-8")
@@ -3088,7 +3149,9 @@ def handler_for(
                     length = 0
                 limit = (16 * 1024 if label == "Robot control" else
                          128 * 1024 if label in {"Rap", "Rap experiment"} else
-                         2 * 1024 * 1024 if label == "Rap response" else 12 * 1024 * 1024)
+                         2 * 1024 * 1024 if label == "Rap response" else
+                         (48 * 1024 * 1024 if path == "/api/study/media" else 4 * 1024 * 1024)
+                         if label == "Study recording" else 12 * 1024 * 1024)
                 if not 0 < length <= limit:
                     self._json_error(413, "Request exceeds the local service size limit.")
                     return
@@ -3102,6 +3165,9 @@ def handler_for(
                     return
             try:
                 status, body = audio_service.dispatch(method, self.path, document)
+                if study is not None and audio_service is not study:
+                    study.observe_http(method, path, document, status, body,
+                                       session_id=self.headers.get("X-Study-Session"))
                 if isinstance(body, FileResponse):
                     self._send_elevenlabs_file(body)
                 else:
@@ -3806,6 +3872,12 @@ def parse_arguments(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--takeover", type=float, default=3.0)
     parser.add_argument("--no-input", action="store_true")
     parser.add_argument("--no-broker", action="store_true")
+    parser.add_argument("--study-dir", type=Path, default=default_study_directory(),
+                        help="Local study data directory (or KEIRZO_STUDY_DIR); defaults to the user's application data folder.")
+    parser.add_argument("--no-study-recording", action="store_true",
+                        help="Disable study recording for development runs.")
+    parser.add_argument("--no-study-backups", action="store_true",
+                        help="Disable automatic local study backup bundles; live recording remains enabled.")
     parser.add_argument(
         "--broker-socket", type=Path, default=DEFAULT_BROKER_SOCKET
     )
@@ -3869,6 +3941,24 @@ def main(argv: list[str] | None = None) -> int:
         rap_experiment.close()
         print(f"error: unable to initialize rap response storage: {error}", file=sys.stderr)
         return 1
+    study = None
+    if not arguments.no_study_recording:
+        try:
+            study = StudyRecorder(arguments.study_dir.expanduser(), app_version=study_app_version(),
+                                  asset_roots={"elevenlabs": elevenlabs.root, "rap": rap.root,
+                                               "rap-experiment": rap_experiment.root, "rap-response": rap_response.root})
+        except Exception as error:
+            elevenlabs.close()
+            rap.close()
+            rap_experiment.close()
+            rap_response.close()
+            robot.close()
+            print(f"error: unable to initialize study recording ({type(error).__name__}); check the study directory and disk space", file=sys.stderr)
+            return 1
+        for component in (store, robot, elevenlabs, rap, rap_experiment, rap_response):
+            component.study_recorder = study
+        study.record("application.started", {"mode": "demo" if arguments.demo else "live",
+                                             "app_version": study_app_version(), "recordings_directory": str(recordings_directory)})
     service: DemoService | LiveService
     if arguments.demo:
         service = DemoService(store)
@@ -3909,6 +3999,8 @@ def main(argv: list[str] | None = None) -> int:
             rap.close()
             rap_experiment.close()
             rap_response.close()
+            if study is not None:
+                study.close()
             print(f"error: unable to start command broker: {error}", file=sys.stderr)
             return 1
 
@@ -3940,6 +4032,7 @@ def main(argv: list[str] | None = None) -> int:
                 rap_experiment,
                 robot,
                 rap_response,
+                study,
             ),
         )
     except OSError as error:
@@ -3950,9 +4043,20 @@ def main(argv: list[str] | None = None) -> int:
         rap.close()
         rap_experiment.close()
         rap_response.close()
+        if study is not None:
+            study.close()
         print(f"error: unable to listen on {arguments.host}:{arguments.port}: {error}", file=sys.stderr)
         return 1
     server.timeout = 0.4
+    study_backup = None
+    if study is not None:
+        if not arguments.no_study_backups:
+            study_backup = StudyBackup(study)
+            study.backup_service = study_backup
+            study_backup.start()
+        print(f"Study recording: {arguments.study_dir.expanduser()}", flush=True)
+        if study_backup is not None:
+            print(f"Study backups: {study_backup.status()['destination']}", flush=True)
     print(
         f"Hydrasynth dashboard: http://{arguments.host}:{arguments.port}"
         f" ({'demo' if arguments.demo else 'live'})",
@@ -3999,6 +4103,11 @@ def main(argv: list[str] | None = None) -> int:
         rap_experiment.close()
         rap_response.close()
         robot.close()
+        if study is not None:
+            study.record("application.stopped", {})
+            if study_backup is not None:
+                study_backup.close()
+            study.close()
     return 0
 
 

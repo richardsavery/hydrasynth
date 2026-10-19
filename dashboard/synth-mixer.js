@@ -2,6 +2,9 @@
 
 // This workspace keeps its sounds and signal mixes separate from the original Synth.
 globalThis.HydraSynthMixer = (() => {
+  const study = (type, payload) => { try { globalThis.HydraStudy?.emit?.(type, payload); } catch (_) {} };
+  let studyTransport = "";
+  let mappingTracker = null, applyingMapping = false;
   const KEY = "hydra.synth-mixer.v1";
   const OPERATORS = { average: "Average", weighted: "Weighted blend", difference: "Difference", minimum: "Lowest", maximum: "Highest" };
   const READ_MODES = { value: "Direct value", mean: "Average", rms: "RMS magnitude", minimum: "Lowest value", maximum: "Highest value", index: "One element" };
@@ -42,6 +45,30 @@ globalThis.HydraSynthMixer = (() => {
     $("notice").classList.toggle("is-error", error);
   }
   function getState() { return engine ? { ...engine.getConfig(), signalLinks: signalLibrary?.getLinks() || {}, ...(savedRap === undefined ? {} : { rap: savedRap }) } : null; }
+  function mappingStudyContext() {
+    recordMappingPlayback();
+    try { return mappingTracker?.current() || null; } catch (_) { return null; }
+  }
+  function recordMappingPlayback(next = status()) {
+    if (applyingMapping) return;
+    try { mappingTracker?.playback(null, { running: Boolean(next.playing), output: next.output || "audio",
+      midi_format: next.midiFormat || config?.controls.midiFormat, source_valid: snapshot?.sourceValid,
+      midi_ready: Boolean(next.midiReady) }); } catch (_) { /* Recording must not interrupt sound. */ }
+  }
+  function captureMapping(action, details = {}) {
+    // A transport can stop between UI refreshes. Close that playback interval
+    // before associating an accepted edit with the tracker's previous state.
+    if (!status().playing) recordMappingPlayback();
+    try {
+      mappingTracker?.capture({ config: engine.getConfig(), signalLinks: signalLibrary?.getLinks() || {} }, { action, ...details });
+    } catch (_) { /* Recording must not interrupt controls. */ }
+    recordMappingPlayback();
+  }
+  function applyConfig() {
+    applyingMapping = true;
+    try { engine.setConfig(config); config = engine.getConfig(); }
+    finally { applyingMapping = false; }
+  }
   function flush() { const state = getState(); if (state) localStorage.setItem(KEY, JSON.stringify(state)); return state; }
   function save() { try { flush(); } catch (_) { /* Session-only controls still work. */ } }
   function publishSignals() {
@@ -62,12 +89,16 @@ globalThis.HydraSynthMixer = (() => {
   }
   function syncSignals() {
     config = engine.getConfig();
-    if (signalLibrary?.sync(config)) { engine.setConfig(config); config = engine.getConfig(); history.clear(); }
+    const previousLinks = JSON.stringify(signalLibrary?.getLinks() || {});
+    const changed = signalLibrary?.sync(config);
+    if (changed) { applyConfig(); history.clear(); }
+    if (changed || previousLinks !== JSON.stringify(signalLibrary?.getLinks() || {})) captureMapping("shared_sync");
     renderBuses(); renderParameters(); save();
   }
-  function commit(render = "all") {
-    engine.setConfig(config); config = engine.getConfig();
+  function commit(render = "all", details = {}) {
+    applyConfig();
     publishSignals();
+    captureMapping(details.action || "edit", details);
     if (render === "all" || render === "buses") renderBuses();
     if (render === "all" || render === "parameters") renderParameters();
     save();
@@ -186,6 +217,15 @@ globalThis.HydraSynthMixer = (() => {
   }
   function updateTransport() {
     const next = status(), busy = starting || selectingPatch || next.preparing;
+    recordMappingPlayback(next);
+    if (!applyingMapping && globalThis.HydraStudy?.emit) {
+      const value = { playing: next.playing, preparing: next.preparing, output: next.output, midi_ready: next.midiReady,
+        patch_changing: next.patchChanging, patch: next.currentPatch || null, source_valid: snapshot?.sourceValid,
+        error: next.error || null, ready_reason: next.readyReason || null,
+        mapping_revision_id: mappingStudyContext()?.revision_id || null };
+      const key = JSON.stringify(value);
+      if (key !== studyTransport) { studyTransport = key; study("synth.mixer.state", value); }
+    }
     $("play").disabled = busy || next.playing || Boolean(next.readyReason);
     $("play").textContent = busy ? "Preparing…" : "▶ Play";
     $("stop").disabled = !busy && !next.playing;
@@ -267,7 +307,7 @@ globalThis.HydraSynthMixer = (() => {
   }
   function onChange(event) {
     if (rendering) return;
-    const element = event.target, { bus, source, parameter } = context(element);
+    const element = event.target, { bus, source, sourceIndex, parameter } = context(element);
     if (element.id === "sm-shared-mix") { renderLibrary(); return; }
     if (element.id === "sm-parameter-group") { renderPicker(); return; }
     if (element.dataset.control) {
@@ -280,17 +320,17 @@ globalThis.HydraSynthMixer = (() => {
       if (element.dataset.control === "soundMode" && element.value === "mapped" && !config.parameters.some((item) => item.destination === "sound")) {
         config.parameters.push(api().defaultParameter("sound"));
       }
-      commit(element.dataset.control === "soundMode" ? "parameters" : "none"); restoreControls(); return;
+      commit(element.dataset.control === "soundMode" ? "parameters" : "none", { action: "control", field: element.dataset.control }); restoreControls(); return;
     }
     if (element.id === "sm-mode") {
       signalLibrary?.detachAll();
       config.mode = element.value;
       const available = element.value === "demo" ? globalThis.HydraMusicMixerEngine.DEMO_FIELDS : sourceBridge?.describe?.().fields || [];
       config.buses.forEach((item, index) => { item.sources = [sourceFor(available[index % Math.max(1, available.length)]?.key, available)]; });
-      history.clear(); commit(); notice(""); return;
+      history.clear(); commit("all", { action: "mode" }); notice(""); return;
     }
-    if (element.hasAttribute("data-bus-name")) { bus.name = element.value.trim() || "Signal mix"; commit(); return; }
-    if (element.hasAttribute("data-operator")) { bus.operator = element.value; commit(); return; }
+    if (element.hasAttribute("data-bus-name")) { bus.name = element.value.trim() || "Signal mix"; commit("all", { action: "bus_name", bus_id: bus.id }); return; }
+    if (element.hasAttribute("data-operator")) { bus.operator = element.value; commit("all", { action: "operator", bus_id: bus.id }); return; }
     if (source && element.dataset.sourceField) {
       const key = element.dataset.sourceField;
       if (key === "sourceKey") Object.assign(source, sourceFor(element.value));
@@ -300,16 +340,16 @@ globalThis.HydraSynthMixer = (() => {
         if (key.startsWith("input") && source.inputMax <= source.inputMin) { notice("The maximum must be greater than the minimum.", true); return; }
       } else source[key] = element.value;
       if (key === "reducer" || key === "index" || (key === "rangeMode" && element.value === "auto")) { source.learnedMin = null; source.learnedMax = null; }
-      commit(); notice(""); return;
+      commit("all", { action: "source", field: key, bus_id: bus.id, source_index: sourceIndex }); notice(""); return;
     }
     if (parameter && element.dataset.parameterField) {
       const key = element.dataset.parameterField;
       if (key === "strength") { onInput(event); return; }
-      if (key === "value") { if (element.tagName === "SELECT") { parameter.value = Number(element.value); commit("parameters"); } return; }
+      if (key === "value") { if (element.tagName === "SELECT") { parameter.value = Number(element.value); commit("parameters", { action: "parameter", field: key, destination: parameter.destination }); } return; }
       if (key === "invert") parameter[key] = element.checked;
       else if (["minimum", "maximum"].includes(key)) { if (!finite(element.valueAsNumber)) return; parameter[key] = element.valueAsNumber; }
       else parameter[key] = element.value;
-      commit("parameters");
+      commit("parameters", { action: "parameter", field: key, destination: parameter.destination });
     }
   }
   function onInput(event) {
@@ -320,7 +360,7 @@ globalThis.HydraSynthMixer = (() => {
     if (key !== "value" && key !== "strength") return;
     const { parameter } = context(element); if (!parameter || !finite(element.valueAsNumber)) return;
     parameter[key] = key === "strength" ? Math.max(0, Math.min(100, element.valueAsNumber)) / 100 : element.valueAsNumber;
-    engine.setConfig(config); config = engine.getConfig(); save();
+    applyConfig(); captureMapping("parameter", { field: key, destination: parameter.destination, phase: "input" }); save();
     const row = element.closest("[data-parameter]");
     if (key === "strength") {
       row.querySelector("[data-strength-value]").textContent = percent(parameter.strength);
@@ -350,44 +390,56 @@ globalThis.HydraSynthMixer = (() => {
       config = engine.getConfig();
       const destination = destinationFor(element.dataset.addDestination);
       if (destination && !destination.unavailable && config.parameters.length < (api().MAX_PARAMETERS || 2048) && !config.parameters.some((item) => item.destination === destination.id)) {
-        config.parameters.push(api().defaultParameter(destination)); commit("parameters");
+        config.parameters.push(api().defaultParameter(destination)); commit("parameters", { action: "add_parameter", destination: destination.id });
       }
       $("picker").close(); return;
     }
     const { bus, sourceIndex, parameter } = context(element);
     if (element.id === "sm-add-shared") {
-      try { signalLibrary?.attach($("shared-mix").value, config, `mix-${Date.now().toString(36)}`); commit(); notice(""); }
+      try { signalLibrary?.attach($("shared-mix").value, config, `mix-${Date.now().toString(36)}`); commit("all", { action: "attach_shared", shared_id: $("shared-mix").value }); notice(""); }
       catch (error) { notice(error.message, true); }
       return;
     }
     if (element.dataset.action === "share-mix") {
-      try { signalLibrary?.share(bus, config.mode); renderBuses(); save(); notice(""); }
+      try { signalLibrary?.share(bus, config.mode); captureMapping("share", { bus_id: bus.id }); renderBuses(); save(); notice(""); }
       catch (error) { notice(error.message, true); }
       return;
     }
-    if (element.dataset.action === "detach-mix") { signalLibrary?.detach(bus.id); renderBuses(); save(); return; }
+    if (element.dataset.action === "detach-mix") { signalLibrary?.detach(bus.id); captureMapping("detach_shared", { bus_id: bus.id }); renderBuses(); save(); return; }
     if (element.id === "sm-add-bus") {
       if (config.buses.length >= 4) return;
-      config.buses.push(newBus(`mix-${Date.now().toString(36)}`, `Mix ${String.fromCharCode(65 + config.buses.length)}`, fields()[config.buses.length % Math.max(1, fields().length)]?.key)); commit(); return;
+      config.buses.push(newBus(`mix-${Date.now().toString(36)}`, `Mix ${String.fromCharCode(65 + config.buses.length)}`, fields()[config.buses.length % Math.max(1, fields().length)]?.key)); commit("all", { action: "add_bus", bus_id: config.buses.at(-1).id }); return;
     }
     switch (element.dataset.action) {
-      case "add-source": if (bus.sources.length < 6) bus.sources.push(sourceFor(fields().find((field) => !bus.sources.some((source) => source.sourceKey === field.key))?.key || fields()[0]?.key)); commit(); break;
-      case "remove-source": if (bus.sources.length > 1) bus.sources.splice(sourceIndex, 1); commit(); break;
+      case "add-source":
+        if (bus.sources.length >= 6) return;
+        bus.sources.push(sourceFor(fields().find((field) => !bus.sources.some((source) => source.sourceKey === field.key))?.key || fields()[0]?.key));
+        commit("all", { action: "add_source", bus_id: bus.id, source_index: bus.sources.length - 1 }); break;
+      case "remove-source":
+        if (bus.sources.length <= 1) return;
+        bus.sources.splice(sourceIndex, 1); commit("all", { action: "remove_source", bus_id: bus.id, source_index: sourceIndex }); break;
       case "remove-bus":
         if (config.buses.length === 1) return;
         config.buses = config.buses.filter((item) => item !== bus);
-        config.parameters.forEach((item) => { if (item.busId === bus.id) item.busId = ""; }); history.delete(bus.id); commit(); break;
+        config.parameters.forEach((item) => { if (item.busId === bus.id) item.busId = ""; }); history.delete(bus.id); commit("all", { action: "remove_bus", bus_id: bus.id }); break;
       case "freeze":
-        if (!engine.freeze(bus.id, sourceIndex)) { notice("Wait for incoming data before freezing this range."); return; }
-        config = engine.getConfig(); publishSignals(); renderBuses(); save(); notice(""); break;
-      case "relearn": engine.relearn(bus.id, sourceIndex); config = engine.getConfig(); publishSignals(); renderBuses(); save(); notice(""); break;
-      case "enable-parameter": parameter.enabled = !parameter.enabled; commit("parameters"); break;
-      case "remove-parameter": config.parameters = config.parameters.filter((item) => item !== parameter); commit("parameters"); break;
+      case "relearn": {
+        let accepted;
+        applyingMapping = true;
+        try { accepted = element.dataset.action === "freeze" ? engine.freeze(bus.id, sourceIndex) : engine.relearn(bus.id, sourceIndex); }
+        finally { applyingMapping = false; }
+        if (!accepted) { if (element.dataset.action === "freeze") notice("Wait for incoming data before freezing this range."); return; }
+        config = engine.getConfig(); publishSignals(); captureMapping(element.dataset.action, { force: true, bus_id: bus.id, source_index: sourceIndex });
+        renderBuses(); save(); notice(""); break;
+      }
+      case "enable-parameter": parameter.enabled = !parameter.enabled; commit("parameters", { action: "enable_parameter", destination: parameter.destination }); break;
+      case "remove-parameter": config.parameters = config.parameters.filter((item) => item !== parameter); commit("parameters", { action: "remove_parameter", destination: parameter.destination }); break;
     }
   }
   function init(options = {}) {
     if (initialized || !options.container || !api()) return;
     initialized = true; root = options.container; transport = options.transport; sourceBridge = options.sourceBridge; getDestinations = options.getDestinations;
+    try { mappingTracker = globalThis.HydraStudy?.createMappingTracker?.("synth-mixer") || null; } catch (_) { /* Controls also work without recording. */ }
     root.classList.add("mm-workspace", "sm-workspace");
     const Music = globalThis.HydraSonification;
     root.innerHTML = `<header class="mm-header"><div><span class="mm-eyebrow">SYNTH CONTROL</span><h1>Synth mixer</h1></div><a class="mm-button" href="#synth-legacy" data-workspace="synth-legacy" data-advanced>Previous version ↗</a></header>
@@ -415,7 +467,7 @@ globalThis.HydraSynthMixer = (() => {
     // Normalize before setConfig emits: malformed stored JSON values must not
     // reach render callbacks as if they were a valid workspace configuration.
     config = api().validateConfig(saved || api().defaultConfig(), destinations());
-    engine.setConfig(config); config = engine.getConfig(); snapshot = engine.snapshot();
+    applyConfig(); snapshot = engine.snapshot(); captureMapping("restore", { restored: Boolean(saved) });
     $("mode").value = config.mode; restoreControls(); renderBuses(); renderParameters(); updateTransport();
     root.addEventListener("change", onChange); root.addEventListener("input", onInput); root.addEventListener("click", onClick);
     $("picker").addEventListener("click", (event) => { if (event.target === $("picker")) { const bounds = $("picker").getBoundingClientRect(); if (event.clientX < bounds.left || event.clientX > bounds.right || event.clientY < bounds.top || event.clientY > bounds.bottom) $("picker").close(); } });
@@ -436,7 +488,8 @@ globalThis.HydraSynthMixer = (() => {
   }
   function deactivate() {
     if (!initialized) return; active = false; window.clearInterval(timer); save(); transport.stop(); engine.deactivate();
+    recordMappingPlayback();
     if ($("picker").open) $("picker").close();
   }
-  return { init, activate, deactivate, getState, flush, save, getControls: () => engine?.getConfig().controls, evaluate: (output, options) => engine?.evaluate(output, options), reset: () => engine?.reset(), readyReason: () => "", get snapshot() { return engine?.snapshot(status().output, { midiFormat: status().midiFormat }); } };
+  return { init, activate, deactivate, getState, flush, save, mappingStudyContext, getControls: () => engine?.getConfig().controls, evaluate: (output, options) => engine?.evaluate(output, options), reset: () => engine?.reset(), readyReason: () => "", get snapshot() { return engine?.snapshot(status().output, { midiFormat: status().midiFormat }); } };
 })();

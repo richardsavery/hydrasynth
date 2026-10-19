@@ -368,6 +368,9 @@ class RapService:
     def _write(self, job: dict[str, Any]) -> None:
         self._db.execute("UPDATE renders SET state=?, body=? WHERE id=?", (job["state"], canonical_json(job), job["id"]))
         self._db.commit()
+        study = getattr(self, "study_recorder", None)
+        if study is not None:
+            study.record_job("rap", job)
 
     def _job(self, identifier: str) -> dict[str, Any]:
         if not isinstance(identifier, str) or not IDENTIFIER.fullmatch(identifier):

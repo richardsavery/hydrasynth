@@ -2,6 +2,7 @@
 
 // The performance clock belongs to the application, independently of its visible tab.
 globalThis.HydraRobotLive = (() => {
+  const study = (type, payload) => { try { globalThis.HydraStudy?.emit?.(type, payload); } catch (_) {} };
   const presets = {
     aurora: { name: "Aurora", colours: ["#48e0c0", "#6699ff", "#b580ff", "#ff83c5"] },
     fire: { name: "Firelight", colours: ["#ffb347", "#ff683b", "#f03854", "#ffd67a"] },
@@ -63,6 +64,7 @@ globalThis.HydraRobotLive = (() => {
     let autoBusyness = clamp(config.headBusyness || 25, 15, 65), autoTarget = autoBusyness, autoAt = null, autoNext = 0;
     let lastLED = "", lastRib = null, lastBeat = null, currentColour = config.palette[0], currentBrightness = 0, ribPosition = null;
     let currentClock = clock();
+    let studyState = "";
 
     function clock() {
       const external = env.clock(config.source) || {};
@@ -76,7 +78,15 @@ globalThis.HydraRobotLive = (() => {
         colour: currentColour, brightness: currentBrightness, ribPosition, ribPending, headPending,
         headMoving: headPending || [...headUntil.values()].some(until => env.now() < until), headPosition, headBusyness: Math.round(activity()) };
     }
-    function publish() { const value = snapshot(); for (const listener of listeners) listener(value); }
+    function publish() {
+      const value = snapshot();
+      if (globalThis.HydraStudy?.emit) {
+        const state = { running, waiting, error, generation, settings: value.settings, clock_running: currentClock.running, clock_token: String(currentClock.token ?? "") };
+        const signature = JSON.stringify(state);
+        if (signature !== studyState) { studyState = signature; study("robot.performance.state", state); }
+      }
+      for (const listener of listeners) listener(value);
+    }
     const random = () => clamp(Number(env.random()) || 0, 0, .999999999);
     function activity() { return config.headBusynessAuto ? autoBusyness : config.headBusyness; }
     function resetAuto(restart = false) {
@@ -259,6 +269,7 @@ globalThis.HydraRobotLive = (() => {
           const key = `${colour}:${brightness}`;
           if (key !== lastLED) {
             env.hardware.sendColour(colour, brightness);
+            study("robot.led.command_sent", { generation, colour, brightness, beat, source: config.source });
             lastLED = key; currentColour = colour; currentBrightness = brightness;
           }
         }
@@ -273,13 +284,17 @@ globalThis.HydraRobotLive = (() => {
               const token = generation;
               ribPending = true; ribPosition = position;
               const controller = new AbortController(); ribController = controller;
+              const command = { command_id: `ribs-${token}-${env.now()}`, generation: token, position, duration_ms: duration, source: config.source, beat };
+              study("robot.ribs.command_requested", command);
               let request;
               try { request = env.hardware.moveRibs(position, duration, { signal: controller.signal }); }
-              catch (failure) { ribPending = false; throw failure; }
+              catch (failure) { study("robot.ribs.command_failed", { ...command, error: String(failure.message || failure).slice(0, 1000) }); ribPending = false; throw failure; }
               Promise.resolve(request).then(() => {
+                study("robot.ribs.command_acknowledged", { ...command, aborted: controller.signal.aborted });
                 ribPending = false;
                 if (running && token === generation) publish();
               }, failure => {
+                study("robot.ribs.command_failed", { ...command, aborted: controller.signal.aborted, error: String(failure.message || failure).slice(0, 1000) });
                 ribPending = false;
                 if (running && token === generation && !controller.signal.aborted) stop(failure.message || "Rib movement failed. Check Keirzo setup.");
               });
@@ -308,10 +323,13 @@ globalThis.HydraRobotLive = (() => {
             const token = generation;
             headPending = true; headPosition = targets[0].position;
             const controller = new AbortController(); headController = controller;
+            const command = { command_id: `head-${token}-${env.now()}`, generation: token, targets, source: config.source, beat, beat_sync: config.headBeatSync, busyness: activity() };
+            study("robot.head.command_requested", command);
             let request;
             try { request = env.hardware.moveHeadAxes(targets, { signal: controller.signal }); }
-            catch (failure) { headPending = false; throw failure; }
+            catch (failure) { study("robot.head.command_failed", { ...command, error: String(failure.message || failure).slice(0, 1000) }); headPending = false; throw failure; }
             Promise.resolve(request).then(result => {
+              study("robot.head.command_acknowledged", { ...command, aborted: controller.signal.aborted, last_move: result?.head?.last_move || null, motion: result?.head?.motion || null });
               headPending = false;
               const move = result?.head?.last_move;
               for (const target of targets) {
@@ -329,6 +347,7 @@ globalThis.HydraRobotLive = (() => {
                 publish();
               }
             }, failure => {
+              study("robot.head.command_failed", { ...command, aborted: controller.signal.aborted, error: String(failure.message || failure).slice(0, 1000) });
               headPending = false;
               if (running && token === generation && !controller.signal.aborted) stop(failure.message || "Head movement failed. Check Keirzo setup.");
             });
@@ -449,6 +468,7 @@ globalThis.HydraRobotLive = (() => {
     } catch (error) { uiError = error.message; render(); return Promise.resolve(); }
     const token = ++startGeneration, controller = new AbortController();
     startController = controller; starting = true; startProgress = "Connecting Keirzo…";
+    study("robot.start.requested", { generation: token, settings: config, prepare_drums: prepareDrums });
     const current = () => token === startGeneration && startController === controller && !controller.signal.aborted;
     render();
     startPromise = Promise.resolve().then(async () => {
@@ -457,8 +477,10 @@ globalThis.HydraRobotLive = (() => {
         signal: controller.signal,
         onProgress(message) { if (current()) { startProgress = String(message); render(); } }
       });
+      study("robot.start.prepared", { generation: token, cancelled: !current() });
       if (current()) engine.start();
     }).catch(error => {
+      study("robot.start.failed", { generation: token, cancelled: !current() || error?.cancelled || error?.name === "AbortError", error: String(error?.message || error).slice(0, 1000) });
       if (current() && !error?.cancelled && error?.name !== "AbortError") uiError = error?.message || "Keirzo could not start.";
     }).finally(() => {
       if (token !== startGeneration) return;

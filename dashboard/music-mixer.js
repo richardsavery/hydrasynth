@@ -3,6 +3,9 @@
 // Mixer preferences stay separate from the previous music interface.
 globalThis.HydraMusicMixer = (() => {
   const KEY = "hydra.music-mixer.demo.v1";
+  const study = (type, payload) => { try { globalThis.HydraStudy?.emit?.(type, payload); } catch (_) {} };
+  let studyTransport = "", studyGeneration = "";
+  let mappingTracker, mappingMutationDepth = 0, pendingMappingSnapshot, viewSequence = 0;
   const OPERATORS = { average: "Average", weighted: "Weighted blend", difference: "Difference", minimum: "Lowest", maximum: "Highest" };
   const READ_MODES = { value: "Direct value", mean: "Average", rms: "RMS magnitude", minimum: "Lowest value", maximum: "Highest value", index: "One element" };
   const LABELS = { cutoff: "Low-pass filter", highpass: "High-pass filter", resonance: "Resonance", gain: "Volume", pan: "Pan", delayMix: "Delay", reverbMix: "Reverb", rate: "Playback speed", pitch: "Pitch shift · semitones" };
@@ -65,6 +68,41 @@ globalThis.HydraMusicMixer = (() => {
   function getState() { return engine ? { trackId: selectedId, config: engine.getConfig(), prompt: promptDraft(), signalLinks: signalLibrary?.getLinks() || {}, ...(savedRap !== undefined ? { rap: savedRap } : {}) } : null; }
   function flush() { const state = getState(); if (state) localStorage.setItem(KEY, JSON.stringify(state)); return state; }
   function save() { try { flush(); } catch (_) { /* Session-only mixing remains available. */ } }
+  function captureMapping(reason, details = {}) {
+    try { return mappingTracker?.capture({ config: engine.getConfig(), signalLinks: signalLibrary?.getLinks() || {} }, { reason, ...details }); }
+    catch (_) { /* Recording must not interrupt music. */ }
+  }
+  function mappingRevision() { try { return mappingTracker?.current()?.revision_id || null; } catch (_) { return null; } }
+  function recordMappingPlayback(next) {
+    try { mappingTracker?.playback(null, { running: next.running === true, track_id: next.track?.id || null,
+      source_valid: next.sourceValid === true, source_label: next.sourceLabel || null }); } catch (_) { /* Keep playback independent of recording. */ }
+  }
+  function onEngineUpdate(next) {
+    if (mappingMutationDepth) { pendingMappingSnapshot = next; return; }
+    updateView(next);
+  }
+  function changeMapping(change, reason, details = {}, publish = true) {
+    // Engine changes emit synchronously. Record their normalized configuration
+    // and shared links before associating the resulting output with a revision.
+    mappingMutationDepth++;
+    try {
+      const accepted = change();
+      config = engine.getConfig();
+      if (accepted !== false) {
+        if (publish) publishSignals();
+        // A mutation can reveal that playback stopped before its next normal
+        // update. Close the old association before creating a new revision.
+        if (pendingMappingSnapshot?.running === false) recordMappingPlayback(pendingMappingSnapshot);
+        captureMapping(reason, details);
+      }
+      return accepted;
+    } finally {
+      mappingMutationDepth--;
+      if (!mappingMutationDepth && pendingMappingSnapshot) {
+        const next = pendingMappingSnapshot; pendingMappingSnapshot = null; updateView(next);
+      }
+    }
+  }
   function publishSignals() {
     try { signalLibrary?.publish(config); } catch (error) { notice(error.message || "Could not save the shared mix.", true); }
   }
@@ -83,13 +121,13 @@ globalThis.HydraMusicMixer = (() => {
   }
   function syncSignals() {
     config = engine.getConfig();
-    if (signalLibrary?.sync(config)) { engine.setConfig(config); config = engine.getConfig(); history.clear(); }
+    const previousLinks = JSON.stringify(signalLibrary?.getLinks() || {});
+    if (signalLibrary?.sync(config)) { changeMapping(() => engine.setConfig(config), "shared_synchronized", {}, false); history.clear(); }
+    else if (previousLinks !== JSON.stringify(signalLibrary?.getLinks() || {})) captureMapping("shared_synchronized");
     renderBuses(); renderChannels(); save();
   }
-  function commit(render = "all") {
-    engine.setConfig(config);
-    config = engine.getConfig();
-    publishSignals();
+  function commit(render = "all", reason = "configuration_changed", details = {}) {
+    changeMapping(() => engine.setConfig(config), reason, details);
     if (render === "all" || render === "buses") renderBuses();
     if (render === "all" || render === "channels") renderChannels();
     save();
@@ -222,6 +260,14 @@ globalThis.HydraMusicMixer = (() => {
     $("next-prompt").textContent = nextLabel;
   }
   function updateGeneration(next) {
+    if (globalThis.HydraStudy?.emit) {
+      const value = { phase: next.phase, enabled: next.enabled, error: next.error || null,
+        job_id: next.pendingId || null, current_track_id: next.currentId || selectedId || null, queued_track_id: next.queuedId || null,
+        next_mode: next.nextMode || null, selected_track_id: next.selectedTrackId || null, next_prompt: next.nextPrompt || null,
+        retry_at: next.retryAt ?? null, recovering: next.recovering || false };
+      const key = JSON.stringify(value);
+      if (key !== studyGeneration) { studyGeneration = key; study("music.generation.state", value); }
+    }
     const previous = generationState;
     generationState = next; renderTransport();
     if (next.phase === "error" || next.phase === "waiting-prompt") notice(next.error || "Could not prepare the next track.", true);
@@ -238,12 +284,25 @@ globalThis.HydraMusicMixer = (() => {
     const names = ["master", ...[...new Set(api().instrumentalStems(track.stems || track.stem_separation?.stems).map((stem) => stem.name))].filter((name) => name !== "master").slice(0, 6)];
     config = engine.getConfig();
     config.channels = names.map((name) => config.channels.find((channel) => channel.name === name) || api().defaultChannel(name));
-    commit("channels");
+    commit("channels", "track_channels_changed", { track_id: track.id });
   }
   function updateView(next) {
     if (!root) return;
+    const sequence = ++viewSequence;
     snapshot = next;
     if (engine && next.track?.id !== shownTrackId) syncTrack(next.track);
+    // Promoting a track can synchronously publish a newer snapshot after its
+    // channels are normalized. That snapshot supersedes this earlier output.
+    if (sequence !== viewSequence) return;
+    recordMappingPlayback(next);
+    if (globalThis.HydraStudy?.emit) {
+      const transport = { running: next.running, starting: next.starting, active: next.active, track_id: next.track?.id || null,
+        queued_track_id: next.queuedTrack?.id || null, source_valid: next.sourceValid, source_label: next.sourceLabel || null, error: next.error || null };
+      const key = JSON.stringify(transport);
+      if (key !== studyTransport) { studyTransport = key; study("music.transport.state", { ...transport, mapping_revision_id: mappingRevision(), position_seconds: next.position, duration_seconds: next.duration }); }
+      if (next.running) study("music.output.controls", { track_id: next.track?.id || null, position_seconds: next.position,
+        mapping_revision_id: mappingRevision(), source_valid: next.sourceValid, controls: next.controls, buses: next.buses, channels: next.channels });
+    }
     generation?.update(next);
     renderTransport();
     $("source-label").textContent = next.sourceLabel || "Choose an input in Connections";
@@ -308,7 +367,7 @@ globalThis.HydraMusicMixer = (() => {
   async function selectTrack(id, run, signal, explicitRecall = false) {
     loadingTrack = true; updateView(engine.snapshot());
     try {
-      if (!id) { selectedId = ""; await engine.setTrack(null); config.channels = [api().defaultChannel("master")]; renderTracks(); commit("channels"); return; }
+      if (!id) { selectedId = ""; await engine.setTrack(null); config.channels = [api().defaultChannel("master")]; renderTracks(); commit("channels", "track_channels_changed", { track_id: null }); return; }
       const job = await read(`/generations/${encodeURIComponent(id)}`, signal);
       if (run !== fetchRun || !active) return;
       if (!readyTrack(job)) throw new Error("This track's stems are not ready yet.");
@@ -322,7 +381,7 @@ globalThis.HydraMusicMixer = (() => {
       config = engine.getConfig();
       config.channels = names.map((name) => config.channels.find((channel) => channel.name === name) || api().defaultChannel(name));
       selectedId = id;
-      commit("channels");
+      commit("channels", "track_channels_changed", { track_id: id });
       const track = { ...job, audio_url: job.audio_url || `/api/elevenlabs/generations/${encodeURIComponent(id)}/audio`, stems };
       if (explicitRecall) await generation.recall(track);
       else await engine.setTrack(track);
@@ -358,7 +417,7 @@ globalThis.HydraMusicMixer = (() => {
     const value = Number(el.value);
     if (!Number.isFinite(value)) return;
     route.strength = Math.max(0, Math.min(1, value / 100));
-    engine.setConfig(config);
+    changeMapping(() => engine.setConfig(config), "route_strength_changed");
     const label = percent(route.strength);
     el.closest(".mm-strength").querySelector("[data-strength-value]").textContent = label;
     el.setAttribute("aria-valuetext", label);
@@ -384,11 +443,11 @@ globalThis.HydraMusicMixer = (() => {
       config.mode = el.value;
       const available = el.value === "demo" ? api().DEMO_FIELDS : sourceBridge?.describe?.().fields || [];
       config.buses.forEach((item, index) => { item.sources = [sourceFor(available[index % Math.max(1, available.length)]?.key, available)]; });
-      history.clear(); commit();
+      history.clear(); commit("all", "input_mode_changed");
       notice(""); return;
     }
-    if (el.hasAttribute("data-bus-name")) { bus.name = el.value.trim() || "Signal mix"; commit("all"); return; }
-    if (el.hasAttribute("data-operator")) { bus.operator = el.value; commit("buses"); return; }
+    if (el.hasAttribute("data-bus-name")) { bus.name = el.value.trim() || "Signal mix"; commit("all", "bus_name_changed", { bus_id: bus.id }); return; }
+    if (el.hasAttribute("data-operator")) { bus.operator = el.value; commit("buses", "bus_operator_changed", { bus_id: bus.id }); return; }
     if (source && el.dataset.sourceField) {
       const key = el.dataset.sourceField;
       if (key === "sourceKey") Object.assign(source, sourceFor(el.value));
@@ -398,7 +457,7 @@ globalThis.HydraMusicMixer = (() => {
         if (key.startsWith("input") && source.inputMax <= source.inputMin) { notice("The maximum must be greater than the minimum.", true); return; }
       } else source[key] = el.value;
       if (key === "reducer" || key === "index" || (key === "rangeMode" && el.value === "auto")) { source.learnedMin = null; source.learnedMax = null; }
-      commit("buses"); return;
+      commit("buses", "source_changed", { bus_id: bus.id, field: key }); return;
     }
     if (route && el.dataset.routeField) {
       const key = el.dataset.routeField;
@@ -409,7 +468,7 @@ globalThis.HydraMusicMixer = (() => {
       } else if (key === "invert") route.invert = el.checked;
       else if (key === "outputMin" || key === "outputMax") { if (!Number.isFinite(el.valueAsNumber)) return; route[key] = el.valueAsNumber; }
       else route[key] = el.value;
-      commit("channels");
+      commit("channels", "route_changed", { channel: channel.name, field: key });
     }
   }
   function onInput(event) {
@@ -423,7 +482,7 @@ globalThis.HydraMusicMixer = (() => {
     }
     if (!key) return;
     const { channel } = context(el); if (!channel) return;
-    channel[key] = Number(el.value); engine.setConfig(config); save();
+    channel[key] = Number(el.value); changeMapping(() => engine.setConfig(config), "channel_control_changed", { channel: channel.name, field: key }); save();
     const row = el.closest("[data-channel]");
     if (key === "level") row.querySelector("[data-fader-value]").textContent = percent(channel.level);
     else row.querySelector(`[data-control-value="${key}"]`).textContent = controlValue(key, channel[key]);
@@ -440,36 +499,36 @@ globalThis.HydraMusicMixer = (() => {
     if (el.id === "mm-stop") { generation.stop(); return; }
     const { bus, channel, sourceIndex, routeIndex } = context(el);
     if (el.id === "mm-add-shared") {
-      try { signalLibrary?.attach($("shared-mix").value, config, `mix-${Date.now().toString(36)}`); commit(); notice(""); }
+      try { signalLibrary?.attach($("shared-mix").value, config, `mix-${Date.now().toString(36)}`); commit("all", "shared_added"); notice(""); }
       catch (error) { notice(error.message, true); }
       return;
     }
     if (el.dataset.action === "share-mix") {
-      try { signalLibrary?.share(bus, config.mode); renderBuses(); save(); notice(""); }
+      try { signalLibrary?.share(bus, config.mode); captureMapping("shared_created", { bus_id: bus.id }); renderBuses(); save(); notice(""); }
       catch (error) { notice(error.message, true); }
       return;
     }
-    if (el.dataset.action === "detach-mix") { signalLibrary?.detach(bus.id); renderBuses(); save(); return; }
+    if (el.dataset.action === "detach-mix") { signalLibrary?.detach(bus.id); captureMapping("shared_detached", { bus_id: bus.id }); renderBuses(); save(); return; }
     if (el.id === "mm-add-bus") {
       if (config.buses.length >= 4) return;
-      const id = `mix-${Date.now().toString(36)}`; config.buses.push(newBus(id, `Mix ${String.fromCharCode(65 + config.buses.length)}`, fields()[config.buses.length % Math.max(1, fields().length)]?.key)); commit(); return;
+      const id = `mix-${Date.now().toString(36)}`; config.buses.push(newBus(id, `Mix ${String.fromCharCode(65 + config.buses.length)}`, fields()[config.buses.length % Math.max(1, fields().length)]?.key)); commit("all", "bus_added", { bus_id: id }); return;
     }
     switch (el.dataset.action) {
-      case "add-source": if (bus.sources.length < 6) bus.sources.push(sourceFor(fields().find((field) => !bus.sources.some((source) => source.sourceKey === field.key))?.key || fields()[0]?.key)); commit("buses"); break;
-      case "remove-source": if (bus.sources.length > 1) bus.sources.splice(sourceIndex, 1); commit("buses"); break;
+      case "add-source": if (bus.sources.length >= 6) return; bus.sources.push(sourceFor(fields().find((field) => !bus.sources.some((source) => source.sourceKey === field.key))?.key || fields()[0]?.key)); commit("buses", "source_added", { bus_id: bus.id }); break;
+      case "remove-source": if (bus.sources.length <= 1) return; bus.sources.splice(sourceIndex, 1); commit("buses", "source_removed", { bus_id: bus.id, source_index: sourceIndex }); break;
       case "remove-bus":
         if (config.buses.length === 1) return;
-        config.buses = config.buses.filter((item) => item !== bus); config.channels.forEach((item) => { item.routes = item.routes.filter((route) => route.busId !== bus.id); }); history.delete(bus.id); commit(); break;
-      case "freeze": engine.freeze(bus.id, sourceIndex); config = engine.getConfig(); publishSignals(); renderBuses(); save(); break;
-      case "relearn": engine.relearn(bus.id, sourceIndex); config = engine.getConfig(); publishSignals(); renderBuses(); save(); break;
-      case "mute": channel.muted = !channel.muted; commit("channels"); break;
-      case "solo": channel.solo = !channel.solo; commit("channels"); break;
+        config.buses = config.buses.filter((item) => item !== bus); config.channels.forEach((item) => { item.routes = item.routes.filter((route) => route.busId !== bus.id); }); history.delete(bus.id); commit("all", "bus_removed", { bus_id: bus.id }); break;
+      case "freeze": changeMapping(() => engine.freeze(bus.id, sourceIndex), "range_frozen", { bus_id: bus.id, source_index: sourceIndex, force: true }); renderBuses(); save(); break;
+      case "relearn": changeMapping(() => engine.relearn(bus.id, sourceIndex), "range_relearned", { bus_id: bus.id, source_index: sourceIndex, force: true }); renderBuses(); save(); break;
+      case "mute": channel.muted = !channel.muted; commit("channels", "channel_mute_changed", { channel: channel.name }); break;
+      case "solo": channel.solo = !channel.solo; commit("channels", "channel_solo_changed", { channel: channel.name }); break;
       case "add-route": {
         const target = ["cutoff", "gain", "pan", "reverbMix", "delayMix", "highpass", "resonance", "pitch", ...(channel.name === "master" ? ["rate"] : [])].find((key) => !channel.routes.some((route) => route.target === key));
         if (!target || !config.buses.length) return;
-        const bounds = globalThis.HydraElevenRealtime.TARGETS[target]; channel.routes.push({ busId: config.buses[0].id, target, outputMin: bounds.low, outputMax: bounds.high, invert: false, strength: 1 }); commit("channels"); break;
+        const bounds = globalThis.HydraElevenRealtime.TARGETS[target]; channel.routes.push({ busId: config.buses[0].id, target, outputMin: bounds.low, outputMax: bounds.high, invert: false, strength: 1 }); commit("channels", "route_added", { channel: channel.name }); break;
       }
-      case "remove-route": channel.routes.splice(routeIndex, 1); commit("channels"); break;
+      case "remove-route": channel.routes.splice(routeIndex, 1); commit("channels", "route_removed", { channel: channel.name, route_index: routeIndex }); break;
     }
   }
   function init(options = {}) {
@@ -495,12 +554,13 @@ globalThis.HydraMusicMixer = (() => {
     savedRap = saved?.rap;
     signalLibrary = globalThis.HydraSignalLibrary?.create(saved?.signalLinks);
     restorePrompt(saved?.prompt);
-    engine = api().create({ sourceBridge: options.sourceBridge, onUpdate: updateView, onError: (error) => notice(error.message || String(error), true) });
+    try { mappingTracker = globalThis.HydraStudy?.createMappingTracker?.("music-mixer"); } catch (_) { /* Study recording is optional. */ }
+    engine = api().create({ sourceBridge: options.sourceBridge, onUpdate: onEngineUpdate, onError: (error) => notice(error.message || String(error), true) });
     generation = globalThis.HydraMusicMixerGeneration.create({ engine, getSettings: generationSettings, getNextTrack: nextTrackChoice,
       onUpdate: updateGeneration, onTrack: rememberTrack, onError: (error) => notice(error.message || String(error), true) });
     selectedId = typeof saved?.trackId === "string" && /^[a-zA-Z0-9_-]{1,128}$/.test(saved.trackId) ? saved.trackId : "";
     config = api().validateConfig(saved?.config || { mode: "shared", buses: [newBus("mix-a", "Mix A")], channels: [api().defaultChannel("master")] });
-    engine.setConfig(config); config = engine.getConfig(); $("mode").value = config.mode;
+    changeMapping(() => engine.setConfig(config), saved?.config ? "restored" : "initial", {}, false); $("mode").value = config.mode;
     renderBuses(); renderChannels(); renderTransport();
     root.addEventListener("change", onChange); root.addEventListener("input", onInput); root.addEventListener("click", onClick);
   }

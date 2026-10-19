@@ -39,6 +39,14 @@ dashboard-command:
 
 dashboard-test:
 	$(PYTHON) -B tools/hydra_dashboard.py --self-test
+	$(PYTHON) -B tools/test_study_recording.py
+	$(PYTHON) -B tools/test_study_backup.py
+	$(PYTHON) -B tools/test_study_merge_cli.py
+	$(PYTHON) -B tools/test_study_http.py
+	$(NODE) --check dashboard/study-recorder.js
+	$(NODE) tools/test_study_recorder.js
+	$(NODE) tools/test_study_semantic_hooks.js
+	$(NODE) tools/test_study_legacy_mappings.js
 	$(PYTHON) -B tools/test_robot_control.py
 	$(PYTHON) -B tools/test_robot_devices.py
 	$(PYTHON) -B tools/test_robot_ribs.py
@@ -64,6 +72,7 @@ dashboard-test:
 	$(PYTHON) -B tools/test_rap_experiment_service.py
 	$(PYTHON) -B tools/test_rap_experiment_http.py
 	$(PYTHON) -B tools/test_rap_response_service.py
+	$(PYTHON) -B tools/test_rap_voice.py
 	$(PYTHON) -B tools/test_rap_transcription.py
 	$(PYTHON) -B tools/test_rap_response_http.py
 	$(PYTHON) -B tools/validate_parameters.py

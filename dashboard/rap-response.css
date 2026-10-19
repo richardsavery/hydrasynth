@@ -28,9 +28,28 @@
 @media (max-width: 500px) { .rr-workspace { padding: 22px 16px; } .rr-workspace .rr-compose, .rr-workspace .rr-result { padding: 18px; } .rr-workspace .rr-options { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); } .rr-workspace .rr-options label:nth-child(2) { grid-column: 2; grid-row: 1; } .rr-workspace .rr-result-heading { display: block; } }
 
 .rr-workspace .rr-output, .rr-workspace .rr-voice { display: block; margin-top: 18px; }
-.rr-workspace .rr-voice select { width: 100%; }
+.rr-workspace .rr-voice select, .rr-workspace .rr-input-mode select { width: 100%; }
+.rr-workspace .rr-input-mode { display: block; margin-bottom: 18px; }
+.rr-workspace .rr-demos { margin-top: 24px; padding: 18px 24px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel); }
+.rr-workspace .rr-demos summary { cursor: pointer; font-size: 13px; font-weight: 600; }
+.rr-workspace .rr-demos summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 4px; }
+.rr-workspace .rr-demos .rr-hint { margin: 14px 0 11px; }
+.rr-workspace .rr-demo-buttons { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+.rr-workspace .rr-demo-buttons .mm-button { min-width: 0; min-height: 37px; padding: 8px; font-size: 11px; white-space: normal; }
+.rr-workspace .rr-demo-buttons .mm-button[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); }
+.rr-workspace .rr-demo-status { min-height: 17px; margin: 8px 0 0; color: var(--muted); font-size: 11px; }
+.rr-workspace .rr-demo-status.is-error { color: var(--rose); }
+.rr-workspace .rr-effects { margin-top: 18px; padding: 14px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel-inset); }
+.rr-workspace .rr-effects summary { cursor: pointer; font-size: 12px; }
+.rr-workspace .rr-effects summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 4px; }
+.rr-workspace .rr-effect-controls { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; margin-top: 18px; }
+.rr-workspace .rr-effect-controls label { min-width: 0; }
+.rr-workspace .rr-effect-controls select, .rr-workspace .rr-effect-controls input { width: 100%; }
+.rr-workspace .rr-effect-controls output { float: right; color: var(--accent); font: 10px var(--mono); }
+.rr-workspace .rr-effect-actions { margin-top: 12px; }
 .rr-workspace .rr-hint { color: var(--muted); font-size: 11px; line-height: 1.7; }
+.rr-workspace .rr-hint.is-error { color: var(--rose); }
 .rr-workspace .rr-playback { display: grid; grid-template-columns: minmax(0, 1.7fr) minmax(90px, 1fr); align-items: end; gap: 16px; margin-top: 20px; }
 .rr-workspace .rr-playback select { width: 100%; }
 .rr-workspace .rr-downloads { display: flex; flex-wrap: wrap; gap: 15px; margin-top: 16px; font-size: 12px; }
-@media (max-width: 500px) { .rr-workspace .rr-playback { grid-template-columns: minmax(0, 1fr); } }
+@media (max-width: 500px) { .rr-workspace .rr-playback { grid-template-columns: minmax(0, 1fr); } .rr-workspace .rr-demo-buttons { grid-template-columns: repeat(2, minmax(0, 1fr)); } }

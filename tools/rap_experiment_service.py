@@ -263,6 +263,9 @@ class RapExperimentService:
             job["updated_at"] = utc_now()
             self._db.execute("UPDATE experiments SET state=?,body=? WHERE id=?", (job["state"], canonical_json(job), job["id"]))
             self._db.commit()
+            study = getattr(self, "study_recorder", None)
+            if study is not None:
+                study.record_job("rap-experiment", job)
 
     def _job(self, identifier):
         if not isinstance(identifier, str) or not IDENTIFIER.fullmatch(identifier):

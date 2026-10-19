@@ -178,42 +178,65 @@ mapping sets and sound controls stay independent.
 
 ### Rap response
 
-Open **Rap response**, choose Boom bap, Trap or Lo-fi, then **Record a message**.
-**Finish & rap** sends the recording and prepares a musical answer. Recording
-is limited to 30 seconds. You can also type what you would say and press
-**Make rap response**. Choose four or eight bars and Boom bap, Trap or Lo-fi.
-The default **Over main music** mode keeps the Music mixer or Synth mixer
-playing, separates the generated rap vocal, and starts it on the next bar.
-Start the backing in its mixer first, then switch to Rap response. Its tempo
-is used for new replies when it is within the supported 70–140 BPM range.
-Use headphones when recording with music playing to keep the backing out of
-the microphone. **With generated beat** plays the complete generated song
-and stops the other dashboard audio.
+Open **Rap response** to record or type a message and generate a rhyming answer.
+Recording is limited to 30 seconds. Choose **Rap my words** to perform supplied
+text instead: this skips reply writing and sends your words directly as the rap
+lyrics. Four bars support up to 48 words; eight bars support up to 96 words.
+Line breaks are preserved. Choose Boom bap, Trap or Lo-fi and a requested tempo
+between 70 and 140 BPM.
 
-Choose **Voice for new replies** to reuse a vocal preset: **Deep Hip-Hop
-Voice** (the default) or **Emo Trap Autotune**. Each selection pins an ElevenLabs
-music finetune, giving subsequent performances the same vocal foundation.
-Delivery, accent, and expression can still vary; audition several replies to
-check the consistency you need. The selected voice is saved with each response
-and shown in the response library. Changing the selector affects new replies;
-existing recordings retain their original voice.
+The six voice choices are **Eva**, **Cold Android**, **Peter**, **Elowen**,
+**Maisie**, and **Warren**, using the same fixed voice identities as the approved
+six-voice audition. Each generated rap is separated into vocal and instrumental
+stems, then the vocal is converted with ElevenLabs Voice Changer. The selected
+identity is fixed; delivery and expression can vary between performances.
+Saved recordings keep their original voice and settings.
+
+The collapsible **Voice demos** box at the bottom of Rap response contains all
+six saved audition recordings. It starts closed; opening it lets you listen
+without generating anything or using API credits. Closing it stops the preview.
+The demos are bundled with the
+dashboard for use on each laptop, including when generation is unavailable.
+Previews play one at a time and leave the chosen voice unchanged. They use the
+original clean audio; pitch and autotune settings apply to generated raps.
+Demo listening actions are included in the study records.
+
+Voice customization includes **pitch shift** (−12 to +12 semitones) and
+**autotune amount**, key, scale, melody, octave and note speed. Clean vocals are
+the default. Autotune can follow the voice or use a repeating melody. These
+local effects process only the vocal and preserve its duration; pitch shift
+transposes the tuned vocal, while the instrumental keeps its timing and pitch.
+**Apply to this rap** makes a new version
+of a completed rap using its retained clean vocal, without another provider
+request. It keeps that recording's voice and words. Choose a voice and generate
+a new rap to change the voice identity.
+
+The default **Over main music** mode keeps the Music mixer or Synth mixer
+playing and starts the isolated vocal on the next bar. Start the backing in its
+mixer first, then switch to Rap response. Its tempo is used for new raps when it
+is within the supported range. Use headphones when recording with music playing
+to keep the backing out of the microphone. **With generated beat** plays the
+processed vocal mixed with its generated instrumental and stops other dashboard
+audio. Both the full mix and vocal can be downloaded.
 
 The backend transcribes recordings locally with **Whisper Small** through
-`faster-whisper` using CPU int8 inference. Microphone audio is not sent to
-ElevenLabs. Only the transcript goes to ElevenLabs: a Music composition plan
-writes a relevant rhyming answer, then Eleven Music performs the vocal and
-backing together using the existing `ELEVENLABS_API_KEY`. The curated vocal
-finetunes use their catalogued base model, `music_v2`; legacy requests without
-a vocal preset retain `music_v2_5`. This uses the music API's `finetune_id`,
-not a text-to-speech voice ID or a voice-conversion step. For playback
-over main music, the ElevenLabs two-stem separation endpoint then extracts
-the vocal. This adds processing time and an API request. No separate
-LLM account or ElevenAgent setup is needed. Typed input skips transcription.
-FFmpeg and ffprobe validate the finished audio, as in the existing
-generated-music workflow. New musical replies use music credits; local
-transcription and replaying saved replies use no API credits.
+`faster-whisper` using CPU int8 inference. Original microphone audio is not sent
+to ElevenLabs. Reply mode sends the transcript to a Music composition plan to
+write a rhyming answer; **Rap my words** skips this step. ElevenMusic performs
+the lyrics and backing using the audition's Deep Hip-Hop finetune on `music_v2`.
+Two-stem separation extracts the vocal, and Voice
+Changer applies the selected voice using `eleven_multilingual_sts_v2` at 24 kHz.
+The fixed conversion settings match the audition: stability 0.5, similarity
+0.85, style 0, speaker boost enabled and seed 1729. Seeded conversion is
+best-effort, not a guarantee of identical audio. Existing saved finetune jobs
+remain playable and recoverable with their original settings.
 
-Install the local transcription dependency and download Whisper Small once:
+These services use the existing `ELEVENLABS_API_KEY`; no separate LLM account
+or ElevenAgent setup is needed. New raps use provider credits for music, stem
+separation and voice conversion, plus lyric planning in reply mode. Local
+transcription, local effects and replaying saved raps use no API credits.
+FFmpeg and ffprobe validate and prepare the audio. NumPy supplies local pitch
+correction. Install the dependencies and download Whisper Small once:
 
 ```sh
 .venv/bin/python -m pip install -r requirements-rap-response.txt
@@ -221,131 +244,35 @@ Install the local transcription dependency and download Whisper Small once:
 ```
 
 The model is stored in `var/whisper/small` and loaded on the first recording,
-then reused. Transcription runs offline after setup; the dashboard does not
-download models when recording or starting up. Typed replies remain available
-if the local transcription dependency or model is missing.
+then reused. Transcription runs offline after setup. Typed input remains
+available if the local transcription model is missing.
 
-The prompt requests short rhyming lines that answer the message, with rhythmic
-rap delivery and an immediate instrumental backing. The music model applies
-the selected vocal preset and interprets the requested tempo. This generates
-a new short song for each message, so expect a
-generation wait. The transcript and reply lyrics appear as the steps finish.
-The next-bar start follows the mixer's clock; music generation does not
-guarantee the requested BPM, so the vocal may drift against the backing.
-Changing or stopping the backing stops the vocal. An isolated vocal waits
-for backing music before playing; it never substitutes the original full mix.
-Saved full-mix responses can be isolated without regenerating their lyrics
-or music. Both the full mix and the isolated vocal can be downloaded.
+Music generation interprets supplied lyrics and requested BPM; next-bar
+playback follows the mixer's clock, but the generated performance can drift
+against the backing. Changing or stopping the backing stops the vocal. An
+isolated vocal waits for backing music before playing. A failed voice
+conversion never silently substitutes the music model's original voice.
 
-**Play when my new response is ready** only applies to a reply you just requested. Opening a
-saved reply or restoring a session never records, generates or plays on its own.
-Recording and vocal playback in **Over main music** preserve the backing.
-Leaving the tab releases the microphone, stops the reply vocal and cancels pending auto-play; an
-already submitted generation can finish in the background. Cancel stops
-remaining generation steps, but an API request already in flight may still use
-credits. Interrupted requests are recoverable by their request ID and are never
+**Play when my new response is ready** applies only to a request you just made.
+Opening a saved rap or restoring a session never records, generates or plays on
+its own. Leaving the tab releases the microphone, stops the vocal and cancels
+pending auto-play; an already submitted job can finish in the background.
+Cancel stops remaining steps, but an API request already in flight may still
+use credits. Interrupted requests are recoverable by request ID and are never
 automatically repeated.
 
-Replies and submitted recordings are stored locally under `var/rap-response`.
-Browser settings and saved sessions retain preferences and job references,
-without embedding microphone recordings. The API key remains on the backend.
+Recordings and generated versions are stored under `var/rap-response`. Study
+records include input mode, selected voice, effects, supplied text, generated
+lyrics, playback actions and the source relationship for each effects version.
+Automatic study backups collect their audio assets. Browser settings and saved
+sessions retain preferences and job references without embedding microphone
+audio. The API key remains on the backend.
 
-Rap controls live in **Rap response**. The Synth and Music mixers contain only
-their instrumental controls; start a backing track there, then open Rap response
-to record or type a message. Earlier embedded voice drafts and prepared-render
-references remain in saved mixer settings and named sessions, without starting
-a hidden voice player.
-
-### Rap experiment
-
-**Rap response → Voice experiments** opens the comparison workspace. Its
-existing `#rap-experiment` bookmarks still work. Enter one verse, BPM, a main
-voice, an alternate voice and a delivery direction, then **Generate all eight comparisons**.
-It prepares eight examples: natural speech, phrases placed on beats, a fresh
-take, a different voice, expressive Eleven v4 delivery, whole-line bar fitting,
-a produced vocal, and a rap generated by Eleven Music with its vocal separated.
-
-For a quicker result, **Generate fast voice** uses Eleven Flash 2.5 at 24 kHz
-and creates clean and robot versions from one speech request. Jade is the default
-voice for this experiment; an explicit `ELEVENLABS_VOICE_ID` still takes precedence.
-**Autotune** can follow the voice and snap it to a selected key and scale, or
-force its voiced sections onto a fixed melody: one note, two notes, rising,
-falling, arpeggio or pop hook. Melody controls select octave 2–5 and a new note
-every half, one or two beats. The pattern follows the BPM from the start of the
-clip, continuing through pauses while consonants remain intact. Fixed patterns
-use major intervals when Chromatic is selected; Follow voice retains chromatic
-scale correction.
-**Rhythm** independently controls phrasing: Natural retains the original take,
-Phrases on beats moves complete phrases to beat starts, and Beat flow gently
-stretches whole lyric lines to beat lengths. Put each phrase on its own line for
-Beat flow. Stretching stays within 0.8–1.25 of the original duration, preserving
-pitch; short phrases use half beats or keep their original duration. It retains
-phrase tails and never slices individual words. This improves rhythmic phrasing,
-but does not turn a spoken take into a performed rap. Stretched word timestamps
-are estimates. Both clean and processed examples use the selected rhythm.
-**Metallic** adds ring modulation and **Radio** adds filtering and digital
-distortion. Effect amount controls the wet/dry mix (100% for new drafts), and Tone
-controls its brightness (6 kHz for new drafts). Explicit saved values remain.
-**Apply effects**
-reprocesses the saved recording locally when the lyrics and main voice match;
-it includes a clean comparison and does not request another voice. Natural
-rhythm preserves the original speech timing.
-Fast requests have a separate worker so they can run alongside longer comparison
-jobs. Cards show measured voice-generation, processing and total ready times;
-playback becomes available when the complete clip is ready.
-Older Vocoder examples remain playable; their next effects edit uses Autotune.
-
-Examples have individual Play and Download controls. Only one plays at a time;
-the optional metronome starts with the example. Generated rap also exposes its
-full mix separately from the isolated vocal. Saved comparisons reopen without
-generation or playback. Lyrics, selected comparison and listening preferences
-are included in named sessions; audio remains in `var/rap-experiment`.
-
-The default full comparison uses four speech generations, one music generation
-and one two-stem separation. Natural/phrases share one source, while expressive,
-bar timing and vocal production share another. **New take** on a voice card
-requests a new performance; timing/production cards reuse a matching saved
-source through **Apply timing** or **Apply effects** when possible. Per-example
-failures leave successful examples available.
-Interrupted provider requests are never automatically repeated. The optional
-voice catalog needs the key's `voices_read` permission; default and custom voice
-IDs remain usable without that catalog permission.
-The Main voice selector also offers a public shortlist when the account catalog
-is unavailable. Compare the clean take first, then its processed version; saved
-comparison labels include the selected voice. Labelled audition sets appear in
-**Neutral · Rhythm** first, followed by Jade · Melodies, Clear & rhythmic,
-Deep & gritty, and Bright & synthetic groups. Stable IDs such as N01, J01, A1,
-B2 and C3 make feedback
-specific. Previous/Next browses the same order without starting playback.
-The Jade set includes eight treatments of the same saved Jade take, plus two
-melodies each for Elowen and Maisie. Every treatment includes its clean source,
-with the same lyrics, 100 BPM, 100% effect and 6 kHz tone. Earlier auditions stay
-available in their original groups.
-The Neutral set compares Jade in a middle register with natural, phrase and
-beat-flow timing, plus a Maisie alternative. These are listening candidates for a
-more neutral presentation; pitch alone does not determine perceived gender.
-To use an original designed voice, create and save one with ElevenLabs
-[Voice Design](https://elevenlabs.io/docs/eleven-creative/voices/voice-design),
-then choose **Custom voice ID** here. The dashboard does not create new voice
-identities or add voices to the account.
-
-Python performs all voice preparation. Bar fitting uses restrained,
-pitch-preserving WSOLA on whole lyric lines; short lines retain their natural
-delivery and receive padding. Vocal production adds EQ, compression, mild
-saturation and stereo doubling. Speech comparisons use active-signal RMS
-matching with peak protection. The expressive source is 24 kHz versus the
-16 kHz baseline. These changes affect delivery, timing and fidelity together;
-the expressive comparison is not a controlled sample-rate-only test.
-
-Bar fitting, production and robot effects require NumPy (`python3 -m pip install numpy`). The music
-comparison requires FFmpeg and ffprobe, using the existing local music tools.
-Music generation chooses its own vocal identity and only requests the supplied
-BPM; it may not precisely follow the metronome, and separated vocals may retain
-instrument bleed. This tab is for auditioning approaches before adopting one in
-the mixers. The implementation uses the official
-[speech timing API](https://elevenlabs.io/docs/api-reference/text-to-speech/convert-with-timestamps),
-[expressive voice directions](https://elevenlabs.io/docs/overview/capabilities/text-to-speech/best-practices),
-and [music API](https://elevenlabs.io/docs/api-reference/music/compose).
+All participant rap controls now live in **Rap response**; the Voice experiments
+entry has been removed. Historical experiments and their saved audio remain on
+disk and old direct bookmarks remain compatible. The Synth and Music mixers
+contain their instrumental controls; start a backing there, then open Rap
+response to record or type.
 
 ### Shared signal mixes
 
@@ -378,6 +305,126 @@ so they must still exist on the dashboard server. Loading stops playback and
 does not generate music, request MIDI access, or reconnect live inputs. Press
 Connect live or Connect MIDI device when needed, then Play to resume.
 Running generation jobs are separate from saved sessions.
+
+### Academic study recording
+
+The dashboard records study data and creates local backup bundles automatically.
+The normal participant view has no Study controls or save/export steps.
+For researcher controls, open <http://127.0.0.1:8790/?researcher=1>.
+The **Study** panel shows recording health, backup status and folder, the laptop's
+installation ID, and the current session. The query option changes visibility;
+it is not an authentication mechanism.
+
+Participant codes are optional. In the same browser tab participants use, a
+researcher can open `?researcher=1`, choose **New participant** at each handover,
+then remove the query option to return to the participant view. A separate
+researcher tab has its own session and cannot mark a handover in another tab.
+Without that handover marker, the
+app logs a continuous session and cannot infer that a different person has
+started using it. A page reload retains that tab's session and starts a new
+client run. Activity without a participant code is still recorded.
+These study sessions are separate from the **Sessions** settings library.
+
+The recorder saves:
+
+- Interface clicks, input and selection changes, intermediate slider values,
+  relevant keyboard shortcuts, navigation, focus, and periodic settings snapshots.
+- Complete mapping configurations after accepted edits, including rapid add/remove
+  actions, shared signal relationships, and edits made during playback. Control
+  events identify their mapping/bus/channel context; clicks include page position,
+  scroll offsets, and viewport size. Opening and closing disclosure panels is recorded.
+- Original microphone clips, including canceled attempts, the WAV submitted for
+  local transcription, transcripts, rap lyrics, generation settings, voice/model
+  identifiers, timing, errors, and references to generated audio.
+- Rap playback scheduling, starts, ends and stops; mixer transport and patch
+  changes; emitted notes and parameter values; robot commands and outcomes.
+- Validated numeric data from incoming live movement frames, with chunk offsets
+  for reconstructing large arrays; browser errors and backend job transitions.
+
+Events have a unique event ID, laptop ID, session/client IDs, UTC timestamps,
+elapsed time, sequence number, application revision, and structured payload.
+Backend hardware events without a known participant remain explicitly unassigned;
+they can be aligned by laptop and timestamp. The recorder describes commanded
+and scheduled output; it does not verify acoustic playback through the speakers
+or the robot's physical contact. It does not add continuous ambient microphone,
+screen, or camera recording. Microphone recording retains the existing explicit
+record-button workflow, including its echo cancellation and noise suppression.
+An abrupt browser/process termination can lose an unfinished microphone clip
+and events that had not yet reached persistent storage.
+
+For mapping analysis, `mapping.configuration` stores each full accepted state with
+a `revision_id` and `previous_revision_id`. `mapping.playback` links revisions to
+transport start, changes while running, and stop; synth/music output events also
+carry `mapping_revision_id`. These events distinguish configuring a mapping from
+using it during playback. Invalid choices remain in raw UI events without becoming
+accepted mapping revisions. Revision IDs identify occurrences, not unique content:
+compare the stored configurations to define distinct trials during analysis.
+Automatic range calibration does not create a new revision by itself. The
+`configured-values-v1` comparison ignores `learnedMin`, `learnedMax`,
+`awaitingBounds`, and input bounds only when `rangeMode` is `auto`; all those values
+remain in recorded configurations. Explicit freeze/relearn actions are retained.
+
+The browser queues events and completed clips in IndexedDB and retries until the
+local backend acknowledges saving them. The backend uses SQLite with separate
+audio files. Pending data and storage errors remain visible in the researcher
+**Study** panel; keep the tab open while data is pending. Recording runs
+independently of internet connectivity. There is no automatic deletion of study
+sessions or recordings.
+
+Live study data is outside the source checkout and cloud-sync folders by default:
+
+- macOS: `~/Library/Application Support/Keirzo/study-data`
+- Linux: `$XDG_DATA_HOME/keirzo/study-data`, or `~/.local/share/keirzo/study-data`
+- Windows path selection: `%LOCALAPPDATA%/Keirzo/study-data` (the native hardware
+  tools in this repository still target macOS).
+
+Override with `KEIRZO_STUDY_DIR` or `--study-dir /path/to/local/study-data`.
+`--no-study-recording` is available for development runs; `--no-study-backups`
+disables only the automatic backup bundles. Copy the application
+to each laptop, but let each installation create its own study directory and
+device ID. Keep laptop clocks synchronized before data collection; timestamps
+alone cannot correct clock drift between different laptops.
+
+Automatic backups run on startup, every two minutes, and at a normal dashboard
+shutdown. Completed ZIP bundles appear under `study-data/backups/<laptop-id>/`.
+Each bundle adds new events, microphone clips, and new or changed generated
+audio, so earlier audio is not repeatedly copied. A failed backup is retried;
+the primary local recordings remain intact. Data still waiting in the browser
+is included after it reaches the backend. No data is automatically uploaded.
+
+For USB collection, wait for the researcher's Study panel to show no pending
+recordings, close the dashboard normally to finish its last backup, then copy
+the **entire `backups` folder** from each laptop onto the USB drive. Retain all
+ZIPs: each is part of the study, not a complete replacement for previous bundles.
+The per-laptop subfolders keep the six installations separate. The automatic
+copies are on the same laptop until you collect them onto another device.
+
+For a separate complete snapshot, choose **Study → Export this laptop** after its
+pending queue has drained. The ZIP contains events in exact JSONL and
+analysis-friendly CSV, participant-session
+records, linked microphone/generated audio, job metadata, and a manifest of
+file hashes and any unavailable assets. Exports include all recorded sessions
+on that laptop and leave the originals intact. Generated audio still being
+prepared is reported as unavailable at export time; export again when it finishes.
+The manual export leaves automatic backup progress unchanged.
+
+`tools/study_merge.py` combines bundles from the six laptops and deduplicates
+repeated exports by event ID:
+
+```sh
+python3 tools/study_merge.py /path/to/collected-laptops --output study-analysis
+```
+
+The command finds ZIP bundles recursively; individual ZIP paths also work.
+The output includes `combined.sqlite3`, event/session/media CSVs, exact JSONL,
+and collected audio. `media.csv` links each microphone clip to its participant
+session and local file. JSONL preserves nested payloads; CSV escapes formula-like
+text for spreadsheet use. Exceptionally large browser events are preserved as
+`recording.event_chunk` fragments: join their JSON strings in `chunk_index`
+order for each `logical_event_id` to reconstruct the original event.
+The event log supports analyses such as control choices,
+time spent in each workspace, response latency, replay/abandonment rates, and
+movement-to-output relationships.
 
 ### Music mixer
 

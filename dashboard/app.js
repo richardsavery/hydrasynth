@@ -5,6 +5,41 @@ const SETTINGS_KEY = "hydra-signal-lab-v1";
 const CONNECTIONS_KEY = "hydra.connections.v1";
 const MIDI_CHANNEL = 0;
 const MAX_MAPPING_SOURCES = 6;
+function recordStudyEvent(type, payload) { try { globalThis.HydraStudy?.emit?.(type, payload); } catch (_) {} }
+const legacyStudyMappings = new Map();
+function legacyStudyTracker(workspace = "synth-legacy") {
+  try {
+    if (!legacyStudyMappings.has(workspace)) {
+      const tracker = globalThis.HydraStudy?.createMappingTracker?.(workspace);
+      if (tracker) legacyStudyMappings.set(workspace, tracker);
+    }
+    return legacyStudyMappings.get(workspace) || null;
+  } catch (_) { return null; }
+}
+function legacyStudyConfiguration() {
+  return { source_mode: state.sourceMode, recording_id: state.recording?.id || null,
+    active_tab_id: state.activeTabId, mappings: state.mappings, tabs: state.tabs,
+    controls: readMusicalControls(), drum_sources: state.drumSources, drum_muted: state.drumMuted };
+}
+function captureLegacyStudyMappings(reason = "settings_changed") {
+  try {
+    const workspace = state.workspaceView === "drums" ? "drums" : "synth-legacy";
+    return legacyStudyTracker(workspace)?.capture(legacyStudyConfiguration(), { reason }) || null;
+  } catch (_) { return null; }
+}
+function mappingPlaybackStudy(running = state.playing, reason = "output") {
+  try {
+    const workspace = state.playbackWorkspace || state.workspaceView;
+    if (workspace === "synth-mixer") return globalThis.HydraSynthMixer?.mappingStudyContext?.() || null;
+    if (!["synth-legacy", "drums", null].includes(workspace)) return null;
+    const tracker = legacyStudyTracker(workspace || "synth-legacy");
+    if (!tracker) return null;
+    if (!tracker.current()) tracker.capture(legacyStudyConfiguration(), { reason: "playback_baseline" });
+    tracker.playback(null, { running, reason, generation: state.playbackGeneration,
+      output: state.output, source_mode: state.sourceMode, recording_id: state.recording?.id || null });
+    return tracker.current();
+  } catch (_) { return null; }
+}
 const COMBINE_OPERATORS = new Set([
   "direct", "average", "weighted", "sum", "difference", "minimum", "maximum"
 ]);
@@ -1391,6 +1426,10 @@ async function togglePlayback() {
     if (state.output === "drums" && state.sourceMode !== "live" && state.cursor >= state.maxSteps - 1) state.cursor = 0;
     state.preparing = false;
     state.playing = true;
+    const mappingRevision = mappingPlaybackStudy(true, "started");
+    recordStudyEvent("synth.transport.started", { generation, workspace: state.playbackWorkspace, output: state.output,
+      source_mode: state.sourceMode, recording_id: state.recording?.id || null, controls: settings,
+      mapping_revision_id: mappingRevision?.revision_id || null });
     state.rhythmStep = 0;
     state.currentPreviewVoice = null;
     state.lastSoundChange = -Infinity;
@@ -1597,6 +1636,8 @@ async function sendMidiPatch(patch, generation) {
     if (!await waitForPatch(20, generation, output)) return false;
     output.send([0xC0 | MIDI_CHANNEL, patch.number - 1]);
     state.currentPatch = { ...patch };
+    recordStudyEvent("synth.patch.sent", { generation, bank: patch.bank, number: patch.number, midi_channel: MIDI_CHANNEL,
+      destination_id: output.id || null, destination_name: output.name || null, playback_continuing: state.playing });
     state.lastSoundChange = performance.now();
     renderSoundControls();
     if (state.output === "midi") publishSignalLabActivity({ stop: true });
@@ -1783,6 +1824,12 @@ function publishSignalLabActivity(activity = {}) {
     voice_name: state.output === "drums" ? drumKitName() : state.output === "audio" ? effectivePreviewVoice().name || "Custom" : null,
     ...activity
   };
+  // Preserve every emitted output event before the separate Signal Lab display
+  // coalesces pending updates. This describes commands sent, not microphone audio.
+  const mappingRevision = activity.stop ? null : mappingPlaybackStudy(state.playing, "output");
+  recordStudyEvent("synth.output", { ...state.activityQueued, generation: state.playbackGeneration,
+    workspace: state.playbackWorkspace, rhythm_step: state.rhythmStep, performance_ms: performance.now(),
+    mapping_revision_id: activity.mapping_revision_id || mappingRevision?.revision_id || null });
   // Preserve emitted parameter changes while the previous HTTP request is in flight.
   if (queued && !activity.stop) {
     for (const kind of ["cc", "nrpn"]) {
@@ -1820,6 +1867,10 @@ async function flushSignalLabActivity() {
 
 function stopPlayback() {
   const wasPlaying = state.playing || state.preparing;
+  const mappingRevision = wasPlaying ? mappingPlaybackStudy(false, "stopped") : null;
+  if (wasPlaying) recordStudyEvent("synth.transport.stopped", { generation: state.playbackGeneration,
+    workspace: state.playbackWorkspace, output: state.output, was_preparing: state.preparing, source_mode: state.sourceMode,
+    mapping_revision_id: mappingRevision?.revision_id || null });
   state.playing = false;
   state.preparing = false;
   state.playbackWorkspace = null;
@@ -1852,7 +1903,7 @@ function stopPlayback() {
   renderRhythm();
   if (state.output === "drums") renderDrumReadout(0, null, "Ready · press Preview to hear the movement.");
   renderPlaybackAvailability();
-  if (wasPlaying) publishSignalLabActivity({ stop: true });
+  if (wasPlaying) publishSignalLabActivity({ stop: true, mapping_revision_id: mappingRevision?.revision_id || null });
 }
 
 function rememberSynthBeat(controls) {
@@ -2303,6 +2354,7 @@ function loadSavedSettings() {
 
 function saveSettings() {
   commitActiveTab();
+  captureLegacyStudyMappings();
   state.saved.controls = { ...readMusicalControls(), output: state.output };
   state.saved.connections = { synthOutput: state.synthOutput };
   if (state.recording) {
@@ -2788,6 +2840,7 @@ function openLiveSocket(generation) {
     if (!current()) return;
     window.clearTimeout(state.liveConnectTimer);
     state.liveAttempts = 0; state.liveStatus = "Connected · waiting for data";
+    recordStudyEvent("live.connection.opened", { generation, performance_ms: performance.now() });
     state.liveDiagnostics?.connection({ state: "open", now: performance.now() });
     dom["live-disconnect"].disabled = false; updateLiveStatus();
   };
@@ -2806,11 +2859,13 @@ function openLiveSocket(generation) {
   socket.onerror = () => {
     if (!current()) return;
     state.liveStatus = "Connection error · check address and network";
+    recordStudyEvent("live.connection.error", { generation, performance_ms: performance.now() });
     state.liveDiagnostics?.connection({ state: "error", now: performance.now() });
     updateLiveStatus();
   };
   socket.onclose = (event) => {
     if (!current()) return;
+    recordStudyEvent("live.connection.closed", { generation, code: event?.code || null, reason: String(event?.reason || "").slice(0, 500), performance_ms: performance.now() });
     window.clearTimeout(state.liveConnectTimer);
     state.liveSocket = null; stopPlayback();
     // Old values cannot look fresh after a reconnect, even if it is immediate.

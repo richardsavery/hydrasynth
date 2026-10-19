@@ -567,6 +567,9 @@ class RobotControlService:
             "timestamp": datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
             "kind": kind, "config": self._config, **result,
         }))
+        study = getattr(self, "study_recorder", None)
+        if study is not None:
+            study.record("robot.command_completed", {"kind": kind, "config": self._config, **result})
 
     def close(self) -> None:
         with self._emergency_lock:

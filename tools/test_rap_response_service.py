@@ -7,6 +7,7 @@ import io
 import json
 import os
 from pathlib import Path
+import shutil
 import tempfile
 import threading
 import unittest
@@ -15,10 +16,10 @@ from urllib import error
 import wave
 import zipfile
 
-from elevenlabs_service import FileResponse, GenerationError, digest
+from elevenlabs_service import FileResponse, GenerationError, ServiceError, digest
 from rap_transcription import TranscriptionError
 from rap_response_service import (
-    API_PREFIX, MAX_JSON_BYTES, NoRedirect, RapResponseClient, RapResponseService,
+    API_PREFIX, DEFAULT_EFFECTS, MAX_JSON_BYTES, NoRedirect, RapResponseClient, RapResponseService,
     lyric_prompt, lyrics_from_plan, transcription_text, validate_input,
 )
 
@@ -26,13 +27,13 @@ from rap_response_service import (
 LYRICS = "Missed that bus but you're still in the race\nOne late start cannot set your pace\nTell them the truth as you make your way\nThen bring that spark to the rest of your day"
 
 
-def wave_bytes(rate=16000, channels=1, width=2, seconds=.2):
+def wave_bytes(rate=16000, channels=1, width=2, seconds=.2, sample=1):
     output = io.BytesIO()
     with wave.open(output, "wb") as handle:
         handle.setnchannels(channels)
         handle.setsampwidth(width)
         handle.setframerate(rate)
-        handle.writeframes(b"\x01" * round(rate * seconds) * channels * width)
+        handle.writeframes(bytes([sample]) * round(rate * seconds) * channels * width)
     return output.getvalue()
 
 
@@ -104,6 +105,22 @@ class FakeMusic:
                 archive.writestr(name, data)
 
 
+class FakeVoice:
+    def __init__(self):
+        self.calls = []
+        self.on_call = None
+        self.fail = False
+
+    def convert(self, source, destination, voice_id):
+        self.calls.append((source.read_bytes(), voice_id))
+        if self.on_call:
+            self.on_call()
+        if self.fail:
+            raise GenerationError("fake-secret voice conversion lost", "unknown")
+        destination.write_bytes(wave_bytes(rate=24000, sample=2))
+        return {"voice_id": voice_id, "model_id": "eleven_multilingual_sts_v2", "sample_rate": 24000}
+
+
 def audio_metadata(path, duration):
     with wave.open(str(path), "rb") as handle:
         return {"extension": "wav", "content_type": "audio/wav", "duration_seconds": handle.getnframes() / handle.getframerate()}
@@ -117,18 +134,39 @@ class ServiceTests(unittest.TestCase):
         self.env.write_text("ELEVENLABS_API_KEY=fake-secret\n")
         self.environment = mock.patch.dict(os.environ, {}, clear=True)
         self.environment.start()
-        self.client, self.music, self.transcriber = FakeClient(), FakeMusic(), FakeTranscriber()
+        self.client, self.music, self.transcriber, self.voice = FakeClient(), FakeMusic(), FakeTranscriber(), FakeVoice()
+        self.render_calls, self.mix_calls = [], []
+        self.render_on_call = None
+        self.render_patch = mock.patch("rap_response_service.render_vocal", side_effect=self.render_voice)
+        self.mix_patch = mock.patch("rap_response_service.remix_vocal", side_effect=self.mix_voice)
+        self.render_patch.start()
+        self.mix_patch.start()
         self.service = self.new_service()
 
     def new_service(self, **options):
         service = RapResponseService(self.root / "responses", self.env, client=self.client, music_client=self.music,
-                                     transcriber=self.transcriber, start_worker=options.get("start_worker", False))
+                                     voice_client=self.voice, transcriber=self.transcriber, start_worker=options.get("start_worker", False))
         service.ffmpeg = service.ffprobe = "test-tool"
         service._validate_music = audio_metadata
+        service._normalize_vocal = lambda source, destination: destination.write_bytes(wave_bytes(rate=24000))
         return service
+
+    def render_voice(self, source, destination, effects, *, bpm, ffmpeg):
+        self.render_calls.append((source.read_bytes(), copy.deepcopy(effects), bpm))
+        if self.render_on_call:
+            self.render_on_call()
+        destination.write_bytes(source.read_bytes())
+        return {"effects": effects, "duration_seconds": .2}
+
+    def mix_voice(self, vocal, instrumental, destination, *, ffmpeg):
+        self.mix_calls.append((vocal.read_bytes(), instrumental.read_bytes()))
+        destination.write_bytes(wave_bytes(rate=24000, channels=2, sample=3))
+        return {"instrumental_unchanged": True, "duration_seconds": .2}
 
     def tearDown(self):
         self.service.close()
+        self.render_patch.stop()
+        self.mix_patch.stop()
         self.environment.stop()
         self.temp.cleanup()
 
@@ -195,6 +233,265 @@ class ServiceTests(unittest.TestCase):
         self.assertIsInstance(self.service.dispatch("GET", completed["audio_url"])[1], FileResponse)
         self.assertIn("writing_seconds", completed["timings"])
         self.assertIn("generating_seconds", completed["timings"])
+
+    def test_all_six_approved_voices_use_their_exact_identity_and_same_source_performer(self):
+        expected = {"eva": "weA4Q36twV5kwSaTEL0Q", "cold_android": "nPijfmaNgvm5OSN4xM8H",
+                    "peter": "TumdjBNWanlT3ysvclWh", "elowen": "dvbL7qkNGZY1IqPGZAjM",
+                    "maisie": "QtY3JBOUKEB5xzrRfOKc", "warren": "7QN34D2r3hCNwbOYIeK0"}
+        self.assertEqual({voice["id"]: voice["voice_id"] for voice in self.service.status()["voices"]}, expected)
+        for key, voice_id in expected.items():
+            with self.subTest(voice=key):
+                job = self.submit(self.payload(request_id="chosen-voice-" + key, voice=key))
+                result = self.run_job(job)
+                self.assertEqual((result["state"], result["vocal_state"]), ("complete", "complete"), result)
+                self.assertEqual((result["voice"], result["voice_id"]), (key, voice_id))
+                recipe = result["voice_generation_settings"]
+                self.assertEqual((recipe["model_id"], recipe["voice_id"], recipe["seed"]), ("eleven_multilingual_sts_v2", voice_id, 1729))
+                self.assertEqual(recipe["voice_settings"], {"stability": .5, "similarity_boost": .85, "style": 0, "use_speaker_boost": True})
+                self.assertEqual((self.music.calls[-1]["model_id"], self.music.calls[-1]["finetune_id"]),
+                                 ("music_v2", "cmogtn8kgmqiog8dhexe"))
+                self.assertEqual(self.voice.calls[-1], (wave_bytes(rate=24000), voice_id))
+                self.assertEqual(self.render_calls[-1][0], wave_bytes(rate=24000, sample=2))
+                self.assertEqual(self.mix_calls[-1], (wave_bytes(rate=24000, sample=2), wave_bytes()))
+                self.assertTrue(result["can_apply_effects"])
+                for field in ("audio_url", "vocal_audio_url"):
+                    self.assertEqual(self.service.dispatch("GET", result[field])[0], 200)
+                saved = self.service._job(result["id"])
+                folder = self.service.root / result["id"]
+                self.assertEqual((folder / saved["_raw_filename"]).read_bytes(), wave_bytes())
+                self.assertEqual((folder / saved["_raw_vocal_filename"]).read_bytes(), wave_bytes())
+                self.assertEqual((folder / saved["_instrumental_filename"]).read_bytes(), wave_bytes())
+
+    def test_selected_voice_stages_are_committed_before_paid_work_and_hide_original_voice(self):
+        job = self.submit(self.payload(voice="eva"))
+        def check(stage):
+            saved = self.service._job(job["id"])
+            self.assertEqual(saved["state"], stage)
+            self.assertIsNone(saved["audio_url"])
+            self.assertIsNone(saved["vocal_audio_url"])
+            self.assertEqual(self.service.dispatch("GET", API_PREFIX + "/responses/" + job["id"] + "/audio")[0], 409)
+        self.music.on_separate = lambda: check("isolating")
+        self.voice.on_call = lambda: check("converting")
+        self.render_on_call = lambda: check("rendering")
+        result = self.run_job(job)
+        self.assertEqual(result["state"], "complete", result)
+        for stage in ("writing", "generating", "isolating", "converting", "rendering"):
+            self.assertIn(stage + "_seconds", result["timings"])
+
+    def test_exact_typed_words_skip_planning_and_preserve_line_breaks(self):
+        lyrics = "My very own words\nWith a second line\n\nExactly as I typed"
+        job = self.submit(self.payload(text=lyrics, text_mode="lyrics", voice="peter"))
+        result = self.run_job(job)
+        self.assertEqual(result["state"], "complete", result)
+        self.assertEqual(result["lyrics"], lyrics)
+        self.assertEqual(result["transcript"], lyrics)
+        self.assertEqual(self.client.calls, [])
+        self.assertEqual(self.transcriber.calls, [])
+        self.assertNotIn("writing_seconds", result["timings"])
+        self.assertEqual(self.music.calls[0]["composition_plan"]["chunks"][0]["text"], "[Rap verse]\n" + lyrics)
+        for bars in (4, 8):
+            _, settings, _ = validate_input(self.payload(text="word " * (bars * 12), text_mode="lyrics", bars=bars))
+            self.assertEqual(len(settings["transcript"].split()), bars * 12)
+            invalid = self.payload(request_id="too-many-words", text="word " * (bars * 12 + 1), text_mode="lyrics", bars=bars)
+            self.assertEqual(self.service.dispatch("POST", API_PREFIX + "/responses", invalid)[0], 400)
+        self.assertEqual(self.service.dispatch("POST", API_PREFIX + "/responses", self.audio_payload(text_mode="lyrics"))[0], 400)
+
+    def test_new_voice_and_effect_settings_are_validated_and_bound_to_request_identity(self):
+        request = self.payload(voice="eva", effects={"pitch_semitones": 3, "autotune_amount": .4})
+        job = self.submit(request)
+        self.assertEqual(self.submit(request)["id"], job["id"])
+        for changes in ({"voice": "peter"}, {"text_mode": "lyrics"}, {"effects": {"pitch_semitones": 4}}, {"effects": {}}):
+            self.assertEqual(self.service.dispatch("POST", API_PREFIX + "/responses", {**request, **changes})[0], 409)
+        bad_fields = [{"voice": value} for value in ("missing", [], None, True)]
+        bad_fields += [{"text_mode": value} for value in ("speech", [], None, True)]
+        bad_fields += [{"voice": "eva", "vocal_preset": "deep_hiphop"}]
+        bad_fields += [{"effects": value} for value in (None, [], True)]
+        bad_fields += [{"effects": {name: value}} for name, value in (("pitch_semitones", 13), ("pitch_semitones", float("nan")),
+                      ("autotune_amount", -1), ("key", 12), ("scale", "invalid"), ("melody", "missing"), ("octave", 6), ("note_beats", 3))]
+        for fields in bad_fields:
+            with self.subTest(fields=fields):
+                self.assertEqual(self.service.dispatch("POST", API_PREFIX + "/responses", self.payload(**fields))[0], 400)
+        self.assertEqual(self.voice.calls, [])
+
+    def test_explicit_neutral_new_settings_keep_legacy_request_identity(self):
+        original = self.submit()
+        duplicate = self.submit(self.payload(voice="", text_mode="reply", effects=dict(DEFAULT_EFFECTS)))
+        self.assertEqual(duplicate["id"], original["id"])
+
+    def test_voice_conversion_failure_never_exposes_or_retries_the_original_voice(self):
+        self.voice.fail = True
+        request = self.payload(voice="warren")
+        result = self.run_job(self.submit(request))
+        self.assertEqual((result["state"], result["vocal_state"]), ("unknown", "unknown"))
+        self.assertNotIn("fake-secret", result["error"])
+        self.assertIsNone(result["audio_url"])
+        self.assertIsNone(result["vocal_audio_url"])
+        self.assertFalse(result["can_apply_effects"])
+        self.assertEqual(self.service.dispatch("GET", API_PREFIX + "/responses/" + result["id"] + "/audio")[0], 409)
+        self.assertEqual(self.submit(request)["id"], result["id"])
+        self.run_job(result)
+        self.service.isolate_vocals(result["id"])
+        self.assertEqual((len(self.music.calls), len(self.music.stem_calls), len(self.voice.calls)), (1, 1, 1))
+        self.assertEqual(self.render_calls, [])
+
+    def test_bad_voice_recipe_prevents_any_provider_submission(self):
+        for index, field in enumerate(("voice_id", "voice_model_id", "voice_generation_settings")):
+            with self.subTest(field=field):
+                job = self.submit(self.payload(request_id=f"bad-voice-recipe-{index}", voice="eva"))
+                saved = self.service._job(job["id"])
+                saved[field] = None
+                self.service._write(saved)
+                result = self.run_job(job)
+                self.assertEqual(result["state"], "failed")
+                self.assertIn("No different voice was substituted", result["error"])
+        self.assertEqual((self.client.calls, self.music.calls, self.voice.calls), ([], [], []))
+
+    def test_cancellation_during_voice_pipeline_stops_remaining_stages(self):
+        for stage in ("isolating", "converting", "rendering"):
+            with self.subTest(stage=stage):
+                self.music.on_separate = self.voice.on_call = self.render_on_call = None
+                self.voice.calls.clear(); self.render_calls.clear(); self.mix_calls.clear()
+                job = self.submit(self.payload(request_id="cancel-voice-" + stage, voice="eva"))
+                cancel = lambda: self.service.cancel(job["id"])
+                if stage == "isolating":
+                    self.music.on_separate = cancel
+                elif stage == "converting":
+                    self.voice.on_call = cancel
+                else:
+                    self.render_on_call = cancel
+                result = self.run_job(job)
+                self.assertEqual((result["state"], result["vocal_state"]), ("cancelled", "cancelled"), result)
+                self.assertIsNone(result["audio_url"])
+                self.assertIsNone(result["vocal_audio_url"])
+                self.assertEqual(len(self.voice.calls), int(stage != "isolating"))
+                self.assertEqual(len(self.render_calls), int(stage == "rendering"))
+                self.assertEqual(self.mix_calls, [])
+
+    def test_local_effects_children_reuse_clean_voice_without_paid_calls_or_stacked_effects(self):
+        source = self.run_job(self.submit(self.payload(voice="eva", effects={"pitch_semitones": 2})))
+        calls = (len(self.client.calls), len(self.music.calls), len(self.music.stem_calls), len(self.voice.calls))
+        self.service._api_key = ""  # Applying effects remains available offline.
+        route = API_PREFIX + "/responses/" + source["id"] + "/effects"
+        request = {"request_id": "local-effects-0001", "effects": {"pitch_semitones": -3, "autotune_amount": .8}}
+        code, child = self.service.dispatch("POST", route, request)
+        self.assertEqual(code, 202, child)
+        self.assertEqual(self.service.dispatch("POST", route, request)[1]["id"], child["id"])
+        self.assertEqual(self.service.request_response(request["request_id"])["id"], child["id"])
+        self.assertEqual(child["source_response_id"], source["id"])
+        result = self.run_job(child)
+        self.assertEqual(result["state"], "complete", result)
+        self.assertTrue(result["can_apply_effects"])
+        self.assertEqual(result["voice_id"], source["voice_id"])
+        self.assertEqual(result["lyrics"], source["lyrics"])
+        self.assertEqual(self.render_calls[-1][0], wave_bytes(rate=24000, sample=2))
+        self.assertEqual(result["effects"]["pitch_semitones"], -3)
+        self.assertEqual(set(result["timings"]), {"queue_seconds", "rendering_seconds", "total_seconds", "ready_seconds"})
+        self.assertEqual(self.service.dispatch("POST", route, {**request, "effects": {"pitch_semitones": 1}})[0], 409)
+        second_route = API_PREFIX + "/responses/" + child["id"] + "/effects"
+        code, second = self.service.dispatch("POST", second_route, {"request_id": "local-effects-0002", "effects": {}})
+        self.assertEqual(code, 202, second)
+        self.assertEqual(self.run_job(second)["state"], "complete")
+        self.assertEqual(self.render_calls[-1][0], wave_bytes(rate=24000, sample=2))
+        self.assertEqual(calls, (len(self.client.calls), len(self.music.calls), len(self.music.stem_calls), len(self.voice.calls)))
+        for job in (source, child, second):
+            stored = self.service._job(job["id"])
+            folder = self.service.root / job["id"]
+            self.assertTrue((folder / stored["_clean_vocal_filename"]).is_file())
+            self.assertTrue((folder / stored["_instrumental_filename"]).is_file())
+
+    def test_effects_only_new_response_processes_vocal_without_changing_voice(self):
+        result = self.run_job(self.submit(self.payload(effects={"pitch_semitones": 2})))
+        self.assertEqual(result["state"], "complete", result)
+        self.assertEqual(self.voice.calls, [])
+        self.assertEqual(len(self.music.stem_calls), 1)
+        self.assertEqual(self.music.calls[0]["model_id"], "music_v2_5")
+        self.assertNotIn("finetune_id", self.music.calls[0])
+        self.assertEqual(self.render_calls[-1][0], wave_bytes(rate=24000))
+
+    def test_pending_local_effects_cancel_and_restart_never_replay(self):
+        source = self.run_job(self.submit(self.payload(voice="eva")))
+        route = API_PREFIX + "/responses/" + source["id"] + "/effects"
+        _, cancelled = self.service.dispatch("POST", route, {"request_id": "cancel-effects-0001", "effects": {}})
+        self.service.cancel(cancelled["id"])
+        self.run_job(cancelled)
+        self.assertEqual(len(self.render_calls), 1)
+        _, interrupted = self.service.dispatch("POST", route, {"request_id": "restart-effects-0001", "effects": {}})
+        saved = self.service._job(interrupted["id"])
+        saved["state"] = "rendering"
+        self.service._write(saved)
+        self.service.close()
+        self.service = self.new_service()
+        recovered = self.service.request_response(interrupted["request_id"])
+        self.assertEqual((recovered["state"], recovered["vocal_state"]), ("unknown", "unknown"))
+        self.run_job(recovered)
+        self.assertEqual(len(self.render_calls), 1)
+        self.assertEqual(self.service.dispatch("POST", route, {"request_id": interrupted["request_id"], "effects": {}})[1]["id"], interrupted["id"])
+
+    def test_worker_routes_effects_children_only_to_local_rendering(self):
+        source = self.run_job(self.submit(self.payload(voice="eva")))
+        self.service.close()
+        self.service = self.new_service(start_worker=True)
+        code, child = self.service.dispatch("POST", API_PREFIX + "/responses/" + source["id"] + "/effects",
+                                            {"request_id": "worker-effects-0001", "effects": {"pitch_semitones": 2}})
+        self.assertEqual(code, 202, child)
+        self.service._queue.join()
+        self.assertEqual(self.service._job(child["id"])["state"], "complete")
+        self.assertEqual((len(self.client.calls), len(self.music.calls), len(self.music.stem_calls), len(self.voice.calls)), (1, 1, 1, 1))
+        self.assertEqual(len(self.render_calls), 2)
+
+    def test_new_active_stages_consume_capacity_and_restart_without_paid_replay(self):
+        first = self.submit(self.payload(voice="eva"))
+        second = self.submit(self.payload(request_id="active-render-0002", voice="peter"))
+        for job, stage in ((first, "converting"), (second, "rendering")):
+            saved = self.service._job(job["id"])
+            saved.update(state=stage, vocal_state="isolating")
+            self.service._write(saved)
+        self.assertEqual(self.service.dispatch("POST", API_PREFIX + "/responses", self.payload(request_id="active-third-0003"))[0], 429)
+        self.service.close()
+        self.service = self.new_service()
+        for job in (first, second):
+            result = self.run_job(job)
+            self.assertEqual((result["state"], result["vocal_state"]), ("unknown", "unknown"))
+        self.assertEqual((self.client.calls, self.music.calls, self.voice.calls), ([], [], []))
+
+    def test_missing_effects_dependency_prevents_paid_submission_but_not_legacy_playback(self):
+        with mock.patch.object(self.service, "_require_local_effects", side_effect=ServiceError("Install NumPy", 503)):
+            for settings in ({"voice": "eva"}, {"effects": {"pitch_semitones": 2}}):
+                self.assertEqual(self.service.dispatch("POST", API_PREFIX + "/responses", self.payload(**settings))[0], 503)
+            self.assertEqual(self.service.jobs(), [])
+            legacy = self.run_job(self.submit())
+            self.assertEqual(legacy["state"], "complete")
+        source = self.run_job(self.submit(self.payload(request_id="ready-voice-effects", voice="eva")))
+        count = len(self.service.jobs())
+        with mock.patch.object(self.service, "_require_local_effects", side_effect=ServiceError("Install NumPy", 503)):
+            code, _ = self.service.dispatch("POST", API_PREFIX + "/responses/" + source["id"] + "/effects",
+                                            {"request_id": "missing-numpy-effects", "effects": {}})
+            self.assertEqual(code, 503)
+        self.assertEqual(len(self.service.jobs()), count)
+
+    def test_actual_audio_tools_prepare_convert_render_and_remix_without_external_requests(self):
+        from rap_voice import render_vocal, remix_vocal
+        binary_root = Path(__file__).resolve().parents[1] / "var" / "bin"
+        ffmpeg = shutil.which("ffmpeg") or str(binary_root / "ffmpeg")
+        ffprobe = shutil.which("ffprobe") or str(binary_root / "ffprobe")
+        if not Path(ffmpeg).is_file() or not Path(ffprobe).is_file():
+            self.skipTest("FFmpeg and ffprobe are not installed")
+        self.service.ffmpeg, self.service.ffprobe = ffmpeg, ffprobe
+        self.service._normalize_vocal = RapResponseService._normalize_vocal.__get__(self.service)
+        self.service._validate_music = RapResponseService._validate_music.__get__(self.service)
+        with mock.patch("rap_response_service.render_vocal", side_effect=render_vocal), mock.patch("rap_response_service.remix_vocal", side_effect=remix_vocal):
+            result = self.run_job(self.submit(self.payload(voice="eva", text_mode="lyrics", text="These are my exact words")))
+        self.assertEqual(result["state"], "complete", result)
+        self.assertEqual(len(self.voice.calls), 1)
+        self.assertEqual(self.client.calls, [])
+        with wave.open(io.BytesIO(self.voice.calls[0][0]), "rb") as normalized:
+            self.assertEqual((normalized.getnchannels(), normalized.getsampwidth(), normalized.getframerate()), (1, 2, 24000))
+            self.assertEqual(normalized.getnframes(), 4800)
+        for field in ("audio_url", "vocal_audio_url"):
+            code, audio = self.service.dispatch("GET", result[field])
+            self.assertEqual(code, 200)
+            with wave.open(str(audio.path), "rb") as decoded:
+                self.assertAlmostEqual(decoded.getnframes() / decoded.getframerate(), .2)
 
     def test_vocal_presets_pin_each_generated_voice_and_its_base_model(self):
         for key, label, identifier in (("deep_hiphop", "Deep Hip-Hop Voice (Male)", "cmogtn8kgmqiog8dhexe"),

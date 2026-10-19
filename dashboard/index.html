@@ -23,6 +23,7 @@
   <link rel="stylesheet" href="robot-control.css">
   <link rel="stylesheet" href="robot-live.css">
   <link rel="stylesheet" href="robot-drums.css">
+  <link rel="stylesheet" href="study-recorder.css">
 </head>
 <body data-workspace="connections">
   <a class="skip-link" href="#connections-workspace">Skip to workspace</a>
@@ -52,6 +53,19 @@
       </nav>
     </div>
     <div class="workspace-options">
+      <details id="study-panel" class="study-panel" data-study-ui hidden>
+        <summary>Study <span id="study-status" class="study-status" data-state="pending" role="status" aria-live="polite">Starting…</span></summary>
+        <div class="study-panel-content">
+          <p>Researcher controls. Interactions and microphone clips save automatically on this laptop.</p>
+          <dl><dt>Participant</dt><dd id="study-session">Starting session</dd><dt>Laptop</dt><dd id="study-device">Connecting to local storage</dd></dl>
+          <dl><dt>Backups</dt><dd><span id="study-backup-status">Checking automatic backups</span><small id="study-backup-path" class="study-backup-path"></small></dd></dl>
+          <label for="study-participant">Next participant code (optional)</label>
+          <input id="study-participant" type="text" maxlength="100" autocomplete="off" placeholder="e.g. P001">
+          <div class="study-actions"><button id="study-new-session" class="small-button" type="button">New participant</button><a id="study-export" href="/api/study/export">Export this laptop</a></div>
+          <p id="study-warning" role="alert" hidden></p>
+          <p id="study-backup-warning" role="alert" hidden></p>
+        </div>
+      </details>
       <div id="session-library"></div>
       <a href="/observer/" data-open-observer aria-controls="observer-overlay">Observer</a>
     </div>
@@ -401,6 +415,7 @@
   </section>
 
   <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+  <script src="study-recorder.js" defer></script>
   <script src="drums.js" defer></script>
   <script src="sonification.js" defer></script>
   <script src="parameters.js" defer></script>

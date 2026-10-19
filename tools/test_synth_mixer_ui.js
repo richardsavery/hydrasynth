@@ -2,6 +2,12 @@
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const vm = require("node:vm");
+const { createMappingTracker } = require("../dashboard/study-recorder.js");
+const studyEvents = [];
+const studyRecorder = { getContext: () => ({ session_id: "synth-test-session", client_id: "synth-test-client" }),
+  emit(type, payload) { studyEvents.push({ type, payload: JSON.parse(JSON.stringify(payload)) }); return `event-${studyEvents.length}`; } };
+const mappingEvents = () => studyEvents.filter(event => event.type === "mapping.configuration").map(event => event.payload);
+const playbackEvents = () => studyEvents.filter(event => event.type === "mapping.playback").map(event => event.payload);
 const elements = new Map(), handlers = {}, saved = new Map();
 const savedRap = { text: "Saved verse", enabled: true, requestId: "earlier-rap" };
 saved.set("hydra.synth-mixer.v1", JSON.stringify({ rap: savedRap }));
@@ -19,10 +25,11 @@ function element(id) {
 }
 const root = { classList: { add() {} }, querySelector: (selector) => element(selector.slice(1)),
   querySelectorAll: () => [], addEventListener(type, fn) { handlers[type] = fn; } };
-let output = "audio", storageError = false, finishPatch;
+let output = "audio", storageError = false, finishPatch, finishStart, playing = false, preparing = false;
 const context = vm.createContext({ document: { activeElement: null }, performance: { now: () => 0 },
   setInterval, clearInterval, window: { setInterval, clearInterval },
   HydraRap: { create() { throw new Error("Rap must only run in its dedicated workspace"); } },
+  HydraStudy: { emit: studyRecorder.emit, createMappingTracker: workspace => createMappingTracker(studyRecorder, workspace) },
   localStorage: { getItem: (key) => saved.get(key) || null, setItem(key, value) { if (storageError) throw new Error("Storage full"); saved.set(key, value); } }
 });
 for (const name of ["sonification.js", "parameters.js", "elevenlabs-realtime.js", "music-mixer-engine.js", "signal-library.js", "synth-mixer-engine.js", "synth-mixer.js"])
@@ -37,12 +44,20 @@ context.HydraSynthMixerEngine.create = options => {
   return engine;
 };
 context.HydraSynthMixer.init({ container: root, transport: {
-  status: () => ({ output, midiReady: output === "midi", midiFormat: "nrpn" }), stop: () => { transportStops++; },
+  status: () => ({ output, playing, preparing, midiReady: output === "midi", midiFormat: "nrpn" }), stop: () => { transportStops++; playing = false; },
+  start() { preparing = true; return new Promise(resolve => { finishStart = () => { preparing = false; playing = true; resolve(); }; }); },
   selectPatch(bank, number) { selectedPatches.push({ bank, number }); return new Promise(resolve => { finishPatch = resolve; }); }
 } });
 function button(id, dataset = {}) { return { id, dataset, closest: (selector) => selector === "button" ? button(id, dataset) : null }; }
 function click(id, dataset) { return handlers.click({ target: button(id, dataset) }); }
 (async () => {
+  assert.equal(mappingEvents().length, 1, "restoring saved controls establishes a complete mapping baseline");
+  assert.equal(mappingEvents()[0].workspace, "synth-mixer");
+  assert.equal(mappingEvents()[0].action, "restore");
+  assert.equal(mappingEvents()[0].restored, true);
+  assert.equal(mappingEvents()[0].config.config.parameters.length, 5, "restored partial settings are normalized before recording");
+  assert.deepEqual(mappingEvents()[0].config.signalLinks, {});
+  assert.equal(playbackEvents().length, 0, "restoring controls does not imply that they played");
   assert.doesNotMatch(root.innerHTML, /id="sm-rap"/, "Synth mixer has no embedded rap controls");
   assert.equal(JSON.stringify(context.HydraSynthMixer.getState().rap), JSON.stringify(savedRap), "earlier rap drafts survive session exports without running");
   assert.equal(element("sm-apply-patch").disabled, true, "patch selection requires connected MIDI output");
@@ -58,11 +73,17 @@ function click(id, dataset) { return handlers.click({ target: button(id, dataset
   assert.match(picker.innerHTML, new RegExp(`data-add-destination="${unavailable.id}" disabled`));
   const hardware = context.HydraParameters.entries.find((entry) => !entry.unavailable && entry.choices?.length && entry.kind === "nrpn");
   await click("", { addDestination: hardware.id });
+  assert.equal(mappingEvents().at(-1).action, "add_parameter");
+  assert.ok(mappingEvents().at(-1).config.config.parameters.some(parameter => parameter.destination === hardware.id));
+  const beforeDuplicate = mappingEvents().length;
+  await click("", { addDestination: hardware.id });
+  assert.equal(mappingEvents().length, beforeDuplicate, "a rejected duplicate parameter creates no mapping revision");
   assert.ok(context.HydraSynthMixer.getState().parameters.some((parameter) => parameter.destination === hardware.id));
   assert.ok(element("sm-parameters").innerHTML.includes("MIDI only"), "hardware cards explain browser-output availability");
   assert.match(element("sm-parameters").innerHTML, /<select id="sm-parameter-5-value" data-parameter-field="value" disabled>/);
   const before = context.HydraSynthMixer.getState().parameters.length;
   await click("", { addDestination: unavailable.id });
+  assert.equal(mappingEvents().length, beforeDuplicate, "an unavailable parameter is not recorded as an accepted mapping");
   assert.equal(context.HydraSynthMixer.getState().parameters.length, before, "unavailable documentation entries cannot become active controls");
   await click("sm-add-parameter");
   element("sm-parameter-search").value = last.id;
@@ -107,6 +128,22 @@ function click(id, dataset) { return handlers.click({ target: button(id, dataset
   assert.equal(context.HydraSynthMixer.getState().parameters[0].value, 65, "mapped base values can be adjusted live");
   assert.equal(card.querySelector("[data-manual-value]").textContent, "65");
   assert.equal(replacements, 0);
+  const rapidDestination = context.HydraSonification.DESTINATIONS.find(destination => !destination.unavailable &&
+    !context.HydraSynthMixer.getState().parameters.some(parameter => parameter.destination === destination.id));
+  const rapidBefore = mappingEvents().length;
+  await click("", { addDestination: rapidDestination.id });
+  const removeParameter = { id: "", dataset: { action: "remove-parameter" }, closest(selector) {
+    if (selector === "button") return this;
+    if (selector === "[data-parameter]") return { dataset: { parameter: rapidDestination.id } };
+    return null;
+  } };
+  await handlers.click({ target: removeParameter });
+  const rapid = mappingEvents().slice(rapidBefore);
+  assert.deepEqual(rapid.map(event => event.action), ["add_parameter", "remove_parameter"], "rapid add/remove retains both accepted configurations without debounce");
+  assert.ok(rapid[0].config.config.parameters.some(parameter => parameter.destination === rapidDestination.id));
+  assert.ok(!rapid[1].config.config.parameters.some(parameter => parameter.destination === rapidDestination.id));
+  assert.equal(rapid[1].previous_revision_id, rapid[0].revision_id);
+  assert.equal(playbackEvents().length, 0, "editing while stopped does not count as trying a mapping in playback");
   const state = context.HydraSynthMixer.flush();
   assert.equal(JSON.parse(saved.get("hydra.synth-mixer.v1")).parameters.length, state.parameters.length);
   assert.ok(state.signalLinks, "session exports preserve shared-mix associations");
@@ -116,11 +153,14 @@ function click(id, dataset) { return handlers.click({ target: button(id, dataset
     return null;
   } };
   await handlers.click({ target: shareButton });
+  assert.equal(mappingEvents().at(-1).action, "share");
+  assert.ok(mappingEvents().at(-1).config.signalLinks["mix-a"].id, "the recorded configuration includes shared signal relationships");
   context.HydraSynthMixer.activate();
-  const activeTimers = [...timers.keys()], initialWrites = configurationWrites;
+  const activeTimers = [...timers.keys()], initialWrites = configurationWrites, initialRevisions = mappingEvents().length;
   context.HydraSynthMixer.activate();
   assert.equal(configurationWrites, initialWrites, "revisiting unchanged shared signals does not rewrite engine config");
   assert.deepEqual([...timers.keys()], activeTimers, "revisiting Synth keeps its input and UI timers");
+  assert.equal(mappingEvents().length, initialRevisions, "revisiting an unchanged shared configuration creates no revision");
   const shared = context.HydraSignalLibrary.getState();
   shared.mixes[0].bus.name = "Edited elsewhere"; shared.mixes[0].revision++;
   context.HydraSignalLibrary.replaceState(shared);
@@ -129,9 +169,31 @@ function click(id, dataset) { return handlers.click({ target: button(id, dataset
   assert.equal(context.HydraSynthMixer.getState().buses[0].name, "Edited elsewhere", "linked edits are adopted on workspace return");
   assert.match(element("sm-shared-mix").innerHTML, /New shared input/, "newly shared inputs appear on return");
   assert.equal(configurationWrites, initialWrites + 1, "only an actual linked edit updates the engine");
+  assert.equal(mappingEvents().at(-1).action, "shared_sync");
+  assert.equal(mappingEvents().at(-1).config.config.buses[0].name, "Edited elsewhere");
+  assert.equal(mappingEvents().at(-1).config.signalLinks["mix-a"].revision, shared.mixes[0].revision);
   assert.equal(activations, 1, "shared signal refresh cannot restart the input engine");
   assert.equal(transportStops, 0);
   assert.deepEqual([...timers.keys()], activeTimers);
+  const playPending = click("sm-play");
+  assert.equal(playbackEvents().length, 0, "clicking Play while preparation is pending does not count as actual playback");
+  finishStart(); await playPending;
+  assert.equal(playbackEvents().at(-1).phase, "start");
+  assert.equal(playbackEvents().at(-1).revision_id, mappingEvents().at(-1).revision_id);
+  assert.equal(context.HydraSynthMixer.mappingStudyContext().revision_id, mappingEvents().at(-1).revision_id, "real output can link to the active mapping revision");
+  const beforeFader = mappingEvents().length;
+  for (const value of [66, 67]) { control.valueAsNumber = value; handlers.input({ target: control }); }
+  const faderRevisions = mappingEvents().slice(beforeFader);
+  assert.deepEqual(faderRevisions.map(event => event.config.config.parameters[0].value), [66, 67], "each accepted slider intermediate is retained");
+  assert.deepEqual(playbackEvents().slice(-2).map(event => [event.phase, event.revision_id]),
+    faderRevisions.map(event => ["configuration_change", event.revision_id]), "mapping edits during playback link to their precise revision");
+  const noChangeEvents = studyEvents.length;
+  for (const refresh of timers.values()) refresh();
+  assert.equal(mappingEvents().length, beforeFader + 2, "normal input refresh does not create mapping revisions");
+  assert.ok(studyEvents.slice(noChangeEvents).every(event => event.type !== "mapping.playback"), "unchanged playback status is deduplicated");
+  await click("sm-stop");
+  assert.equal(playbackEvents().at(-1).phase, "stop");
+  assert.equal(playbackEvents().at(-1).revision_id, faderRevisions.at(-1).revision_id);
   context.HydraSynthMixer.deactivate();
   assert.equal(timers.size, 0);
   const changeControl = (key, value) => handlers.change({ target: { id: `sm-${key}`, dataset: { control: key },
@@ -157,8 +219,48 @@ function click(id, dataset) { return handlers.click({ target: button(id, dataset
   assert.equal(element("sm-apply-patch").disabled, false);
   assert.equal(JSON.parse(saved.get("hydra.synth-mixer.v1")).controls.patchList, "A001, H128");
   assert.equal(JSON.stringify(context.HydraSynthMixer.flush().rap), JSON.stringify(savedRap));
+  shareButton.dataset.action = "detach-mix";
+  await handlers.click({ target: shareButton });
+  assert.equal(mappingEvents().at(-1).action, "detach_shared");
+  assert.deepEqual(mappingEvents().at(-1).config.signalLinks, {}, "making a shared mix independent records the detached relation");
+  element("sm-shared-mix").value = context.HydraSignalLibrary.getState().mixes.find(mix => mix.bus.name === "New shared input").id;
+  await click("sm-add-shared");
+  assert.equal(mappingEvents().at(-1).action, "attach_shared");
+  const attached = mappingEvents().at(-1), addedBus = attached.config.config.buses.at(-1);
+  assert.equal(attached.config.signalLinks[addedBus.id].id, element("sm-shared-mix").value, "attached definitions and their shared IDs are retained together");
+  const beforeRejectedAttach = mappingEvents().length;
+  await click("sm-add-shared");
+  assert.equal(mappingEvents().length, beforeRejectedAttach, "rejected duplicate shared attachment creates no revision");
+  handlers.change({ target: { id: "sm-mode", dataset: {}, value: "demo", closest: () => null, hasAttribute: () => false } });
+  assert.equal(mappingEvents().at(-1).action, "mode");
+  assert.equal(mappingEvents().at(-1).config.config.mode, "demo");
+  assert.deepEqual(mappingEvents().at(-1).config.signalLinks, {}, "changing input mode records the discarded shared links");
+  const sourceControl = { id: "", dataset: { sourceField: "rangeMode" }, value: "fixed", hasAttribute: () => false, closest(selector) {
+    if (selector === "[data-bus]") return { dataset: { bus: "mix-a" } };
+    if (selector === "[data-source]") return { dataset: { source: "0" } };
+    return null;
+  } };
+  handlers.change({ target: sourceControl });
+  assert.equal(mappingEvents().at(-1).config.config.buses[0].sources[0].rangeMode, "fixed");
+  sourceControl.dataset.sourceField = "inputMin"; sourceControl.valueAsNumber = -2;
+  handlers.change({ target: sourceControl });
+  assert.equal(mappingEvents().at(-1).config.config.buses[0].sources[0].inputMin, -2);
+  const acceptedRange = mappingEvents().length;
+  sourceControl.valueAsNumber = 10;
+  handlers.change({ target: sourceControl });
+  assert.equal(mappingEvents().length, acceptedRange, "a rejected reversed source range is not recorded as an accepted configuration");
+  const rangeAction = { id: "", dataset: { action: "freeze" }, closest(selector) { return selector === "button" ? this : sourceControl.closest(selector); } };
+  await handlers.click({ target: rangeAction });
+  assert.equal(mappingEvents().at(-1).action, "freeze");
+  assert.equal(mappingEvents().at(-1).config.config.buses[0].sources[0].rangeMode, "fixed");
+  rangeAction.dataset.action = "relearn";
+  await handlers.click({ target: rangeAction });
+  const firstRelearn = mappingEvents().at(-1).revision_id;
+  await handlers.click({ target: rangeAction });
+  assert.equal(mappingEvents().at(-1).action, "relearn");
+  assert.notEqual(mappingEvents().at(-1).revision_id, firstRelearn, "deliberate range relearning is retained even if its configured values are already reset");
   storageError = true;
   assert.throws(() => context.HydraSynthMixer.flush(), /Storage full/, "session capture cannot silently persist stale state");
   assert.doesNotThrow(() => context.HydraSynthMixer.save(), "periodic preference saving remains tolerant");
-  console.log("Synth mixer UI: full catalog, percentage strength, live base values, focus preservation, persistent activation, shared signal refresh and session capture passed");
+  console.log("Synth mixer UI: full catalog, live controls, shared signals, complete mapping revisions and actual playback attribution passed");
 })().catch((error) => { console.error(error); process.exitCode = 1; });

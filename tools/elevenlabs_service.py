@@ -530,6 +530,9 @@ class ElevenLabsService:
             (job["id"], job["cache_key"], job["state"], job["created_at"], canonical_json(job)),
         )
         self._db.commit()
+        study = getattr(self, "study_recorder", None)
+        if study is not None:
+            study.record_job("elevenlabs", job)
 
     def _job(self, identifier: str) -> dict[str, Any]:
         self._record_path("jobs", identifier)

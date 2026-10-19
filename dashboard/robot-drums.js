@@ -3,6 +3,7 @@
 // Percussion follows musical contact times. The hardware bridge advances each
 // contact by the configured stroke time; this module never sends positions.
 globalThis.HydraRobotDrums = (() => {
+  const study = (type, payload) => { try { globalThis.HydraStudy?.emit?.(type, payload); } catch (_) {} };
   const STORAGE_KEY = "hydra-robot-drums-v1";
   const MIN_HIT_INTERVAL_MS = 1000;
   const ARMS = [
@@ -82,7 +83,16 @@ globalThis.HydraRobotDrums = (() => {
     let sessionPlayed = 0, sessionSkipped = 0;
     let notesToken = null, notes = [], preview = [];
     const listeners = new Set(), seen = new Map(), lastContact = new Map();
-    const emit = () => { const value = snapshot(); for (const listener of listeners) listener(value); };
+    let studyState = "", studyPerformance = "";
+    const emit = () => {
+      const value = snapshot();
+      if (globalThis.HydraStudy?.emit) {
+        const state = { enabled, phase, error, message, settings: value.settings, scheduled, played, skipped, performance_id: value.sessionToken };
+        const signature = JSON.stringify(state);
+        if (signature !== studyState) { studyState = signature; study("robot.drums.state", { ...state, clock: value.clock }); }
+      }
+      for (const listener of listeners) listener(value);
+    };
     const usable = clock => clock.running && !clock.rateChanging;
 
     function readClock() {
@@ -147,6 +157,12 @@ globalThis.HydraRobotDrums = (() => {
     }
     function observePerformance(performance) {
       if (!session || performance?.token !== session.token) return;
+      if (globalThis.HydraStudy?.emit) {
+        const state = { token: performance.token, state: performance.state, played: performance.played, skipped: performance.skipped,
+          error: performance.error || null, arms: performance.arms || [] };
+        const signature = JSON.stringify(state);
+        if (signature !== studyPerformance) { studyPerformance = signature; study("robot.drums.hardware_state", state); }
+      }
       if (Number.isInteger(performance.played) && performance.played >= 0) {
         played += Math.max(0, performance.played - sessionPlayed);
         sessionPlayed = Math.max(sessionPlayed, performance.played);
@@ -232,13 +248,16 @@ globalThis.HydraRobotDrums = (() => {
       lastHeartbeat = time;
       const operation = Promise.resolve().then(() => {
         if (!enabled || session?.generation !== id) return null;
+        if (batch.length) study("robot.drums.batch_requested", { token, generation: id, events: batch, clock });
         return env.hardware.scheduleDrums({ token, events: batch });
       }).then(result => {
+        if (batch.length && result) study("robot.drums.batch_acknowledged", { token, generation: id, accepted: result.accepted || [],
+          skipped: result.skipped || [], stale: !enabled || session?.generation !== id, performance_state: result.performance?.state || null });
         if (!enabled || session?.generation !== id || !result) return;
         responseReady(result, token);
         scheduled += Array.isArray(result.accepted) ? result.accepted.length : batch.length;
         if (!Number.isInteger(result.performance?.skipped)) skipped += Array.isArray(result.skipped) ? result.skipped.length : 0;
-      }).catch(failure => { if (enabled && session?.generation === id) fail(failure); })
+      }).catch(failure => { if (batch.length) study("robot.drums.batch_failed", { token, generation: id, error: String(failure.message || failure).slice(0, 1000) }); if (enabled && session?.generation === id) fail(failure); })
         .finally(() => { if (scheduleTask === operation) scheduleTask = null; emit(); });
       scheduleTask = operation;
     }

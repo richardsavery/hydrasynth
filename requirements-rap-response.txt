@@ -1,2 +1,4 @@
 # Local Whisper small transcription, using CPU int8 inference.
 faster-whisper>=1.2,<2
+# Local pitch correction and duration-preserving vocal effects.
+numpy>=1.24,<3

@@ -21,6 +21,7 @@ import re
 import shutil
 import sqlite3
 import ssl
+import subprocess
 import threading
 import time
 from urllib import error, request
@@ -36,6 +37,8 @@ from elevenlabs_service import (
 )
 from rap_transcription import MODEL_ID as TRANSCRIPTION_MODEL_ID, TranscriptionError, WhisperSmallTranscriber
 from elevenlabs_realtime import extract_stems
+from rap_voice import (DEFAULT_EFFECTS, VOICES, VoiceChangerClient, render_vocal,
+                       remix_vocal, validate_effects)
 
 API_PREFIX = "/api/rap-response"
 PROVIDER_ROOT = "https://api.elevenlabs.io/v1"
@@ -47,7 +50,12 @@ MAX_JSON_BYTES = 256 * 1024
 MAX_ACTIVE_JOBS = 2
 IDENTIFIER = re.compile(r"^[0-9a-f]{32}$")
 REQUEST_ID = re.compile(r"^[A-Za-z0-9_-]{8,100}$")
-ACTIVE = {"queued", "transcribing", "writing", "generating", "isolating"}
+ACTIVE = {"queued", "transcribing", "writing", "generating", "isolating", "converting", "rendering"}
+ACTIVE_SQL = "('queued','transcribing','writing','generating','isolating','converting','rendering')"
+VOICE_MODEL_ID = "eleven_multilingual_sts_v2"
+VOICE_RECIPE = {"model_id": VOICE_MODEL_ID, "output_format": "pcm_24000", "seed": 1729,
+                "voice_settings": {"stability": .5, "similarity_boost": .85, "style": 0.0,
+                                   "use_speaker_boost": True}, "remove_background_noise": False}
 DEFAULTS = {"bpm": 95, "style": "boom_bap", "bars": 4}
 # Curated, completed ElevenMusic vocal finetunes. Use the base model declared
 # by each finetune rather than applying v2 voices to an unrelated model version.
@@ -96,10 +104,29 @@ def validate_input(payload):
     vocal_preset = payload.get("vocal_preset", "")
     if not isinstance(vocal_preset, str) or (vocal_preset and vocal_preset not in VOCAL_PRESETS):
         raise ServiceError("Choose deep_hiphop, emo_trap or an empty vocal preset for an original voice.")
-    settings = {"bpm": float(bpm), "style": style, "bars": bars, "output_mode": output_mode, "vocal_preset": vocal_preset}
+    voice = payload.get("voice", "")
+    if not isinstance(voice, str) or (voice and voice not in VOICES):
+        raise ServiceError("Choose one of the six saved rap voices.")
+    if voice and vocal_preset:
+        raise ServiceError("Choose either a saved rap voice or a legacy vocal preset.")
+    text_mode = payload.get("text_mode", "reply")
+    if not isinstance(text_mode, str) or text_mode not in {"reply", "lyrics"}:
+        raise ServiceError("Choose a rap reply or perform your text.")
+    if text_mode == "lyrics" and "text" not in payload:
+        raise ServiceError("Type the words to perform; microphone recordings create rap replies.")
+    if not isinstance(payload.get("effects", {}), dict):
+        raise ServiceError("Voice effects must be a settings object.")
+    effects = validate_effects(payload.get("effects", {}))
+    settings = {"bpm": float(bpm), "style": style, "bars": bars, "output_mode": output_mode,
+                "vocal_preset": vocal_preset, "voice": voice, "text_mode": text_mode, "effects": effects}
     audio = None
     if "text" in payload:
         settings.update(input_kind="text", transcript=_clean_text(payload["text"]))
+        if text_mode == "lyrics":
+            text = payload["text"].replace("\r\n", "\n").replace("\r", "\n").strip()
+            if len(text.split()) > bars * 12:
+                raise ServiceError(f"Use at most {bars * 12} words for a {bars}-bar performance.")
+            settings["transcript"] = text
     else:
         encoded = payload["audio_base64"]
         if not isinstance(encoded, str) or len(encoded) > 4 * ((MAX_AUDIO_BYTES + 2) // 3):
@@ -174,7 +201,12 @@ def lyrics_from_plan(plan):
 
 def music_request(job):
     vocal_preset = job.get("vocal_preset", "")
-    if vocal_preset:
+    if job.get("voice"):
+        preset = VOCAL_PRESETS[DEFAULT_VOCAL_PRESET]
+        if (job.get("source_vocal_preset") != DEFAULT_VOCAL_PRESET or job.get("source_finetune_id") != preset["finetune_id"]
+                or job.get("model_id") != preset["model_id"]):
+            raise GenerationError("The saved source performer is unavailable. No different voice was substituted.")
+    elif vocal_preset:
         preset = VOCAL_PRESETS.get(vocal_preset)
         if not preset or any(job.get(key) != preset[key] for key in ("finetune_id", "model_id")):
             raise GenerationError("The selected vocal preset is unavailable. No music was generated and no different voice was substituted.")
@@ -186,7 +218,9 @@ def music_request(job):
         "negative_styles": ["spoken dialogue", "spoken word", "singing", "a cappella", "long instrumental intro", "backing choir"],
         "context_adherence": "high",
     }]}}
-    if vocal_preset:
+    if job.get("voice"):
+        result["finetune_id"] = job["source_finetune_id"]
+    elif vocal_preset:
         result["finetune_id"] = job["finetune_id"]
     return result
 
@@ -270,7 +304,7 @@ class _Cancelled(Exception):
 
 
 class RapResponseService:
-    def __init__(self, storage_root, env_path, *, client=None, music_client=None, transcriber=None, start_worker=True):
+    def __init__(self, storage_root, env_path, *, client=None, music_client=None, voice_client=None, transcriber=None, start_worker=True):
         self.root = Path(storage_root)
         self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
         self._storage_lock = (self.root / ".service.lock").open("a")
@@ -282,6 +316,7 @@ class RapResponseService:
         self._api_key, self.timeout, self._config_issues = load_configuration(Path(env_path))
         self.client = client or RapResponseClient(self._api_key, self.timeout)
         self.music_client = music_client or ElevenLabsClient(self._api_key, self.timeout)
+        self.voice_client = voice_client or VoiceChangerClient(self._api_key, self.timeout)
         self.transcriber = transcriber or WhisperSmallTranscriber(self.root.parent / "whisper" / "small")
         self.ffmpeg, self.ffprobe = self._find_audio_tool("ffmpeg"), self._find_audio_tool("ffprobe")
         self._lock = threading.RLock()
@@ -291,7 +326,7 @@ class RapResponseService:
         self._db.execute("PRAGMA journal_mode=WAL")
         self._db.execute("CREATE TABLE IF NOT EXISTS responses (id TEXT PRIMARY KEY, request_id TEXT UNIQUE NOT NULL, request_hash TEXT NOT NULL, state TEXT NOT NULL, created_at TEXT NOT NULL, body TEXT NOT NULL)")
         self._db.commit()
-        for (body,) in self._db.execute("SELECT body FROM responses WHERE state IN ('queued','transcribing','writing','generating','isolating')").fetchall():
+        for (body,) in self._db.execute("SELECT body FROM responses WHERE state IN " + ACTIVE_SQL).fetchall():
             job = json.loads(body)
             job.update(state="unknown", error="The dashboard stopped before this response finished. No automatic retry was made.")
             if job.get("vocal_state") in {"queued", "isolating"}:
@@ -322,6 +357,8 @@ class RapResponseService:
                 "model_id": MODEL_ID, "transcription_model_id": TRANSCRIPTION_MODEL_ID,
                 "vocal_presets": [{"id": key, **preset} for key, preset in VOCAL_PRESETS.items()],
                 "default_vocal_preset": DEFAULT_VOCAL_PRESET,
+                "voices": [{"id": key, **voice} for key, voice in VOICES.items()], "default_voice": "eva",
+                "default_effects": dict(DEFAULT_EFFECTS), "voice_model_id": VOICE_MODEL_ID,
                 "transcription_ready": transcription["ready"], "transcription_issues": transcription["issues"],
                 "max_text_length": MAX_TEXT_LENGTH,
                 "max_audio_bytes": MAX_AUDIO_BYTES, "max_recording_seconds": MAX_RECORDING_SECONDS, "bpm_min": 70, "bpm_max": 140}
@@ -334,6 +371,13 @@ class RapResponseService:
         result.setdefault("vocal_preset", "")
         result.setdefault("vocal_preset_label", "Original")
         result.setdefault("finetune_id", None)
+        result.setdefault("voice", "")
+        result.setdefault("voice_label", "Original")
+        result.setdefault("voice_id", None)
+        result.setdefault("voice_model_id", None)
+        result.setdefault("text_mode", "reply")
+        result.setdefault("effects", dict(DEFAULT_EFFECTS))
+        result["can_apply_effects"] = bool(job["state"] == "complete" and job.get("_clean_vocal_filename") and job.get("_instrumental_filename"))
         return result
 
     def _write(self, job):
@@ -341,6 +385,9 @@ class RapResponseService:
             job["updated_at"] = utc_now()
             self._db.execute("UPDATE responses SET state=?,body=? WHERE id=?", (job["state"], canonical_json(job), job["id"]))
             self._db.commit()
+            study = getattr(self, "study_recorder", None)
+            if study is not None:
+                study.record_job("rap-response", job)
 
     def _job(self, identifier):
         if not isinstance(identifier, str) or not IDENTIFIER.fullmatch(identifier):
@@ -370,7 +417,9 @@ class RapResponseService:
         # mix likewise preserves requests saved before output modes existed.
         request_hash = digest({key: value for key, value in settings.items()
                                if not (key == "output_mode" and value == "mix")
-                               and not (key == "vocal_preset" and value == "")})
+                               and not (key in {"vocal_preset", "voice"} and value == "")
+                               and not (key == "text_mode" and value == "reply")
+                               and not (key == "effects" and value == DEFAULT_EFFECTS)})
         with self._lock:
             existing = self._db.execute("SELECT request_hash,body FROM responses WHERE request_id=?", (request_id,)).fetchone()
             if existing:
@@ -382,6 +431,8 @@ class RapResponseService:
                 raise ServiceError(" ".join(status["issues"]), 503)
             if audio is not None and not status["transcription_ready"]:
                 raise ServiceError(" ".join(status["transcription_issues"]), 503)
+            if self._needs_voice_processing(settings):
+                self._require_local_effects()
             active = self._active_count()
             if active >= MAX_ACTIVE_JOBS:
                 raise ServiceError("Wait for a rap response to finish before starting another.", 429)
@@ -395,13 +446,21 @@ class RapResponseService:
                     output.flush()
                     os.fsync(output.fileno())
             preset = VOCAL_PRESETS.get(settings["vocal_preset"])
+            voice = VOICES.get(settings["voice"])
+            source_voice = VOCAL_PRESETS[DEFAULT_VOCAL_PRESET] if voice else None
             job = {"id": identifier, "request_id": request_id, **{key: value for key, value in settings.items() if key != "audio_digest"},
                    "state": "queued", "lyrics": "", "audio_url": None, "vocal_audio_url": None,
                    "vocal_state": "not_requested", "error": None, "timings": {},
                    "requested_duration_ms": round(settings["bars"] * 240000 / settings["bpm"]),
                    "vocal_preset_label": preset["label"] if preset else "Original",
                    "finetune_id": preset["finetune_id"] if preset else None,
-                   "model_id": preset["model_id"] if preset else MODEL_ID,
+                   "model_id": source_voice["model_id"] if source_voice else preset["model_id"] if preset else MODEL_ID,
+                   "source_vocal_preset": DEFAULT_VOCAL_PRESET if source_voice else None,
+                   "source_finetune_id": source_voice["finetune_id"] if source_voice else None,
+                   "voice_label": voice["label"] if voice else "Original",
+                   "voice_id": voice["voice_id"] if voice else None,
+                   "voice_model_id": VOICE_MODEL_ID if voice else None,
+                   "voice_generation_settings": {**copy.deepcopy(VOICE_RECIPE), "voice_id": voice["voice_id"]} if voice else None,
                    "created_at": utc_now(), "updated_at": utc_now()}
             self._db.execute("INSERT INTO responses VALUES (?,?,?,?,?,?)", (identifier, request_id, request_hash, "queued", job["created_at"], canonical_json(job)))
             self._db.commit()
@@ -409,7 +468,86 @@ class RapResponseService:
             return self._public(job)
 
     def _active_count(self):
-        return self._db.execute("SELECT COUNT(*) FROM responses WHERE state IN ('queued','transcribing','writing','generating','isolating')").fetchone()[0]
+        return self._db.execute("SELECT COUNT(*) FROM responses WHERE state IN " + ACTIVE_SQL).fetchone()[0]
+
+    @staticmethod
+    def _needs_voice_processing(job):
+        return bool(job.get("voice") or job.get("effects", DEFAULT_EFFECTS) != DEFAULT_EFFECTS)
+
+    @staticmethod
+    def _require_local_effects():
+        try:
+            __import__("numpy")
+        except ImportError:
+            raise ServiceError("Install NumPy in the dashboard's Python environment before selecting a rap voice or applying effects.", 503) from None
+
+    @staticmethod
+    def _validate_voice_recipe(job):
+        if not job.get("voice"):
+            return
+        voice = VOICES.get(job["voice"])
+        expected = {**copy.deepcopy(VOICE_RECIPE), "voice_id": voice["voice_id"]} if voice else None
+        if (not voice or job.get("voice_id") != voice["voice_id"] or job.get("voice_model_id") != VOICE_MODEL_ID
+                or job.get("voice_generation_settings") != expected):
+            raise GenerationError("The selected voice recipe is unavailable. No different voice was substituted.")
+        preset = VOCAL_PRESETS[DEFAULT_VOCAL_PRESET]
+        if (job.get("source_vocal_preset") != DEFAULT_VOCAL_PRESET or job.get("source_finetune_id") != preset["finetune_id"]
+                or job.get("model_id") != preset["model_id"]):
+            raise GenerationError("The saved source performer is unavailable. No different voice was substituted.")
+
+    def apply_effects(self, identifier, payload):
+        request_id = payload.get("request_id")
+        if not isinstance(request_id, str) or not REQUEST_ID.fullmatch(request_id):
+            raise ServiceError("Use a request ID of 8 to 100 letters, digits, hyphens or underscores.")
+        if not isinstance(payload.get("effects", {}), dict):
+            raise ServiceError("Voice effects must be a settings object.")
+        effects = validate_effects(payload.get("effects", {}))
+        request_hash = digest({"source_response_id": identifier, "effects": effects, "operation": "effects"})
+        with self._lock:
+            existing = self._db.execute("SELECT request_hash,body FROM responses WHERE request_id=?", (request_id,)).fetchone()
+            if existing:
+                if existing[0] != request_hash:
+                    raise ServiceError("This request ID already belongs to different voice effects.", 409)
+                return self._public(json.loads(existing[1]))
+            source = self._job(identifier)
+            if not self._public(source)["can_apply_effects"]:
+                raise ServiceError("Choose a completed rap with a saved clean voice before applying effects.", 409)
+            if self._closed or not self.ffmpeg or not self.ffprobe:
+                raise ServiceError("Local voice effects are unavailable while the dashboard is closing or audio tools are missing.", 503)
+            self._require_local_effects()
+            if self._active_count() >= MAX_ACTIVE_JOBS:
+                raise ServiceError("Wait for a rap response to finish before applying voice effects.", 429)
+            source_directory = self.root / identifier
+            sources = []
+            for field in ("_clean_vocal_filename", "_instrumental_filename"):
+                path = source_directory / source[field]
+                if not path.is_file() or not path.resolve().is_relative_to(source_directory.resolve()):
+                    raise ServiceError("The saved clean voice or backing music is missing.", 404)
+                sources.append((field, path))
+            child_id = uuid.uuid4().hex
+            directory = self.root / child_id
+            directory.mkdir(mode=0o700)
+            try:
+                for field, path in sources:
+                    shutil.copyfile(path, directory / path.name)
+                retained = ("bpm", "style", "bars", "input_kind", "transcript", "text_mode", "lyrics", "output_mode",
+                            "vocal_preset", "vocal_preset_label", "finetune_id", "model_id", "requested_duration_ms",
+                            "source_vocal_preset", "source_finetune_id",
+                            "voice", "voice_id", "voice_label", "voice_model_id", "voice_generation_settings",
+                            "voice_conversion", "duration_seconds", "timing_warning")
+                job = {key: copy.deepcopy(source[key]) for key in retained if key in source}
+                job.update(id=child_id, request_id=request_id, source_response_id=identifier, effects=effects,
+                           state="queued", vocal_state="queued", audio_url=None, vocal_audio_url=None, error=None,
+                           timings={}, created_at=utc_now(), updated_at=utc_now(), _operation="effects")
+                for field, path in sources:
+                    job[field] = path.name
+                self._db.execute("INSERT INTO responses VALUES (?,?,?,?,?,?)", (child_id, request_id, request_hash, "queued", job["created_at"], canonical_json(job)))
+                self._db.commit()
+            except Exception:
+                shutil.rmtree(directory, ignore_errors=True)
+                raise
+            self._queue.put_nowait(("effects", child_id))
+            return self._public(job)
 
     def isolate_vocals(self, identifier):
         with self._lock:
@@ -461,6 +599,106 @@ class RapResponseService:
 
     def _validate_music(self, path, duration):
         return validate_audio(path, duration, self.ffmpeg, self.ffprobe)
+
+    def _normalize_vocal(self, source, destination):
+        """Voice Changer receives the same mono PCM container as the auditions."""
+        try:
+            result = subprocess.run([self.ffmpeg, "-nostdin", "-v", "error", "-xerror", "-n",
+                                     "-i", str(source), "-map", "0:a:0", "-ac", "1", "-ar", "24000",
+                                     "-c:a", "pcm_s16le", "-f", "wav", str(destination)],
+                                    capture_output=True, timeout=120, check=False)
+            if result.returncode:
+                raise ValueError
+            with wave.open(str(destination), "rb") as audio:
+                if (audio.getnchannels(), audio.getsampwidth(), audio.getframerate(), audio.getcomptype()) != (1, 2, 24000, "NONE"):
+                    raise ValueError
+                if not 0 < audio.getnframes() <= 24000 * 120:
+                    raise ValueError
+                if len(audio.readframes(audio.getnframes())) != audio.getnframes() * 2:
+                    raise ValueError
+        except (OSError, ValueError, wave.Error, EOFError, subprocess.SubprocessError):
+            destination.unlink(missing_ok=True)
+            raise GenerationError("The isolated vocal could not be prepared for voice conversion.") from None
+
+    def _render_voice(self, job):
+        directory = self.root / job["id"]
+        vocal, mixed = directory / "vocal.wav", directory / "response.wav"
+
+        def render():
+            details = render_vocal(directory / job["_clean_vocal_filename"], vocal, job["effects"],
+                                   bpm=job["bpm"], ffmpeg=self.ffmpeg)
+            self._continue(job)
+            mix_details = remix_vocal(vocal, directory / job["_instrumental_filename"], mixed, ffmpeg=self.ffmpeg)
+            self._continue(job)
+            duration = job.get("duration_seconds", job["requested_duration_ms"] / 1000)
+            return details, mix_details, self._validate_music(vocal, duration), self._validate_music(mixed, duration)
+
+        details, mix_details, vocal_metadata, mix_metadata = self._stage(job, "rendering", render)
+        with self._lock:
+            self._continue(job)
+            job.update(state="complete", vocal_state="complete", error=None,
+                       audio_url=f"{API_PREFIX}/responses/{job['id']}/audio",
+                       vocal_audio_url=f"{API_PREFIX}/responses/{job['id']}/vocals/audio",
+                       _filename=mixed.name, _content_type=mix_metadata["content_type"],
+                       _vocal_filename=vocal.name, _vocal_content_type=vocal_metadata["content_type"],
+                       duration_seconds=mix_metadata["duration_seconds"],
+                       vocal_duration_seconds=vocal_metadata["duration_seconds"],
+                       voice_effects=details, voice_mix=mix_details)
+            self._write(job)
+
+    def _finish_voice(self, job):
+        """Replace only the vocal; no selected-voice job exposes the source voice."""
+        directory = self.root / job["id"]
+        archive = directory / "vocals.download.zip"
+        extracted = directory / ("vocals.tmp-" + uuid.uuid4().hex)
+        normalized = directory / "normalized-vocal.wav"
+        try:
+            with self._lock:
+                self._continue(job)
+                job.update(vocal_state="isolating")
+                self._write(job)
+
+            def separate():
+                self.music_client.separate_stems(directory / job["_raw_filename"], archive, "two_stems_v1")
+                self._continue(job)
+                stems = extract_stems(archive, extracted, job["duration_seconds"], self._validate_music)
+                vocals = [stem for stem in stems if stem["id"] in {"vocals", "vocal", "voice"}]
+                backing = [stem for stem in stems if stem["id"] in {"instrumental", "instrumentals", "no_vocals", "no_vocal",
+                                                                       "without_vocals", "accompaniment", "music", "backing", "backing_track"}]
+                if len(stems) != 2 or len(vocals) != 1 or len(backing) != 1:
+                    raise GenerationError("Voice conversion needs one identifiable vocal stem and one instrumental stem. No different voice was substituted.")
+                return vocals[0], backing[0]
+
+            vocal, instrumental = self._stage(job, "isolating", separate)
+            with self._lock:
+                self._continue(job)
+                raw_vocal = directory / ("source-vocal." + vocal["extension"])
+                backing = directory / ("instrumental." + instrumental["extension"])
+                (extracted / vocal["filename"]).rename(raw_vocal)
+                (extracted / instrumental["filename"]).rename(backing)
+                job.update(_raw_vocal_filename=raw_vocal.name, _instrumental_filename=backing.name)
+                self._write(job)
+            self._normalize_vocal(raw_vocal, normalized)
+            self._continue(job)
+            clean = directory / "clean-vocal.wav"
+            if job.get("voice"):
+                self._validate_voice_recipe(job)
+                job["voice_conversion"] = self._stage(job, "converting", lambda: self.voice_client.convert(normalized, clean, job["voice_id"]))
+                self._continue(job)
+                self._validate_music(clean, vocal["duration_seconds"])
+            else:
+                normalized.rename(clean)
+            with self._lock:
+                self._continue(job)
+                job["_clean_vocal_filename"] = clean.name
+                self._write(job)
+            self._render_voice(job)
+        except (ValueError, zipfile.BadZipFile, RuntimeError):
+            raise GenerationError("The isolated voice could not be processed. No different voice was substituted and no automatic retry was made.") from None
+        finally:
+            normalized.unlink(missing_ok=True)
+            archive.unlink(missing_ok=True)
+            shutil.rmtree(extracted, ignore_errors=True)
 
     def _isolate(self, job):
         identifier = job["id"]
@@ -532,37 +770,51 @@ class RapResponseService:
                 return
             # Claim the job before releasing the lock. A duplicate queue entry
             # or caller cannot submit the same provider stage twice.
-            job["state"] = "transcribing" if job["input_kind"] == "audio" else "writing"
+            job["state"] = ("rendering" if job.get("_operation") == "effects" else "transcribing" if job["input_kind"] == "audio"
+                            else "generating" if job.get("text_mode") == "lyrics" else "writing")
             self._write(job)
         started = time.monotonic()
         queued = max(0, time.time() - datetime.fromisoformat(job["created_at"].replace("Z", "+00:00")).timestamp())
         job["timings"]["queue_seconds"] = round(queued, 4)
         temporary = self.root / identifier / "music.download"
         try:
+            self._validate_voice_recipe(job)
+            if job.get("_operation") == "effects":
+                self._render_voice(job)
+                return
             if job["input_kind"] == "audio":
                 result = self._stage(job, "transcribing", lambda: self.transcriber.transcribe(self.root / identifier / "input.wav"))
                 self._continue(job)
                 job["transcript"] = transcription_text(result)
-            prompt = lyric_prompt(job["transcript"], job["bpm"], job["style"], job["bars"])
-            plan = self._stage(job, "writing", lambda: self.client.plan(prompt, job["requested_duration_ms"]))
-            self._continue(job)
-            job["lyrics"] = lyrics_from_plan(plan)
+            if job.get("text_mode") == "lyrics":
+                job["lyrics"] = job["transcript"]
+            else:
+                prompt = lyric_prompt(job["transcript"], job["bpm"], job["style"], job["bars"])
+                plan = self._stage(job, "writing", lambda: self.client.plan(prompt, job["requested_duration_ms"]))
+                self._continue(job)
+                job["lyrics"] = lyrics_from_plan(plan)
             self._stage(job, "generating", lambda: self.music_client.generate(music_request(job), temporary))
             self._continue(job)
             metadata = self._validate_music(temporary, job["requested_duration_ms"] / 1000)
             with self._lock:
                 self._continue(job)
-                destination = temporary.with_name("response." + metadata["extension"])
+                processing = self._needs_voice_processing(job)
+                destination = temporary.with_name(("source-response." if processing else "response.") + metadata["extension"])
                 temporary.replace(destination)
-                job.update(audio_url=f"{API_PREFIX}/responses/{identifier}/audio", error=None,
-                           _filename=destination.name, _content_type=metadata["content_type"],
-                           duration_seconds=metadata["duration_seconds"], timing_warning=metadata.get("timing_warning"))
-                if job.get("output_mode", "mix") == "vocals":
+                job.update(error=None, duration_seconds=metadata["duration_seconds"], timing_warning=metadata.get("timing_warning"))
+                if processing:
+                    job.update(_raw_filename=destination.name, _raw_content_type=metadata["content_type"])
+                else:
+                    job.update(audio_url=f"{API_PREFIX}/responses/{identifier}/audio",
+                               _filename=destination.name, _content_type=metadata["content_type"])
+                if processing or job.get("output_mode", "mix") == "vocals":
                     job.update(state="isolating", vocal_state="queued")
                 else:
                     job["state"] = "complete"
                 self._write(job)
-            if job.get("output_mode") == "vocals":
+            if processing:
+                self._finish_voice(job)
+            elif job.get("output_mode") == "vocals":
                 self._isolate(job)
         except _Cancelled:
             pass
@@ -592,7 +844,10 @@ class RapResponseService:
                     if identifier is None or self._closed:
                         return
                     if isinstance(identifier, tuple):
-                        self._run_vocal_job(identifier[1])
+                        if identifier[0] == "effects":
+                            self._run_job(identifier[1])
+                        else:
+                            self._run_vocal_job(identifier[1])
                     else:
                         self._run_job(identifier)
                 finally:
@@ -640,6 +895,8 @@ class RapResponseService:
                     return 200, self.cancel(parts[1])
                 if parts[2] == "vocals" and method == "POST":
                     return 202, self.isolate_vocals(parts[1])
+                if parts[2] == "effects" and method == "POST":
+                    return 202, self.apply_effects(parts[1], payload or {})
             if parts[0] == "responses" and len(parts) == 4 and parts[2:] == ["vocals", "audio"] and method == "GET":
                 return 200, self.audio_response(parts[1], vocals=True)
             raise ServiceError("Endpoint not found.", 404)

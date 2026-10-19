@@ -1,14 +1,18 @@
 #!/usr/bin/env python3
 """Exercise local rap-response HTTP boundaries without any provider requests."""
+import hashlib
 import http.client
+import io
 import json
 from pathlib import Path
 import tempfile
 import threading
 import unittest
+import wave
 
 from elevenlabs_service import FileResponse
-from hydra_dashboard import DashboardHTTPServer, SnapshotStore, handler_for
+from hydra_dashboard import DASHBOARD_DIR, DashboardHTTPServer, SnapshotStore, handler_for
+from rap_voice import VOICES
 
 
 class RapResponseHTTPTests(unittest.TestCase):
@@ -54,8 +58,11 @@ class RapResponseHTTPTests(unittest.TestCase):
     def test_response_routes_are_separate_and_assets_are_public(self):
         base = "/api/rap-response"
         headers = {"Content-Type": "application/json", "Origin": f"http://127.0.0.1:{self.port}"}
-        payload = {"request_id": "response-fixture", "text": "I missed the bus", "bpm": 96}
-        for path, document in (("/responses", payload), ("/responses/fixture/cancel", {}), ("/responses/fixture/vocals", {})):
+        payload = {"request_id": "response-fixture", "text": "I missed the bus", "bpm": 96,
+                   "voice": "elowen", "text_mode": "lyrics", "effects": {"pitch_semitones": -2}}
+        effects = {"request_id": "effects-fixture", "effects": {"autotune_amount": 0.8, "key": 5, "scale": "minor"}}
+        for path, document in (("/responses", payload), ("/responses/fixture/cancel", {}),
+                               ("/responses/fixture/vocals", {}), ("/responses/fixture/effects", effects)):
             with self.subTest(path=path):
                 self.assertEqual(self.request("POST", base + path, json.dumps(document), headers)[0], 200)
                 self.assertEqual(self.calls[-1], ("POST", base + path, document))
@@ -181,6 +188,49 @@ class RapResponseHTTPTests(unittest.TestCase):
         self.assertEqual((status, body, headers["Content-Length"]), (200, b"", "10"))
         self.assertEqual(self.calls[-1], ("GET", path, None))
         self.assertEqual(self.request("GET", path, headers={"Origin": "https://elsewhere.example"})[0], 403)
+
+    def test_packaged_voice_demos_play_without_a_generation_service(self):
+        self.server.RequestHandlerClass = handler_for(SnapshotStore("demo"))
+        self.assertEqual(self.request("GET", "/api/rap-response/status")[0], 503)
+        manifest = json.loads((DASHBOARD_DIR / "rap-voice-demos" / "manifest.json").read_text())
+        self.assertEqual({voice["key"] for voice in manifest["voices"]}, set(VOICES))
+        for voice in manifest["voices"]:
+            with self.subTest(voice=voice["key"]):
+                path = f'/rap-voice-demos/{voice["key"]}.wav'
+                status, headers, body = self.request("GET", path)
+                self.assertEqual(status, 200)
+                self.assertEqual(headers["Content-Type"], "audio/wav")
+                self.assertEqual(headers["Accept-Ranges"], "bytes")
+                self.assertEqual(int(headers["Content-Length"]), len(body))
+                self.assertEqual(hashlib.sha256(body).hexdigest(), voice["sha256"])
+                self.assertEqual(voice["voice_id"], VOICES[voice["key"]]["voice_id"])
+                with wave.open(io.BytesIO(body), "rb") as audio:
+                    self.assertEqual((audio.getframerate(), audio.getnchannels(), audio.getsampwidth()), (24000, 1, 2))
+                    self.assertAlmostEqual(audio.getnframes() / audio.getframerate(), voice["duration_seconds"])
+                    self.assertGreater(audio.getnframes() / audio.getframerate(), 10)
+                    self.assertEqual(len(audio.readframes(audio.getnframes())), audio.getnframes() * 2)
+                status, headers, response = self.request("HEAD", path)
+                self.assertEqual((status, response, int(headers["Content-Length"])), (200, b"", len(body)))
+                status, headers, response = self.request("GET", path, headers={"Range": "bytes=0-11"})
+                self.assertEqual((status, response), (206, body[:12]))
+                self.assertEqual(response[:4], b"RIFF")
+                self.assertEqual(response[8:], b"WAVE")
+                self.assertEqual(headers["Content-Range"], f"bytes 0-11/{len(body)}")
+                status, headers, response = self.request("HEAD", path, headers={"Range": "bytes=12-43"})
+                self.assertEqual((status, response, headers["Content-Length"]), (206, b"", "32"))
+        self.assertEqual(self.calls, [], "local demo playback never dispatches to a generation service")
+
+    def test_voice_demos_only_expose_the_six_fixed_read_only_assets(self):
+        for path in (
+            "/rap-voice-demos", "/rap-voice-demos/", "/rap-voice-demos/manifest.json",
+            "/rap-voice-demos/unknown.wav", "/rap-voice-demos/../.env",
+            "/rap-voice-demos/%2e%2e/%2e%2e/.env", "/rap-voice-demos/%2e%2e%2fapp.js",
+            "/rap-voice-demos/eva.wav/extra", "/rap-voice-demos/eva.wav%00",
+        ):
+            with self.subTest(path=path):
+                self.assertEqual(self.request("GET", path)[0], 404)
+        self.assertEqual(self.request("POST", "/rap-voice-demos/eva.wav", "{}", {"Content-Type": "application/json"})[0], 405)
+        self.assertEqual(self.calls, [], "demo requests never reach provider-capable services")
 
 
 if __name__ == "__main__":
