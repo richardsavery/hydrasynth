@@ -28,21 +28,21 @@ class Element {
 
 function fixture({ hash = "", saved, unavailableStorage = false } = {}) {
   const ids = new Map();
-  for (const id of ["connections-workspace", "signal-lab-workspace", "elevenlabs-workspace", "music-mixer-workspace", "sonification-kind",
+  for (const id of ["connections-workspace", "signal-lab-workspace", "elevenlabs-workspace", "music-mixer-workspace", "synth-mixer-workspace", "rap-experiment-workspace", "rap-response-workspace", "robot-control-workspace", "robot-setup-workspace", "sonification-kind",
     "connection-input-label", "connection-output-label", "connection-input-light", "connection-output-light",
     "connection-output", "connection-midi-controls", "midi-panel", "panic-button", "connection-recording-pane", "connection-live-pane",
     "test-browser-audio", "browser-audio-status", "return-to-recording"]) ids.set(id, new Element());
   ids.get("connection-output").value = "audio";
-  const links = ["connections", "synth", "drums", "elevenlabs", "mixer"].map((workspace) => new Element({ workspace }));
-  const modes = ["basic", "advanced"].map((detailMode) => new Element({ detailMode }));
+  const links = ["connections", "synth-legacy", "drums", "elevenlabs", "mixer", "synth-mixer", "rap-experiment", "robot-control", "robot-setup", "rap-response"].map((workspace) => new Element({ workspace }));
   const inputs = ["recording", "live"].map((inputPane) => new Element({ inputPane }));
   const skip = new Element();
   const document = { body: new Element(), getElementById: (id) => ids.get(id),
     querySelector: () => skip, querySelectorAll: (selector) => ({ "a[data-workspace]": links,
-      "[data-detail-mode]": modes, "[data-input-pane]": inputs })[selector] || [] };
+      "[data-input-pane]": inputs })[selector] || [] };
   const stored = new Map(saved === undefined ? [] : [["hydra.interface-detail.v1", saved]]);
-  const storage = { getItem(key) { if (unavailableStorage) throw new Error("Unavailable"); return stored.get(key); },
-    setItem(key, value) { if (unavailableStorage) throw new Error("Unavailable"); stored.set(key, value); } };
+  const storageCalls = [];
+  const storage = { getItem(key) { storageCalls.push(["get", key]); if (unavailableStorage) throw new Error("Unavailable"); return stored.get(key); },
+    setItem(key, value) { storageCalls.push(["set", key, value]); if (unavailableStorage) throw new Error("Unavailable"); stored.set(key, value); } };
   const window = new Element(); window.location = { hash }; window.localStorage = storage;
   const history = [];
   window.history = Object.fromEntries(["pushState", "replaceState"].map((method) => [method, (_, __, hash) => {
@@ -51,24 +51,25 @@ function fixture({ hash = "", saved, unavailableStorage = false } = {}) {
   const calls = [];
   const shell = create({ document, window });
   const callbacks = { onNavigate: (view, previous) => calls.push(["navigate", view, previous]),
-    onAdvancedChange: (advanced) => calls.push(["advanced", advanced]),
     onOutputChange: (output) => calls.push(["output", output]), onTestAudio: async () => {} };
-  return { shell, document, window, stored, ids, links, modes, inputs, skip, history, calls, callbacks,
+  return { shell, document, window, stored, storageCalls, ids, links, inputs, skip, history, calls, callbacks,
     start(options = {}) { shell.init({ ...callbacks, ...options }); return this; } };
 }
 
 (async () => {
-  // Start at Connections in Basic mode without creating or replacing engine state.
+  // Start at Connections without creating or replacing engine state.
   const f = fixture().start();
   assert.equal(f.shell.currentView, "connections");
-  assert.equal(f.shell.advanced, false);
-  assert.equal(f.document.body.classes.has("basic-mode"), true);
+  assert.equal("advanced" in f.shell, false);
+  assert.equal("setAdvanced" in f.shell, false);
+  assert.equal(f.document.body.classes.has("basic-mode"), false);
+  assert.equal(f.document.body.classes.has("advanced-mode"), false);
   assert.equal(f.ids.get("connections-workspace").hidden, false);
   assert.equal(f.ids.get("signal-lab-workspace").hidden, true);
   assert.equal(f.ids.get("elevenlabs-workspace").hidden, true);
   assert.equal(f.ids.get("music-mixer-workspace").hidden, true);
   assert.deepEqual(f.history, [{ method: "replaceState", hash: "#connections" }]);
-  assert.deepEqual(f.calls, [["advanced", false], ["navigate", "connections", null]]);
+  assert.deepEqual(f.calls, [["navigate", "connections", null]]);
 
   // Navigating and browser history select the correct engine, exactly once.
   const click = await f.links[2].dispatch("click");
@@ -84,7 +85,7 @@ function fixture({ hash = "", saved, unavailableStorage = false } = {}) {
   assert.equal(f.calls.length, count, "hashchange following navigation must not restart audio twice");
   f.window.location.hash = "#synth";
   await f.window.dispatch("popstate");
-  assert.equal(f.shell.currentView, "synth");
+  assert.equal(f.shell.currentView, "synth-mixer");
   assert.equal(f.history.length, 2, "following history must not append more history entries");
   await f.links[3].dispatch("click");
   assert.equal(f.ids.get("signal-lab-workspace").hidden, true);
@@ -117,24 +118,103 @@ function fixture({ hash = "", saved, unavailableStorage = false } = {}) {
   assert.equal(mixerBookmark.shell.currentView, "mixer", "Mixer demo has its own restorable bookmark");
   assert.equal(mixerBookmark.ids.get("music-mixer-workspace").hidden, false);
   assert.equal(mixerBookmark.ids.get("elevenlabs-workspace").hidden, true);
-  assert.deepEqual(mixerBookmark.calls, [["advanced", false], ["navigate", "mixer", null]]);
+  assert.deepEqual(mixerBookmark.calls, [["navigate", "mixer", null]]);
 
-  // Detail mode changes presentation in-place. Input/output and route do not change.
-  const previousCalls = f.calls.filter((call) => call[0] === "navigate").length;
-  await f.modes[1].dispatch("click");
-  assert.equal(f.shell.advanced, true);
-  assert.equal(f.document.body.classes.has("basic-mode"), false);
-  assert.equal(f.document.body.classes.has("advanced-mode"), true);
-  assert.equal(f.stored.get("hydra.interface-detail.v1"), "advanced");
-  assert.equal(f.calls.filter((call) => call[0] === "navigate").length, previousCalls);
-  assert.equal(f.modes[1].attributes["aria-pressed"], "true");
-  const restored = fixture({ hash: "#signal-lab", saved: "advanced" }).start();
-  assert.equal(restored.shell.currentView, "synth", "existing Signal Lab bookmarks remain valid");
-  assert.equal(restored.shell.advanced, true);
+  await f.links[5].dispatch("click");
+  assert.equal(f.shell.currentView, "synth-mixer");
+  assert.equal(f.ids.get("synth-mixer-workspace").hidden, false);
+  for (const id of ["connections-workspace", "signal-lab-workspace", "elevenlabs-workspace", "music-mixer-workspace"])
+    assert.equal(f.ids.get(id).hidden, true, `${id} stays hidden in Synth mixer`);
+  assert.equal(f.skip.href, "#synth-mixer-workspace");
+  assert.equal(f.links[5].attributes["aria-current"], "page");
+  await f.links[1].dispatch("click");
+  assert.equal(f.ids.get("synth-mixer-workspace").hidden, true);
+  assert.equal(f.ids.get("signal-lab-workspace").hidden, false);
+  const synthMixerBookmark = fixture({ hash: "#synth-mixer" }).start();
+  assert.equal(synthMixerBookmark.shell.currentView, "synth-mixer");
+  assert.equal(synthMixerBookmark.skip.href, "#synth-mixer-workspace");
+
+  await f.links[6].dispatch("click");
+  assert.equal(f.shell.currentView, "rap-experiment");
+  assert.equal(f.ids.get("rap-experiment-workspace").hidden, false);
+  assert.equal(f.skip.href, "#rap-experiment-workspace");
+  assert.equal(f.ids.get("signal-lab-workspace").hidden, true);
+  assert.equal(f.links[9].attributes["aria-current"], "page", "voice experiments remain inside the Rap response navigation group");
+  await f.links[0].dispatch("click");
+  assert.equal(f.ids.get("rap-experiment-workspace").hidden, true);
+  assert.equal(f.links[9].attributes["aria-current"], undefined);
+  assert.equal(fixture({ hash: "#rap-experiment" }).start().shell.currentView, "rap-experiment");
+
+  await f.links[7].dispatch("click");
+  assert.equal(f.shell.currentView, "robot-control");
+  assert.equal(f.ids.get("robot-control-workspace").hidden, false);
+  assert.equal(f.ids.get("rap-experiment-workspace").hidden, true);
+  assert.equal(f.skip.href, "#robot-control-workspace");
+  assert.equal(f.links[7].attributes["aria-current"], "page");
+  await f.links[0].dispatch("click");
+  assert.equal(f.ids.get("robot-control-workspace").hidden, true);
+  assert.equal(fixture({ hash: "#robot-control" }).start().shell.currentView, "robot-control");
+
+  await f.links[8].dispatch("click");
+  assert.equal(f.shell.currentView, "robot-setup");
+  assert.equal(f.ids.get("robot-setup-workspace").hidden, false);
+  assert.equal(f.ids.get("robot-control-workspace").hidden, true);
+  assert.equal(f.skip.href, "#robot-setup-workspace");
+  assert.equal(f.links[8].attributes["aria-current"], "page");
+  await f.links[7].dispatch("click");
+  assert.equal(f.ids.get("robot-setup-workspace").hidden, true);
+  assert.equal(f.ids.get("robot-control-workspace").hidden, false);
+  assert.equal(fixture({ hash: "#robot-setup" }).start().skip.href, "#robot-setup-workspace");
+
+  await f.links[9].dispatch("click");
+  assert.equal(f.shell.currentView, "rap-response");
+  assert.equal(f.ids.get("rap-response-workspace").hidden, false);
+  assert.equal(f.ids.get("robot-control-workspace").hidden, true);
+  assert.equal(f.ids.get("rap-experiment-workspace").hidden, true);
+  assert.equal(f.skip.href, "#rap-response-workspace");
+  assert.equal(f.links[9].attributes["aria-current"], "page");
+  await f.links[0].dispatch("click");
+  assert.equal(f.ids.get("rap-response-workspace").hidden, true);
+  const responseBookmark = fixture({ hash: "#rap-response" }).start();
+  assert.equal(responseBookmark.shell.currentView, "rap-response");
+  assert.equal(responseBookmark.skip.href, "#rap-response-workspace");
+  assert.deepEqual(responseBookmark.calls, [["navigate", "rap-response", null]]);
+
+  // Public navigation separates setup and performance; old Drum bookmarks still resolve.
+  const html = fs.readFileSync(path.join(__dirname, "../dashboard/index.html"), "utf8");
+  const navigation = html.match(/<nav class="dashboard-switcher"[\s\S]*?<\/nav>/)[0];
+  const setupNavigation = navigation.match(/aria-labelledby="workspace-setup-label"[\s\S]*?<\/div>\s*<\/div>/)[0];
+  const useNavigation = navigation.match(/aria-labelledby="workspace-use-label"[\s\S]*?<\/div>\s*<\/div>/)[0];
+  const workspaceLinks = markup => [...markup.matchAll(/data-workspace="([^"]+)"/g)].map(match => match[1]);
+  assert.deepEqual(workspaceLinks(setupNavigation), ["connections", "robot-setup"]);
+  assert.deepEqual(workspaceLinks(useNavigation), ["synth-mixer", "mixer", "rap-response", "robot-control"]);
+  assert.equal(workspaceLinks(navigation).filter(view => view.startsWith("rap-")).length, 1, "rap has one primary tab");
+  const rapResponse = fs.readFileSync(path.join(__dirname, "../dashboard/rap-response.js"), "utf8");
+  assert.match(rapResponse, /href="#rap-experiment" data-workspace="rap-experiment">Voice experiments/);
+  assert.match(navigation, /href="#robot-setup"[^>]*>Keirzo setup<\/a>/);
+  assert.match(navigation, /href="#robot-control"[^>]*>Keirzo control <span data-robot-live-indicator hidden>Live<\/span><\/a>/);
+  assert.doesNotMatch(html, /<a[^>]*data-workspace="drums"/);
+  assert.equal(normalizeView("#drums"), "drums");
+  assert.ok(html.indexOf('src="robot-control.js"') < html.indexOf('src="robot-live.js"'));
+  assert.ok(html.indexOf('src="robot-live.js"') < html.indexOf('src="app.js"'));
+
+  // Historical preferences cannot hide controls or change the selected workspace.
+  assert.doesNotMatch(html, /data-detail-mode|data-advanced|class="basic-mode"|class="advanced-mode"/);
+  for (const value of ["basic", "advanced", "corrupt"]) {
+    const restored = fixture({ hash: "#signal-lab", saved: value }).start();
+    assert.equal(restored.shell.currentView, "synth-legacy", "existing Signal Lab bookmarks remain valid");
+    assert.equal(restored.document.body.classes.has("basic-mode"), false);
+    assert.equal(restored.document.body.classes.has("advanced-mode"), false);
+    assert.deepEqual(restored.storageCalls, [], "navigation no longer reads or writes the removed detail preference");
+  }
   const unavailable = fixture({ unavailableStorage: true }).start();
-  await unavailable.modes[1].dispatch("click");
-  assert.equal(unavailable.shell.advanced, true, "storage failures leave the session usable");
-  assert.equal(fixture({ saved: "corrupt" }).start().shell.advanced, false);
+  assert.equal(unavailable.shell.currentView, "connections", "navigation remains available without browser storage");
+  assert.deepEqual(unavailable.storageCalls, []);
+  assert.equal(fixture({ hash: "#synth" }).start().shell.currentView, "synth-mixer", "Synth bookmark opens the promoted mixer");
+  const presentationCSS = ["workspace-shell.css", "elevenlabs.css", "elevenlabs-realtime.css"]
+    .map(file => fs.readFileSync(path.join(__dirname, "../dashboard", file), "utf8")).join("\n");
+  assert.doesNotMatch(presentationCSS, /basic-mode|advanced-mode|\[data-advanced\]/,
+    "all functional controls remain accessible without a detail-mode CSS dependency");
 
   // Shared status does not connect anything and must not interrupt inspecting another input.
   f.shell.updateConnections({ inputMode: "recording", inputLabel: "Morning movement", inputState: "ready",
@@ -171,6 +251,6 @@ function fixture({ hash = "", saved, unavailableStorage = false } = {}) {
   const beforeReinit = f.calls.length;
   f.shell.init(f.callbacks);
   assert.equal(f.calls.length, beforeReinit, "initialization is idempotent");
-  assert.equal(normalizeView("#stage"), "synth");
-  console.log("Workspace shell: navigation, detail preferences, connection state, and audio-test recovery passed.");
+  assert.equal(normalizeView("#stage"), "synth-legacy");
+  console.log("Workspace shell: navigation, complete controls, connection state, and audio-test recovery passed.");
 })().catch((error) => { console.error(error); process.exitCode = 1; });

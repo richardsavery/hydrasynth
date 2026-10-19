@@ -12,8 +12,8 @@ from unittest import mock
 import zipfile
 
 from elevenlabs_analysis import validate_request
-from elevenlabs_realtime import extract_stems, validated_continuation_request, validated_live_request
-from elevenlabs_service import ElevenLabsService, GenerationError, ServiceError, STEM_PROVIDER_URL
+from elevenlabs_realtime import compile_prompt_plan, extract_stems, validated_continuation_request, validated_live_request
+from elevenlabs_service import ElevenLabsService, GenerationError, ServiceError, STEM_PROVIDER_URL, digest, plan_cache_key, semantic_hash_value
 import test_elevenlabs_service as fixtures
 
 
@@ -99,6 +99,78 @@ class RealtimeServiceTests(unittest.TestCase):
         self.assertIsNotNone(self.plan["dataset_id"])
         self.assertIsNone(second_plan["dataset_id"])
         self.assertIsNone(second_plan["analysis_id"])
+
+    def test_explicit_fresh_skips_retained_audio_and_evolve_conditions_lightly(self):
+        self.plan = self.service.create_plan({"kind": "original", "duration_seconds": 20,
+                                              "settings": {"seed": 123}})
+        original = self.complete_stems(self.complete(self.generate()))
+        self.assertEqual(original["audio"]["provider_song_id"], "song123")
+        expected = {"model_id": "music_v2_5", "store_for_inpainting": True, "seed": 123,
+                    "composition_plan": {"chunks": [{"text": "", "duration_ms": 40000,
+                        "positive_styles": ["spacious jazz", "instrumental music", "84 BPM", "F minor", "piano", "upright bass"],
+                        "negative_styles": ["vocals", "lyrics"], "context_adherence": "high"}]}}
+        for sequence, mode in enumerate(("fresh", "evolve")):
+            with self.subTest(mode=mode):
+                job = self.service.create_continuation_job(self.prompt_payload(
+                    source_job_id=original["id"], sequence=sequence, continuity_mode=mode))
+                plan = self.service._read("plans", job["plan_id"])
+                provider_request = copy.deepcopy(expected)
+                if mode == "evolve":
+                    provider_request["composition_plan"]["chunks"][0].update(
+                        conditioning_ref={"song_id": "song123", "range": {"start_ms": 0, "end_ms": 10000}},
+                        condition_strength="low")
+                self.assertEqual(plan["request"], provider_request)
+                self.assertEqual(job["realtime"]["continuity_mode"], mode)
+                self.assertEqual(job["realtime"]["conditioning_applied"], mode == "evolve")
+                self.assertEqual(plan["sections"][0]["provenance"]["continuity_mode"], mode)
+                self.assertEqual(plan["analysis_settings"]["continuity_mode"], mode)
+                self.complete_stems(self.complete(job))
+                self.assertEqual(self.client.calls[-1], provider_request)
+
+    def test_explicit_modes_have_distinct_cache_identity_without_audio_reference(self):
+        plans = {mode: compile_prompt_plan(self.plan, validated_continuation_request(self.prompt_payload(continuity_mode=mode)))
+                 for mode in ("fresh", "evolve")}
+        self.assertEqual(plans["fresh"]["request"], plans["evolve"]["request"])
+        self.assertNotEqual(plan_cache_key(plans["fresh"]), plan_cache_key(plans["evolve"]))
+        first = self.complete_stems(self.complete(self.service.create_continuation_job(self.prompt_payload(continuity_mode="fresh"))))
+        second = self.service.create_continuation_job(self.prompt_payload(sequence=1, continuity_mode="fresh"))
+        self.assertNotEqual(first["id"], second["id"])
+        self.assertNotEqual(first["cache_key"], second["cache_key"], "same prompt at a new sequence still creates a track")
+
+    def test_mode_is_bound_to_request_id_and_restricted_to_prompt(self):
+        plans_before = set((self.service.root / "plans").iterdir())
+        for value in (None, "", "legacy", "high", True, {}, []):
+            status, result = self.service.dispatch("POST", "/api/elevenlabs/continuations", self.prompt_payload(continuity_mode=value))
+            self.assertEqual(status, 400, result)
+        for payload in (self.payload(continuity_mode="fresh"), self.payload(kind="live", continuity_mode="evolve")):
+            status, result = self.service.dispatch("POST", "/api/elevenlabs/continuations", payload)
+            self.assertEqual(status, 400, result)
+        self.assertEqual(set((self.service.root / "plans").iterdir()), plans_before)
+        fresh = self.prompt_payload(continuity_mode="fresh")
+        job = self.service.create_continuation_job(fresh)
+        self.assertEqual(self.service.create_continuation_job(fresh)["id"], job["id"])
+        for changed in (self.prompt_payload(continuity_mode="evolve"), self.prompt_payload()):
+            status, result = self.service.dispatch("POST", "/api/elevenlabs/continuations", changed)
+            self.assertEqual(status, 409, result)
+        self.assertEqual(self.client.calls, [])
+
+    def test_legacy_prompt_fingerprint_and_pending_recovery_remain_unchanged(self):
+        payload = self.prompt_payload()
+        self.assertEqual(validated_continuation_request(payload), payload)
+        expected_hash = digest(semantic_hash_value(payload))
+        first = self.service.create_continuation_job(payload)
+        plan = self.service._read("plans", first["plan_id"])
+        self.assertNotIn("continuity_mode", plan["analysis_settings"])
+        self.assertEqual(plan["realtime"]["continuity_mode"], "legacy")
+        stored_hash = self.service._db.execute("SELECT request_hash FROM live_requests WHERE session_id=? AND sequence=?",
+                                             (payload["session_id"], payload["sequence"])).fetchone()[0]
+        self.assertEqual(stored_hash, expected_hash)
+        self.service.close()
+        self.service = ElevenLabsService(self.root / "var" / "elevenlabs", self.env, client=self.client, start_worker=False)
+        recovered = self.service.create_continuation_job(payload)
+        self.assertEqual(recovered["id"], first["id"])
+        self.assertEqual(recovered["cache_key"], first["cache_key"])
+        self.assertEqual(self.client.calls, [])
 
     def test_prompt_request_idempotency_binds_direction_and_kind(self):
         payload = self.prompt_payload()

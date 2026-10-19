@@ -56,6 +56,15 @@ class MusicHTTPTests(unittest.TestCase):
         self.assertEqual(self.request("GET", "/.env")[0], 404)
         self.assertEqual(self.request("GET", "/var/elevenlabs/jobs.sqlite")[0], 404)
 
+    def test_local_pitch_processor_module_assets(self):
+        for path in ("/audio-pitch.js", "/audio-pitch-worklet.js", "/vendor/soundtouch-2.1.1.js"):
+            status, headers, body = self.request("GET", path)
+            self.assertEqual(status, 200, path)
+            self.assertIn("javascript", headers["Content-Type"], path)
+            self.assertGreater(len(body), 100)
+        for path in ("/vendor/soundtouch-2.1.1.js.map", "/vendor/soundtouch-LICENSE.txt"):
+            self.assertEqual(self.request("GET", path)[0], 200, path)
+
     def test_cross_origin_rebinding_and_non_json_rejected(self):
         cases = [
             ({"Origin": "https://example.com", "Content-Type": "application/json"}, 403),

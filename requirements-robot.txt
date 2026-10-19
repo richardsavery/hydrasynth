@@ -1,0 +1,3 @@
+# Optional: direct USB serial control and read-back for robot motor groups.
+dynamixel-sdk==3.8.4
+pyserial==3.5

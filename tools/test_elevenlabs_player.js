@@ -42,6 +42,18 @@ class FakeContext {
   async resume() { this.resumeCalls++; }
   async close() { this.closed = true; }
 }
+const FakePitch = {
+  async register(ctx) { ctx.pitchRegistrations = (ctx.pitchRegistrations || 0) + 1; },
+  latencySeconds() { return 0; },
+  create(ctx, values) {
+    const node = ctx.node("pitch");
+    node.parameters = new Map(Object.entries(values).map(([name, value]) => [name, new Param(value)]));
+    node.port = { messages: [], closed: false,
+      postMessage(message) { this.messages.push(message); },
+      close() { this.closed = true; } };
+    return node;
+  }
+};
 const context = vm.createContext({ console, AbortController, setTimeout, clearTimeout, Float32Array });
 vm.runInContext(fs.readFileSync(path.join(__dirname, "../dashboard/elevenlabs-player.js"), "utf8"), context);
 const { Player } = context.HydraElevenPlayer;
@@ -49,7 +61,7 @@ const track = (id, extra = {}) => ({ id, audio_url: `/audio/${id}`, ...extra });
 function fixture(options = {}) {
   const timers = new Map(), requests = [], assets = new Map();
   let nextTimer = 0;
-  const player = new Player({ AudioContext: FakeContext,
+  const player = new Player({ AudioContext: FakeContext, Pitch: FakePitch,
     setTimeout(callback, delay) { timers.set(++nextTimer, { callback, delay }); return nextTimer; },
     clearTimeout(id) { timers.delete(id); },
     fetch: async (url, request) => {
@@ -70,6 +82,213 @@ function near(actual, expected, label, tolerance = 1e-8) { assert.ok(Math.abs(ac
 
 async function main() {
   {
+    let created = 0;
+    const { player, tick, timers } = fixture({ Pitch: { ...FakePitch, create(...args) {
+      if (++created > 1) throw new Error("Processor creation failed");
+      return FakePitch.create(...args);
+    } } });
+    await player.loadTrack(track("transition-processor-error")); await player.start();
+    assert.doesNotThrow(() => tick(18), "transition processor failure cannot escape the scheduling timer");
+    assert.equal(player.status, "error");
+    assert.equal(player.transportClock(120).playing, false);
+    assert.equal(timers.size, 0);
+    player.dispose();
+  }
+  {
+    const { player } = fixture();
+    const stems = [{ name: "Bass", audio_url: "/pitch-bass" }, { name: "Drums", audio_url: "/pitch-drums" }];
+    await player.loadTrack(track("independent-pitch", { stems, generation_settings: { bpm: 100 } }));
+    player.updateControls({ rate: 1.2, pitch: 5, stemControls: { Bass: { pitch: -7 }, Drums: { pitch: 3 } } });
+    await player.start();
+    const ctx = FakeContext.last, [bass, drums] = player._active.parts;
+    assert.equal(bass.pitch.parameters.get("pitchSemitones").value, -2, "master and Bass pitch offsets combine in semitones");
+    assert.equal(drums.pitch.parameters.get("pitchSemitones").value, 8, "each stem keeps its independent pitch offset");
+    for (const part of [bass, drums]) {
+      assert.equal(part.source.playbackRate.value, 1.2, "all stems retain a shared playback speed");
+      assert.equal(part.pitch.parameters.get("playbackRate").value, 1.2, "the pitch processor compensates the source speed");
+      assert.ok(part.source.connections.includes(part.pitch));
+      assert.ok(part.pitch.connections.includes(part.highpass), "pitch processing feeds the existing stem effects");
+    }
+    ctx.currentTime = 2;
+    const before = player.transportClock(100);
+    const sourceEvents = bass.source.playbackRate.events.length;
+    player.updateControls({ pitch: -4 });
+    assert.equal(bass.pitch.parameters.get("pitchSemitones").value, -11);
+    assert.equal(drums.pitch.parameters.get("pitchSemitones").value, -1);
+    assert.equal(player.transportClock(100).token, before.token, "pitch-only changes cannot interrupt a synchronized rap");
+    assert.equal(player.transportClock(100).bpm, before.bpm, "pitch-only changes cannot alter tempo");
+    assert.equal(bass.source.playbackRate.events.length, sourceEvents, "pitch-only changes leave source speed untouched");
+    player.updateControls({ rate: 0.8 });
+    for (const part of [bass, drums]) {
+      assert.deepEqual(part.source.playbackRate.events.slice(-3), part.pitch.parameters.get("playbackRate").events.slice(-3),
+        "source speed and pitch compensation share exact ramp values and audio-clock times");
+    }
+    assert.equal(bass.pitch.parameters.get("pitchSemitones").value, -11, "speed changes preserve the chosen pitch");
+    player.stop();
+    for (const part of [bass, drums]) {
+      assert.equal(part.pitch.port.messages.length, 1);
+      assert.equal(part.pitch.port.messages[0].type, "dispose", "stopping releases the processor's audio-thread buffers");
+      assert.equal(part.pitch.port.closed, true);
+      assert.equal(part.pitch.disconnected, true);
+      assert.equal(part.pitch.onprocessorerror, null);
+    }
+    await player.loadTrack(track("fullmix-pitch"));
+    player.updateControls({ pitch: 7, rate: 1.1 });
+    await player.start();
+    const full = player._active.parts[0];
+    assert.equal(full.name, null);
+    assert.equal(full.pitch.parameters.get("pitchSemitones").value, 7, "the full mix uses the same independent pitch processing");
+    assert.equal(full.pitch.parameters.get("playbackRate").value, 1.1);
+    assert.ok(full.pitch.connections.includes(full.gain));
+    player.dispose();
+  }
+  {
+    const latency = 0.25;
+    const { player } = fixture({ Pitch: { ...FakePitch, latencySeconds: () => latency } });
+    await player.loadTrack(track("delayed-clock", { generation_settings: { bpm: 120 } }));
+    await player.start();
+    const ctx = FakeContext.last, deck = player._active;
+    near(player.transportClock(120).at, 0.27, "beat zero is reported at the first audible sample");
+    near(player.transportClock(120).beat, 0, "the processor's startup silence cannot advance the beat grid");
+    near(player.remainingSeconds, 20.27, "remaining time includes initial source scheduling and processor latency");
+    assert.ok(deck.gain.gain.events.some(event => event[0] === "set" && event[1] === 0 && event[2] === 0.27));
+    near(deck.gain.gain.events.at(-1)[2], 0.3, "the initial fade follows the delayed audio");
+    ctx.currentTime = 1;
+    player.updateControls({ rate: 1.25 });
+    assert.equal(player.transportClock(120).rateChanging, true, "rap waits while the first speed change is buffered");
+    near(player.currentPosition, 0.73, "audible position retains pre-change history");
+    ctx.currentTime = 1.04;
+    player.updateControls({ rate: 0.75 });
+    near(player.transportClock(120).bpm, 120, "a second speed command cannot erase the still-audible original tempo");
+    near(player.currentPosition, 0.77, "two changes within the latency retain the old source timeline");
+    // Source position reaches 1.0975 at 1.12s, then runs at 0.75 until 20s.
+    const audibleEnd = 1.12 + (20 - 1.0975) / 0.75 + latency;
+    near(player.remainingSeconds, audibleEnd - ctx.currentTime, "remaining time integrates both known ramps before the audible end");
+    ctx.currentTime = 1.27;
+    near(player.currentPosition, 1.000625, "the first speed ramp remains available after the second command");
+    near(player.transportClock(120).bpm, 127.5, "the beat clock follows the audible first ramp");
+    assert.equal(player.transportClock(120).rateChanging, true);
+    near(player.remainingSeconds, audibleEnd - ctx.currentTime, "an older audible ramp still uses the already-scheduled later speed");
+    ctx.currentTime = 1.31;
+    near(player.currentPosition, 1.0440625, "the second speed ramp continues from the actual interrupted first ramp");
+    near(player.transportClock(120).bpm, 123.75);
+    ctx.currentTime = 1.38;
+    near(player.transportClock(120).bpm, 90, "rap receives the final audible tempo");
+    assert.equal(player.transportClock(120).rateChanging, false, "auto-start is released only after the audible ramp settles");
+    player.dispose();
+  }
+  {
+    const { player } = fixture({ Pitch: { ...FakePitch, latencySeconds: () => 0.25 } });
+    await player.loadTrack(track("buffered-fallback-loop")); await player.start();
+    const ctx = FakeContext.last;
+    // Keep the UI scheduler idle while the looping source crosses its boundary.
+    ctx.currentTime = 19.9;
+    const before = player.transportClock(120).token;
+    ctx.currentTime = 20.1;
+    near(player.remainingSeconds, 0.17, "buffered end-of-loop samples retain the old audible boundary");
+    assert.equal(player.transportClock(120).token, before, "a source loop cannot invalidate rap before the loop is audible");
+    ctx.currentTime = 20.3;
+    near(player.currentPosition, 0.03, "the audible fallback loop wraps only after processor latency");
+    near(player.remainingSeconds, 19.97, "the new audible cycle reports its own remaining duration");
+    assert.notEqual(player.transportClock(120).token, before, "the audible fallback loop invalidates the previous rap phase");
+    player.dispose();
+  }
+  {
+    const latency = 0.25, transitions = [];
+    const { player, tick } = fixture({ Pitch: { ...FakePitch, latencySeconds: () => latency },
+      onTransition: value => transitions.push(value.id) });
+    await player.loadTrack(track("delayed-current")); await player.start();
+    await player.queueTrack(track("delayed-obsolete")); tick(18);
+    const canceled = player._transition;
+    near(canceled.start, canceled.next.parts[0].source.started.when + latency, "crossfades begin when incoming samples become audible");
+    near(canceled.end, 20.27, "crossfade ends at the audible outgoing boundary");
+    FakeContext.last.currentTime = canceled.next.parts[0].source.started.when + 0.1;
+    assert.equal(player.clearQueuedTrack(), true, "a warmed-up but inaudible replacement can still be withdrawn");
+    assert.equal(canceled.next.parts[0].pitch.port.closed, true);
+    assert.equal(canceled.old.parts[0].source.stops.length, 0);
+    assert.deepEqual(transitions, []);
+    await player.queueTrack(track("delayed-next"));
+    const transition = player._transition;
+    tick(transition.start + 0.01);
+    assert.equal(player.currentTrack.id, "delayed-next");
+    assert.deepEqual(transitions, ["delayed-next"]);
+    tick(transition.end - latency + 0.03);
+    assert.equal(transition.old.parts[0].source.disconnected, false, "the outgoing processor remains connected while delayed samples are fading");
+    tick(transition.end + 0.03);
+    assert.equal(transition.old.parts[0].pitch.port.closed, true);
+    assert.equal(transition.old.parts[0].source.disconnected, true);
+    player.dispose();
+  }
+  {
+    const { player } = fixture({ Pitch: { ...FakePitch, async register() { throw new Error("Worklet registration failed"); } } });
+    await assert.rejects(player.loadTrack(track("requires-pitch")), /Worklet registration failed/);
+    assert.equal(player.status, "error");
+    assert.equal(FakeContext.last.sources.length, 0, "processor failure cannot silently fall back to coupled pitch and speed");
+    assert.equal(player.currentTrack, null);
+    player.dispose();
+  }
+  {
+    const { player, timers } = fixture();
+    await player.loadTrack(track("processor-error")); await player.start();
+    const part = player._active.parts[0];
+    part.pitch.onprocessorerror();
+    assert.equal(player.status, "error", "an audio-thread failure is exposed rather than silently losing pitch correction");
+    assert.equal(player.transportClock(100).playing, false);
+    assert.equal(part.pitch.port.closed, true);
+    assert.equal(timers.size, 0);
+    player.dispose();
+  }
+  {
+    const { player, tick } = fixture();
+    await player.loadTrack(track("rap-current", { generation_settings: { bpm: 112 } }));
+    await player.start();
+    await player.queueTrack(track("rap-next", { realtime: { generation_settings: { bpm: 140 } } }));
+    tick(18);
+    const before = player.transportClock(100);
+    assert.equal(before.baseBpm, 112, "current track metadata supplies the requested tempo");
+    assert.equal(player.transportClock(175).baseBpm, 112, "editing the next-track prompt cannot change the original track tempo");
+    FakeContext.last.currentTime = player._transition.start + 0.01;
+    const next = player.transportClock(100);
+    assert.equal(player.currentTrack.id, "rap-current", "the timer has not promoted the pending deck yet");
+    assert.equal(next.baseBpm, 140, "the voice clock follows the audible incoming deck before its UI promotion");
+    assert.notEqual(next.token, before.token);
+    player.dispose();
+  }
+  {
+    const { player, tick } = fixture();
+    assert.equal(player.transportClock(120).context, null, "clock inspection never creates audio");
+    assert.equal(player.transportClock(120).playing, false);
+    await player.loadTrack(track("rap-grid"));
+    const ctx = FakeContext.last;
+    assert.equal(player.transportClock(120).context, ctx, "decoded/stopped players expose the unlocked context");
+    await player.start();
+    ctx.currentTime = 1.02;
+    const clock = player.transportClock(120);
+    assert.equal(clock.destination, ctx.destination);
+    near(clock.beat, 2, "rap beat grid follows the audio deck");
+    assert.equal(clock.bpm, 120);
+    assert.equal(clock.valid, true);
+    assert.equal(clock.estimated, true, "requested BPM is never described as audio beat detection");
+    player.updateControls({ rate: 1.25 });
+    assert.notEqual(player.transportClock(120).token, clock.token, "rate changes invalidate a rendered voice schedule");
+    ctx.currentTime = 1.10;
+    near(player.transportClock(120).bpm, 150, "the voice clock includes mapped playback rate");
+    player.setSourceValid(false);
+    assert.equal(player.transportClock(120).valid, false, "stale accompaniment also gates the voice");
+    player.setSourceValid(true);
+    assert.equal(player.transportClock(NaN).valid, false);
+    player.updateControls({ rate: 1 });
+    const beforeLoop = player.transportClock(120).token;
+    tick(21);
+    assert.notEqual(player.transportClock(120).token, beforeLoop, "audio-thread fallback loops invalidate phase even if the UI timer is late");
+    const beforeStop = player.transportClock(120).token;
+    player.stop();
+    assert.equal(player.transportClock(120).playing, false);
+    assert.notEqual(player.transportClock(120).token, beforeStop);
+    player.dispose();
+    assert.equal(player.transportClock(120).valid, false);
+  }
+  {
     const { player, timers, tick } = fixture();
     assert.equal(player.status, "empty");
     await player.loadTrack(track("first", { plan_id: "plan-a" }));
@@ -87,7 +306,8 @@ async function main() {
       rate: 1.25, delayMix: 1, reverbMix: 0.4 });
     assert.ok(player._lowpass.frequency.events.some((event) => event[0] === "target" && event[1] === 1250), "filter mappings change the actual AudioParam with smoothing");
     assert.equal(player._lowpass.Q.value, 12, "resonance is bounded");
-    assert.equal(player._delayWet.gain.value, 0.65);
+    assert.equal(player._delayWet.gain.value, 0.85);
+    assert.equal(player._feedback.gain.value, 0.42, "stronger repeats remain below unity feedback");
     assert.equal(player._panner.pan.value, -0.7);
     assert.equal(player._volume.gain.value, 0.5);
     assert.equal(player._highpass.frequency.value, 150);
@@ -162,6 +382,70 @@ async function main() {
     assert.equal(replacement.old.parts[0].source.disconnected, true);
     assert.equal(ctx.sources.filter((source) => !source.disconnected).length, 1, "retired sources are disconnected");
     player.stop();
+  }
+  {
+    const transitions = [];
+    const { player, tick } = fixture({ onTransition: (value) => transitions.push(value.id) });
+    await player.loadTrack(track("prompt-original"));
+    await player.start();
+    await player.queueTrack(track("old-direction"));
+    assert.equal(player.clearQueuedTrack(), true);
+    assert.equal(player.queuedTrack, null, "a prompt edit removes a ready but unplayed spare");
+    await player.queueTrack(track("old-direction"));
+    tick(17.9);
+    const canceled = player._transition, original = canceled.old;
+    assert.equal(canceled.reason, "crossfade");
+    assert.equal(player.clearQueuedTrack(), true, "a scheduled track can still be replaced until the audio fade starts");
+    assert.equal(player._transition, null);
+    assert.equal(canceled.next.parts[0].source.disconnected, true);
+    assert.equal(original.parts[0].source.stops.length, 0, "withdrawing a scheduled fade cannot leave a pending stop on the playing source");
+    assert.equal(original.gain.gain.value, 1);
+    assert.equal(player.currentTrack.id, "prompt-original");
+    await player.queueTrack(track("latest-direction"));
+    const latest = player._transition;
+    tick(latest.start + 0.01);
+    assert.equal(player.currentTrack.id, "latest-direction");
+    assert.deepEqual(transitions, ["latest-direction"], "the obsolete prompt never becomes the audible next song");
+    assert.equal(player.clearQueuedTrack(), false, "a fade which is already audible continues smoothly");
+    assert.equal(player._transition, latest);
+    await player.queueTrack(track("following-spare"));
+    assert.equal(player.queuedTrack.id, "following-spare");
+    assert.equal(player.clearQueuedTrack(), false);
+    assert.equal(player.queuedTrack, null, "a following spare can be removed while the current transition finishes");
+    assert.equal(player._transition, latest);
+    assert.equal(player.currentTrack.id, "latest-direction");
+    tick(latest.end + 0.03);
+    assert.equal(original.parts[0].source.disconnected, true);
+    player.dispose();
+  }
+  {
+    const transitions = [];
+    const { player, tick } = fixture({ onTransition: (value) => transitions.push(value.id) });
+    await player.loadTrack(track("original-clock")); await player.start();
+    await player.queueTrack(track("audible-before-ui")); tick(17.9);
+    const pending = player._transition;
+    FakeContext.last.currentTime = pending.start + 0.01;
+    assert.equal(player.currentTrack.id, "original-clock", "simulate audio starting between scheduler ticks");
+    assert.equal(player.clearQueuedTrack(), false);
+    assert.equal(player.currentTrack.id, "audible-before-ui", "clearing synchronizes metadata to the real audio clock before generating another song");
+    assert.deepEqual(transitions, ["audible-before-ui"]);
+    player.dispose();
+  }
+  {
+    const { player, tick, assets } = fixture();
+    assets.set("/audio/decoded-short", { decoded: buffer(8) });
+    await player.loadTrack(track("decoded-short", { requested_duration_seconds: 60 }));
+    await player.start(); tick(5.9);
+    const fallback = player._transition;
+    assert.equal(fallback.reason, "loop");
+    assert.equal(player.queuedTrack, null, "a backup repeat is not reported as a generated next song");
+    await player.queueTrack(track("just-in-time"));
+    assert.equal(fallback.next.parts[0].source.disconnected, true, "a prepared spare replaces a fallback repeat that has not started yet");
+    assert.equal(player._transition.reason, "crossfade");
+    near(player._transition.end, 8.02, "automatic handoff uses decoded duration rather than requested metadata");
+    tick(player._transition.start + 0.01);
+    assert.equal(player.currentTrack.id, "just-in-time");
+    player.dispose();
   }
   {
     const { player, tick } = fixture();
@@ -271,7 +555,8 @@ async function main() {
     assert.equal(bass.pan.pan.value, -0.6);
     assert.equal(bass.delayWet.gain.value, 0.2);
     assert.equal(bass.reverbWet.gain.value, 0.3);
-    assert.ok(bass.source.connections.includes(bass.highpass));
+    assert.ok(bass.source.connections.includes(bass.pitch));
+    assert.ok(bass.pitch.connections.includes(bass.highpass));
     assert.ok(bass.reverbWet.connections.includes(bass.gain), "stem volume controls effect tails too");
     assert.ok(bass.pan.connections.includes(player._active.gain), "every stem effect still passes through the master and stale-input gate");
     assert.equal(bass.reverb.buffer, player._convolver.buffer, "stems share the immutable impulse buffer");
@@ -288,7 +573,8 @@ async function main() {
     player.updateControls({ stemControls: { Bass: { cutoff: 800, resonance: 900, delayMix: 3, rate: 0.5 } } });
     assert.equal(bass.lowpass.frequency.value, 800);
     assert.equal(bass.lowpass.Q.value, 12, "stem resonance is bounded");
-    assert.equal(bass.delayWet.gain.value, 0.65, "stem wet levels are bounded");
+    assert.equal(bass.delayWet.gain.value, 0.85, "stem wet levels are bounded");
+    assert.equal(bass.feedback.gain.value, 0.42, "stem repeats use the stronger feedback too");
     assert.equal(drums.lowpass.frequency.value, 20000, "removing a mapped stem effect restores its default");
     assert.equal(bass.source.playbackRate.value, drums.source.playbackRate.value, "per-stem speed cannot break alignment");
     assert.equal(player.controls.stemControls.Bass.rate, undefined);
@@ -342,18 +628,38 @@ async function main() {
     player.dispose();
   }
   {
-    let resolveFetch;
+    let resolveFetch, fetchStarted;
+    const fetching = new Promise(resolve => { fetchStarted = resolve; });
     const { player } = fixture();
     await player.loadTrack(track("current"));
     await player.start();
-    player._fetch = () => new Promise((resolve) => { resolveFetch = resolve; });
+    player._fetch = () => new Promise((resolve) => { resolveFetch = resolve; fetchStarted(); });
     const queued = player.queueTrack(track("slow-next"));
-    await Promise.resolve();
+    await fetching;
     player.stop();
     resolveFetch({ ok: true, arrayBuffer: async () => ({ decoded: buffer() }) });
     assert.equal(await queued, false);
     assert.equal(player.queuedTrack, null);
     assert.equal(FakeContext.last.sources.length, 1, "a stale queued fetch cannot revive the stopped player");
+  }
+  {
+    let resolveOld, fetchStarted;
+    const fetching = new Promise(resolve => { fetchStarted = resolve; });
+    const { player } = fixture();
+    await player.loadTrack(track("keeps-playing")); await player.start();
+    const regularFetch = player._fetch;
+    player._fetch = (url, request) => url === "/audio/obsolete-decode" ? new Promise((resolve) => { resolveOld = resolve; fetchStarted(); }) : regularFetch(url, request);
+    const old = player.queueTrack(track("obsolete-decode"));
+    await fetching;
+    assert.equal(player.clearQueuedTrack(), true);
+    const latest = player.queueTrack(track("latest-decode"));
+    resolveOld({ ok: true, arrayBuffer: async () => ({ decoded: buffer() }) });
+    assert.equal(await old, false, "a stale response cannot install an obsolete prompt after cancellation");
+    assert.equal(await latest, true);
+    assert.equal(player.queuedTrack.id, "latest-decode");
+    assert.equal(player.currentTrack.id, "keeps-playing");
+    assert.equal(player._cache.has("/audio/obsolete-decode"), false);
+    player.dispose();
   }
   {
     const { player, assets, tick } = fixture();

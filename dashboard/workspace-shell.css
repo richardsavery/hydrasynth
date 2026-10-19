@@ -1,17 +1,23 @@
 /* Connections are shared; each instrument gets its own working space. */
-.basic-mode [data-advanced] { display: none !important; }
 .topbar { min-height: 84px; height: auto; grid-template-columns: 220px minmax(0, 1fr) auto; }
 .topbar .brand { padding: 18px 24px; }
 .project-title { padding: 16px 22px; }
-.dashboard-switcher { flex-wrap: wrap; gap: 6px; }
+.dashboard-switcher { flex-wrap: wrap; align-items: start; gap: 12px 22px; }
+.workspace-nav-group { display: grid; gap: 5px; min-width: 0; }
+.workspace-nav-label { padding-left: 13px; color: var(--muted); font: 600 10px/1.4 var(--sans); letter-spacing: .08em; text-transform: uppercase; }
+.workspace-nav-links { display: flex; flex-wrap: wrap; gap: 6px; }
 .dashboard-switcher a { padding: 10px 13px; font: 600 13px/1.4 var(--sans); }
+.dashboard-switcher [data-robot-live-indicator] { margin-left: 5px; padding: 2px 5px; border: 1px solid var(--border-accent); border-radius: 4px; color: var(--accent); background: var(--panel-selected); font: 600 10px/1.2 var(--sans); }
 .workspace-options { display: flex; align-items: center; gap: 16px; padding: 16px 24px 16px 0; }
 .workspace-options > a { color: var(--muted); font-size: 12px; text-decoration: none; }
 .workspace-options > a:hover { color: var(--text); }
-.detail-mode, .connection-source-tabs { display: flex; gap: 3px; padding: 4px; border: 1px solid var(--line); border-radius: 7px; background: var(--panel-inset); }
-.detail-mode button, .connection-source-tabs button { padding: 8px 12px; color: var(--muted); border: 0; border-radius: 4px; background: transparent; font-size: 12px; cursor: pointer; }
-.detail-mode button[aria-pressed="true"], .connection-source-tabs button[aria-pressed="true"] { color: var(--text); background: var(--panel-2); }
+.connection-source-tabs { display: flex; gap: 3px; padding: 4px; border: 1px solid var(--line); border-radius: 7px; background: var(--panel-inset); }
+.connection-source-tabs button { padding: 8px 12px; color: var(--muted); border: 0; border-radius: 4px; background: transparent; font-size: 12px; cursor: pointer; }
+.connection-source-tabs button[aria-pressed="true"] { color: var(--text); background: var(--panel-2); }
 .connection-strip { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 28px; min-height: 49px; padding: 10px 28px; border-bottom: 1px solid var(--line); background: var(--panel); font-size: 12px; }
+body[data-workspace="robot-setup"] .connection-strip,
+body[data-workspace="rap-response"] .connection-strip,
+body[data-workspace="robot-control"] .connection-strip { display: none; }
 .connection-strip > span { display: flex; align-items: center; gap: 9px; min-width: 0; }
 .connection-strip > span > span { color: var(--muted); }
 .connection-strip > span > b { max-width: 38vw; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500; }
@@ -73,7 +79,6 @@
 .workspace .output-rail h2 { margin-top: 0; font-size: 18px; }
 body[data-workspace="drums"] .workspace { grid-template-columns: minmax(0, 1fr); max-width: 1120px; }
 body[data-workspace="drums"] .workspace .output-rail { display: none; }
-body[data-workspace="drums"].basic-mode .signal-panel { display: none; }
 .stage-heading { flex-wrap: wrap; align-items: start; gap: 18px; }
 .stage-heading h2 { font-size: 23px; }
 .stage-detail { font: 12px/1.5 var(--sans); }
@@ -87,8 +92,6 @@ body[data-workspace="drums"].basic-mode .signal-panel { display: none; }
 .panel-meta b { font-size: 13px; }
 .panel-meta .eyebrow { font-size: 9px; }
 .text-button { font: 12px var(--sans); }
-.basic-mode .waveform svg { height: 112px; }
-.basic-mode .signal-panel { box-shadow: none; }
 .mapping-labels { font-size: 10px; }
 .mapping-row { padding: 15px; gap: 16px; }
 .mapping-source { min-height: 42px; }
@@ -111,17 +114,12 @@ body[data-workspace="drums"].basic-mode .signal-panel { display: none; }
 .target-toolbar .small-button { font: 11px var(--sans); }
 .mapping-target > label { font: 11px var(--sans); }
 .mapping-target > label > input, .mapping-target > label > select { min-height: 32px; font: 12px var(--sans); }
-.basic-mode .mapping-target > label:has([data-role="target-curve"]), .basic-mode .target-detail { display: none; }
-.basic-mode .mapping-target > label { grid-column: span 3; }
 .mini-synth label { font-size: 12px; grid-template-columns: 70px minmax(0, 1fr) 35px; }
 .mini-synth label select { min-height: 37px; font-size: 12px; }
 .mini-synth output { font-size: 10px; }
 .mini-synth-head span, .mini-synth-head b, .scale-card span, .scale-card b { font-size: 10px; }
 .scale-controls label { font: 11px var(--sans); }
 .scale-controls select { min-height: 35px; font: 11px var(--sans); }
-.basic-mode .drum-intro { max-width: 680px; margin-bottom: 22px; font-size: 13px; }
-.basic-mode .drum-source-details summary { font-size: 13px; }
-.basic-mode .drum-slider-controls { margin-top: 24px; }
 .footer-bar { font-size: 9px; }
 
 @media (max-width: 1120px) {
@@ -138,9 +136,11 @@ body[data-workspace="drums"].basic-mode .signal-panel { display: none; }
   .topbar { grid-template-columns: minmax(0, 1fr) auto; }
   .topbar .brand { min-height: 66px; padding: 12px 16px; }
   .workspace-options { grid-column: 2; grid-row: 1; padding: 12px 14px 12px 0; gap: 8px; }
-  .detail-mode button { padding: 8px 10px; font-size: 11px; }
   .project-title { grid-column: 1 / -1; grid-row: 2; padding: 10px 12px; }
-  .dashboard-switcher { width: 100%; gap: 3px; }
+  .dashboard-switcher { width: 100%; gap: 10px; }
+  .workspace-nav-group { width: 100%; gap: 3px; }
+  .workspace-nav-label { padding-left: 7px; }
+  .workspace-nav-links { gap: 3px; }
   .dashboard-switcher a { flex: 1 1 auto; text-align: center; padding: 9px 7px; font-size: 12px; }
   .connection-strip { gap: 8px 18px; padding: 11px 16px; font-size: 11px; }
   .connection-strip > a { font-size: 11px; }
@@ -161,7 +161,6 @@ body[data-workspace="drums"].basic-mode .signal-panel { display: none; }
   .stage-heading { display: flex; }
   .transport-cluster { gap: 10px; }
   .mapping-row > .target-builder { grid-column: 1 / -1; }
-  .basic-mode .mapping-target > label { grid-column: span 3; }
   .footer-bar { padding: 0 16px; letter-spacing: 0; }
 }
 @media (max-width: 440px) {

@@ -77,10 +77,17 @@ def _validated_continuation_envelope(payload: dict[str, Any]) -> dict[str, Any]:
 def validated_continuation_request(payload: dict[str, Any]) -> dict[str, Any]:
     """Keep prompt-driven requests distinct from measured live-input summaries."""
     if payload.get("kind") == "prompt":
-        allowed = {"kind", "plan_id", "source_job_id", "session_id", "sequence", "duration_seconds", "settings"}
+        allowed = {"kind", "plan_id", "source_job_id", "session_id", "sequence", "duration_seconds", "settings", "continuity_mode"}
         if set(payload) - allowed:
             raise ValueError("Prompt continuations accept musical settings and track references, without live features or provider requests.")
-        return {"kind": "prompt", **_validated_continuation_envelope(payload)}
+        result = {"kind": "prompt", **_validated_continuation_envelope(payload)}
+        if "continuity_mode" in payload:
+            if payload["continuity_mode"] not in ("fresh", "evolve"):
+                raise ValueError("continuity_mode must be fresh or evolve.")
+            result["continuity_mode"] = payload["continuity_mode"]
+        # Omission is deliberately different from the new UI's explicit fresh
+        # default: saved pending requests must keep their exact fingerprint.
+        return result
     if payload.get("kind") not in (None, "live"):
         raise ValueError("Continuation kind must be prompt or live.")
     return validated_live_request(payload)
@@ -88,6 +95,8 @@ def validated_continuation_request(payload: dict[str, Any]) -> dict[str, Any]:
 
 def validated_live_request(payload: dict[str, Any]) -> dict[str, Any]:
     """Accept bounded summaries and editable direction, never raw provider requests."""
+    if "continuity_mode" in payload:
+        raise ValueError("continuity_mode is supported only for prompt continuations.")
     result = _validated_continuation_envelope(payload)
     incoming = payload.get("features")
     if not isinstance(incoming, dict):
@@ -168,8 +177,13 @@ def compile_prompt_plan(anchor: dict[str, Any], payload: dict[str, Any]) -> dict
         "kind": "prompt_continuation", "root_plan_id": anchor["id"],
         "source_job_id": payload["source_job_id"], "session_id": payload["session_id"],
         "sequence": payload["sequence"], "generation_settings": copy.deepcopy(plan["settings"]),
+        "continuity_mode": payload.get("continuity_mode", "legacy"),
         "provenance_note": "This track follows musical direction without a live-input summary. Saved provider audio is used for conditioning when available; matching beats and melody is not guaranteed.",
     }
+    if payload.get("continuity_mode") == "fresh":
+        provenance["provenance_note"] = "This track follows musical direction without a live-input summary or conditioning on previous audio. Matching beats and melody is not guaranteed."
+    elif payload.get("continuity_mode") == "evolve":
+        provenance["provenance_note"] = "This track follows musical direction with low-strength conditioning on saved provider audio when available. Matching beats and melody is not guaranteed."
     # Each explicit sequence is a fresh track, even if direction is unchanged
     # or the source has no retained provider song ID. Keep the sequence in the
     # plan's actual prompt metadata, never in a fabricated source-data hash.
@@ -178,6 +192,10 @@ def compile_prompt_plan(anchor: dict[str, Any], payload: dict[str, Any]) -> dict
                 analysis_settings={"kind": "prompt", "root_plan_id": anchor["id"],
                                    "session_id": payload["session_id"], "sequence": payload["sequence"],
                                    "channels": []})
+    if "continuity_mode" in payload:
+        # Explicit mode remains part of cache identity even when neither plan
+        # has a usable provider song reference. Legacy cache keys stay intact.
+        plan["analysis_settings"]["continuity_mode"] = payload["continuity_mode"]
     plan["sections"][0]["provenance"] = provenance
     return plan
 

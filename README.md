@@ -13,9 +13,15 @@ dashboard reads the compressed files directly, discovers their channels and
 numeric fields, and reduces large tensors to a bounded series before they reach
 the browser.
 
-Choose the **Drums** tab to turn overall motion into the tempo and density of
-an electronic drum groove played in the browser, with no MIDI hardware needed.
-See [Movement drums](docs/movement_drums.md) for sources, kit controls and presets.
+Open **Keirzo control** and press **Start robot** to enable drum-arm torque and
+move all four arms to rest, connect the selected LED effects, and enable torque
+for selected rib/head movement. Drum hits still require **Start drumming**.
+Choose **Follow → Music mixer** or **Synth mixer** for lights, ribs, head beat sync,
+and drums. The head can also move at its own pace with Beat sync off.
+**Keirzo setup** is available for calibration, manual tests, and connection
+troubleshooting. The older movement-driven drum
+groove remains available through its [direct link](http://127.0.0.1:8790/#drums)
+and saved sessions; it is no longer in the top navigation.
 
 On a MacBook, clone the repository and run:
 
@@ -24,26 +30,74 @@ cd hydrasynth
 make dashboard-sonify
 ```
 
-The same service provides these workspaces:
+For Keirzo's motors, install the serial dependencies once before starting:
+
+```sh
+python3 -m venv .venv
+.venv/bin/python -m pip install -r requirements-robot.txt
+make dashboard-sonify
+```
+
+The head, ribs, and drum adapters are recognised by their USB identities in
+[`config/robot-devices.json`](config/robot-devices.json), so their default ports
+follow the same devices across USB sockets and computers. Discovery selects
+ports without connecting motors or starting movement. When moving this setup
+to another Mac, also copy `var/robot/head-calibration.json` from the original
+machine: saved head ranges are local files and are not included in a Git clone.
+Use a browser with Web MIDI support and grant its MIDI permission for the
+Pimoroni LEDs. See [moving Keirzo to another computer](docs/robot_control.md#move-this-setup-to-another-computer)
+for the full setup and checks.
+
+The top navigation groups **Connections** and **Keirzo setup** under **Setup**.
+**Use** contains **Synth mixer**, **Music mixer**, **Rap response**, and
+**Keirzo control**. The same service provides these workspaces:
 
 - **Connections** at <http://127.0.0.1:8790/> for choosing a recording or live
   stream, testing browser audio, and connecting a MIDI device.
-- **Synth** at <http://127.0.0.1:8790/#synth> for mapping data to notes and sound.
-- **Drums** at <http://127.0.0.1:8790/#drums> for movement-driven drum grooves.
+- **Synth mixer** at <http://127.0.0.1:8790/#synth-mixer> for shaping browser audio
+  or Hydrasynth MIDI parameters with named signal mixes. `#synth` opens this view too.
 - **Music mixer** at <http://127.0.0.1:8790/#mixer> for creating tracks and
   mixing their stems with combined input signals, faders, and effect mappings.
+- **Rap response** at <http://127.0.0.1:8790/#rap-response> for recording a
+  message and hearing a rhyming reply over the playing music or its own hip-hop beat.
+- **Keirzo setup** at <http://127.0.0.1:8790/#robot-setup> for testing the
+  rib cage and drumming arms directly over separate USB serial connections,
+  using the Max patch ranges, plus LED tests over USB MIDI. The two-axis head
+  has a separate read-only connection check, upright-position reference and
+  range recorder for moving each axis by hand. Saved ranges persist across
+  restarts and bound the powered controls in Keirzo control.
+  Drum tests raise to rest, hit down, and return to raised rest; manual
+  positions are in Advanced. Motor output is available by default with separate
+  torque controls and a latched emergency stop.
+- **Keirzo control** at <http://127.0.0.1:8790/#robot-control> for live LED palettes
+  and optional rib breathing synced to the selected mixer's tempo. The head panel
+  has **Enabled**, **Beat sync**, and **Busy-ness** controls. Both calibrated axes
+  move together, with staggered turnarounds for continuous movement. Busy-ness 0
+  keeps a calm flow; higher values explore more of the saved range. Auto gently
+  varies activity independently of the audio. Turn Beat sync off for movement
+  at its own pace, even when music is stopped. **Release head** remains in Keirzo setup.
+  **Start robot** connects the required hardware and enables selected motor torque;
+  preliminary setup is only needed if a connection or calibration needs attention.
+  **Automatic drumming** follows Music mixer timing or the previous Synth mixer bar's
+  note accents. Choose the arms and groove, then press **Start drumming** in its
+  panel. It uses the original drum stroke timings, skips hits that exceed arm
+  recovery, and limits each drum to one hit per second. An out-of-range healthy
+  arm returns to rest before rejoining; a fault pauses only the affected arm.
+  Upcoming hits are cancelled when the source stops. The top **Stop**
+  ends both drumming and the other robot effects.
+  See [setup and controls](docs/robot_control.md).
 - **Observer** at <http://127.0.0.1:8790/observer/> for the original live
   Hydrasynth telemetry view.
 
-Start in **Connections**, then open a sonification tab. **Basic** shows the
-main playback, sound, and mapping controls; **Advanced** reveals presets,
-detailed ranges, analysis, and technical settings. The detail preference is
-remembered without changing mappings or playback. Switching workspace stops
-playback but keeps the input and MIDI connections available. Synth remembers
-its browser/MIDI output choice independently; Drums and Music mixer always
-use browser audio. Loading a preset does not change that connection choice.
+Start in **Connections**, then open a sonification tab. All playback, sound,
+mapping, and connection controls are available in one interface. Local expandable
+sections keep optional settings together. Switching dashboard tabs
+keeps playback, robot control, and connections running; use each workspace's
+Stop control to stop it. Synth remembers its browser/MIDI output choice
+independently; Music mixer uses browser audio. Loading a preset does not
+change that connection choice.
 
-Observer remains available in Advanced. Observer's **Auto** source follows Signal Lab whenever its
+Observer is available in the top bar. Observer's **Auto** source follows Signal Lab whenever its
 preview is playing, then falls back to native/demo telemetry after the preview
 stops. Choose **Signal Lab** in Observer to keep that view locked to the
 sonification feed. This works for browser audio as well as MIDI output and does
@@ -54,7 +108,9 @@ controller. When a larger or newer external dataset is preferred, pass
 `RECORDINGS_DIR=/path/to/recordings` or set `RAPP_RECORDINGS_DIR`; an explicit
 folder takes priority over the bundled copies.
 
-With Advanced enabled, the working surface lets you:
+The previous Synth interface is available through **Previous version**
+in Synth mixer, or directly at <http://127.0.0.1:8790/#synth-legacy>. It retains its
+existing presets and lets you:
 
 - keep up to 12 named mapping tabs for each recording, with separate voice,
   scale, tempo and rhythm settings; audition one tab at a time;
@@ -77,35 +133,291 @@ With Advanced enabled, the working surface lets you:
   and send notes plus catalog-based CC/NRPN mappings to the Hydrasynth later.
 
 For MIDI output, connect and power on the synth, set `PARAM RX` to `NRPN`
-(the dashboard’s default format), choose **MIDI device** under **Synth output**
-in **Connections**, click
-**Connect MIDI device**, grant browser MIDI access, and select the Hydrasynth.
+(the dashboard’s default format), and grant browser MIDI access when prompted.
+The dashboard requests MIDI access on startup and automatically selects the
+saved device or a single Hydrasynth. It reconnects when that device returns,
+including a changed port ID when its name and manufacturer identify one output.
+If several devices match, choose the intended output in **Connections**.
+A new setup uses Hydrasynth for Synth output when found; an existing **Browser
+audio** choice or another selected MIDI device is preserved. Connecting never
+starts playback or changes patches. After a disconnection, press Play again.
+Use **Connect MIDI device** to retry if browser permission was declined.
 The dashboard sends on MIDI channel 1 and provides a dedicated all-notes-off
 control. Mapping tabs save automatically in browser storage for each recording.
 Existing saved mappings migrate to an **Original** tab, including their sound
 settings. Browser storage is specific to the browser and page origin; use
 **Export** to move saved presets to another browser or machine.
 
+### Synth mixer
+
+Choose a sound, tempo, and scale at the top, then build named **Signal mixes**
+using the same input controls as Music mixer. Each mix can combine up to six
+inputs, with automatic or fixed ranges. Use Connections input for recordings
+and live data, or Simulated demo signals to try the controls.
+
+In the **Parameter desk**, each card controls a synth destination. Set its value
+manually or choose a named signal mix, then set the output range and direction.
+Reuse one mix for several parameters. **+ Parameter** offers notes, rhythm,
+filters, effects, and the full published Hydrasynth catalog. Search by name or
+group. Hardware controls are marked **MIDI only**;
+unsupported entries show the reason they cannot be sent. Enum parameters offer
+named choices. Hardware mappings remain saved while using browser audio.
+
+Effect mappings use pronounced sweeps by default. Synth filter, resonance,
+drive, delay and reverb cover their full control range; the initial resonance
+and reverb are stronger. Music uses full pan and volume sweeps, a 6 kHz
+high-pass sweep, and delay/reverb mixes up to 85%. Both players have longer
+reverb tails and stronger delay repeats. Existing ranges that exactly match
+the previous defaults upgrade once; custom ranges remain adjustable.
+
+Playback uses the existing browser synth or the MIDI output selected in
+Connections. Missing data in an enabled mapping pauses sound until fresh values
+return. Stop and tab switching silence notes and stop parameter updates.
+Settings save separately under `hydra.synth-mixer.v1`; the original Synth's
+mapping sets and sound controls stay independent.
+
+### Rap response
+
+Open **Rap response**, choose Boom bap, Trap or Lo-fi, then **Record a message**.
+**Finish & rap** sends the recording and prepares a musical answer. Recording
+is limited to 30 seconds. You can also type what you would say and press
+**Make rap response**. Choose four or eight bars and Boom bap, Trap or Lo-fi.
+The default **Over main music** mode keeps the Music mixer or Synth mixer
+playing, separates the generated rap vocal, and starts it on the next bar.
+Start the backing in its mixer first, then switch to Rap response. Its tempo
+is used for new replies when it is within the supported 70–140 BPM range.
+Use headphones when recording with music playing to keep the backing out of
+the microphone. **With generated beat** plays the complete generated song
+and stops the other dashboard audio.
+
+Choose **Voice for new replies** to reuse a vocal preset: **Deep Hip-Hop
+Voice** (the default) or **Emo Trap Autotune**. Each selection pins an ElevenLabs
+music finetune, giving subsequent performances the same vocal foundation.
+Delivery, accent, and expression can still vary; audition several replies to
+check the consistency you need. The selected voice is saved with each response
+and shown in the response library. Changing the selector affects new replies;
+existing recordings retain their original voice.
+
+The backend transcribes recordings locally with **Whisper Small** through
+`faster-whisper` using CPU int8 inference. Microphone audio is not sent to
+ElevenLabs. Only the transcript goes to ElevenLabs: a Music composition plan
+writes a relevant rhyming answer, then Eleven Music performs the vocal and
+backing together using the existing `ELEVENLABS_API_KEY`. The curated vocal
+finetunes use their catalogued base model, `music_v2`; legacy requests without
+a vocal preset retain `music_v2_5`. This uses the music API's `finetune_id`,
+not a text-to-speech voice ID or a voice-conversion step. For playback
+over main music, the ElevenLabs two-stem separation endpoint then extracts
+the vocal. This adds processing time and an API request. No separate
+LLM account or ElevenAgent setup is needed. Typed input skips transcription.
+FFmpeg and ffprobe validate the finished audio, as in the existing
+generated-music workflow. New musical replies use music credits; local
+transcription and replaying saved replies use no API credits.
+
+Install the local transcription dependency and download Whisper Small once:
+
+```sh
+.venv/bin/python -m pip install -r requirements-rap-response.txt
+.venv/bin/python tools/prepare_rap_transcription.py
+```
+
+The model is stored in `var/whisper/small` and loaded on the first recording,
+then reused. Transcription runs offline after setup; the dashboard does not
+download models when recording or starting up. Typed replies remain available
+if the local transcription dependency or model is missing.
+
+The prompt requests short rhyming lines that answer the message, with rhythmic
+rap delivery and an immediate instrumental backing. The music model applies
+the selected vocal preset and interprets the requested tempo. This generates
+a new short song for each message, so expect a
+generation wait. The transcript and reply lyrics appear as the steps finish.
+The next-bar start follows the mixer's clock; music generation does not
+guarantee the requested BPM, so the vocal may drift against the backing.
+Changing or stopping the backing stops the vocal. An isolated vocal waits
+for backing music before playing; it never substitutes the original full mix.
+Saved full-mix responses can be isolated without regenerating their lyrics
+or music. Both the full mix and the isolated vocal can be downloaded.
+
+**Play when my new response is ready** only applies to a reply you just requested. Opening a
+saved reply or restoring a session never records, generates or plays on its own.
+Recording and vocal playback in **Over main music** preserve the backing.
+Leaving the tab releases the microphone, stops the reply vocal and cancels pending auto-play; an
+already submitted generation can finish in the background. Cancel stops
+remaining generation steps, but an API request already in flight may still use
+credits. Interrupted requests are recoverable by their request ID and are never
+automatically repeated.
+
+Replies and submitted recordings are stored locally under `var/rap-response`.
+Browser settings and saved sessions retain preferences and job references,
+without embedding microphone recordings. The API key remains on the backend.
+
+Rap controls live in **Rap response**. The Synth and Music mixers contain only
+their instrumental controls; start a backing track there, then open Rap response
+to record or type a message. Earlier embedded voice drafts and prepared-render
+references remain in saved mixer settings and named sessions, without starting
+a hidden voice player.
+
+### Rap experiment
+
+**Rap response → Voice experiments** opens the comparison workspace. Its
+existing `#rap-experiment` bookmarks still work. Enter one verse, BPM, a main
+voice, an alternate voice and a delivery direction, then **Generate all eight comparisons**.
+It prepares eight examples: natural speech, phrases placed on beats, a fresh
+take, a different voice, expressive Eleven v4 delivery, whole-line bar fitting,
+a produced vocal, and a rap generated by Eleven Music with its vocal separated.
+
+For a quicker result, **Generate fast voice** uses Eleven Flash 2.5 at 24 kHz
+and creates clean and robot versions from one speech request. Jade is the default
+voice for this experiment; an explicit `ELEVENLABS_VOICE_ID` still takes precedence.
+**Autotune** can follow the voice and snap it to a selected key and scale, or
+force its voiced sections onto a fixed melody: one note, two notes, rising,
+falling, arpeggio or pop hook. Melody controls select octave 2–5 and a new note
+every half, one or two beats. The pattern follows the BPM from the start of the
+clip, continuing through pauses while consonants remain intact. Fixed patterns
+use major intervals when Chromatic is selected; Follow voice retains chromatic
+scale correction.
+**Rhythm** independently controls phrasing: Natural retains the original take,
+Phrases on beats moves complete phrases to beat starts, and Beat flow gently
+stretches whole lyric lines to beat lengths. Put each phrase on its own line for
+Beat flow. Stretching stays within 0.8–1.25 of the original duration, preserving
+pitch; short phrases use half beats or keep their original duration. It retains
+phrase tails and never slices individual words. This improves rhythmic phrasing,
+but does not turn a spoken take into a performed rap. Stretched word timestamps
+are estimates. Both clean and processed examples use the selected rhythm.
+**Metallic** adds ring modulation and **Radio** adds filtering and digital
+distortion. Effect amount controls the wet/dry mix (100% for new drafts), and Tone
+controls its brightness (6 kHz for new drafts). Explicit saved values remain.
+**Apply effects**
+reprocesses the saved recording locally when the lyrics and main voice match;
+it includes a clean comparison and does not request another voice. Natural
+rhythm preserves the original speech timing.
+Fast requests have a separate worker so they can run alongside longer comparison
+jobs. Cards show measured voice-generation, processing and total ready times;
+playback becomes available when the complete clip is ready.
+Older Vocoder examples remain playable; their next effects edit uses Autotune.
+
+Examples have individual Play and Download controls. Only one plays at a time;
+the optional metronome starts with the example. Generated rap also exposes its
+full mix separately from the isolated vocal. Saved comparisons reopen without
+generation or playback. Lyrics, selected comparison and listening preferences
+are included in named sessions; audio remains in `var/rap-experiment`.
+
+The default full comparison uses four speech generations, one music generation
+and one two-stem separation. Natural/phrases share one source, while expressive,
+bar timing and vocal production share another. **New take** on a voice card
+requests a new performance; timing/production cards reuse a matching saved
+source through **Apply timing** or **Apply effects** when possible. Per-example
+failures leave successful examples available.
+Interrupted provider requests are never automatically repeated. The optional
+voice catalog needs the key's `voices_read` permission; default and custom voice
+IDs remain usable without that catalog permission.
+The Main voice selector also offers a public shortlist when the account catalog
+is unavailable. Compare the clean take first, then its processed version; saved
+comparison labels include the selected voice. Labelled audition sets appear in
+**Neutral · Rhythm** first, followed by Jade · Melodies, Clear & rhythmic,
+Deep & gritty, and Bright & synthetic groups. Stable IDs such as N01, J01, A1,
+B2 and C3 make feedback
+specific. Previous/Next browses the same order without starting playback.
+The Jade set includes eight treatments of the same saved Jade take, plus two
+melodies each for Elowen and Maisie. Every treatment includes its clean source,
+with the same lyrics, 100 BPM, 100% effect and 6 kHz tone. Earlier auditions stay
+available in their original groups.
+The Neutral set compares Jade in a middle register with natural, phrase and
+beat-flow timing, plus a Maisie alternative. These are listening candidates for a
+more neutral presentation; pitch alone does not determine perceived gender.
+To use an original designed voice, create and save one with ElevenLabs
+[Voice Design](https://elevenlabs.io/docs/eleven-creative/voices/voice-design),
+then choose **Custom voice ID** here. The dashboard does not create new voice
+identities or add voices to the account.
+
+Python performs all voice preparation. Bar fitting uses restrained,
+pitch-preserving WSOLA on whole lyric lines; short lines retain their natural
+delivery and receive padding. Vocal production adds EQ, compression, mild
+saturation and stereo doubling. Speech comparisons use active-signal RMS
+matching with peak protection. The expressive source is 24 kHz versus the
+16 kHz baseline. These changes affect delivery, timing and fidelity together;
+the expressive comparison is not a controlled sample-rate-only test.
+
+Bar fitting, production and robot effects require NumPy (`python3 -m pip install numpy`). The music
+comparison requires FFmpeg and ffprobe, using the existing local music tools.
+Music generation chooses its own vocal identity and only requests the supplied
+BPM; it may not precisely follow the metronome, and separated vocals may retain
+instrument bleed. This tab is for auditioning approaches before adopting one in
+the mixers. The implementation uses the official
+[speech timing API](https://elevenlabs.io/docs/api-reference/text-to-speech/convert-with-timestamps),
+[expressive voice directions](https://elevenlabs.io/docs/overview/capabilities/text-to-speech/best-practices),
+and [music API](https://elevenlabs.io/docs/api-reference/music/compose).
+
+### Shared signal mixes
+
+In either mixer, **Share mix** adds a signal mix to the shared library. In the
+other mixer, choose it under **Shared signal mixes** and press **Add shared mix**.
+Input, combination and fixed-range edits follow the shared definition when
+switching mixers; each mix keeps its local mappings to synth parameters or stems.
+**Make independent** keeps a local copy that can be changed separately.
+Connections inputs and simulated signals are listed separately and require the
+matching **Signals from** mode. Automatically learned ranges stay local.
+
+Both mixers provide **Signal strength** for each mapping. At **0%**, the manual
+base setting stays unchanged; **100%** applies the full mapped range. Values
+between them reduce the signal's influence, independently for each parameter or
+channel effect. Frequency controls blend logarithmically. Strength settings save
+with the mixer and sessions; existing mappings start at 100%. A mapping at 0%
+does not wait for its input to arrive.
+
+### Saved sessions
+
+Open **Sessions** in the header and use **Save new version** to name a snapshot
+of both mixers, their mappings and sound controls, shared signal definitions,
+music prompt and selected track, connection preferences, Drums, and previous
+interface settings. **Load** restores the selected version; **Update selected**
+replaces that version. Versions can also be renamed or deleted.
+
+Sessions save in this browser. **Export selected**, **Export all**, and **Import**
+provide portable JSON copies. Audio files and recordings are referenced by ID,
+so they must still exist on the dashboard server. Loading stops playback and
+does not generate music, request MIDI access, or reconnect live inputs. Press
+Connect live or Connect MIDI device when needed, then Play to resume.
+Running generation jobs are separate from saved sessions.
+
 ### Music mixer
 
 The **Music mixer** tab opens the mixer, with **Create instrumental music** at the top.
 The next-track prompt, BPM, key, instruments, and length stay visible.
-**Generate & play** requests original instrumental music and separates its
+**Start music** requests original instrumental music and separates its
 stems. The mixer plays and shows only instrumental stems; the separated vocal
 stem is excluded from playback and mappings. **Recent tracks** recalls saved music;
-**Play** starts the selected track.
-The previous interface remains available through **Previous version** in Advanced
+**Play saved track** starts the selected track and follows the **Next track** choice.
+The previous interface remains available through **Previous version**
 or directly at <http://127.0.0.1:8790/#elevenlabs>.
 
-While playing, the mixer automatically prepares one spare track, including
-stems. Each transition frees the slot for another generation, with no session
-cap. Prompt changes apply to the next submitted request. Tracks share the
-requested musical direction and use the preceding provider audio as a
-conditioning reference when available. Ready tracks crossfade near the loop
+**Next track** has four choices:
+
+- **Loop** repeats the current track without requesting another generation.
+- **Generate similar** prepares a new track using the prompt and a low-strength
+  reference to the current music when available.
+- **Generate new** (the default) prepares a fresh interpretation of the prompt.
+- **Choose old** lets you select saved music for the next crossfade. The selected
+  track then repeats until you choose something else; it uses no generation or
+  stem-separation requests.
+
+The generation modes keep one spare track ready, including stems. Each transition
+frees the slot for another generation, with no session cap. Editing the prompt,
+BPM, key, instruments, or length replaces the waiting generation after a short
+typing pause. Switching to Loop or Choose old stops further generation requests;
+already submitted work can finish and remains available in **Recent tracks**.
+A crossfade already under way finishes smoothly, and the following track uses
+the new choice. **Up next** shows the pending music. Key and instrument fields
+still constrain both generation modes, so update them with a new style.
+The choice and selected saved track are included in saved mixer preferences and
+sessions. **Recent tracks** remains available for immediate recall.
+Ready tracks crossfade near the loop
 boundary; tempo and beat alignment depend on the generated audio. The current
 track repeats while its replacement is late, and keeps repeating after an error
-until **Retry next track** succeeds. Failed or uncertain submissions are never
-automatically resubmitted. Every new track and its stem separation use credits.
+until **Retry next track** succeeds. Requests rejected because another music or
+stem job is still running retry automatically with a delay. Failed or uncertain
+generations are not automatically resubmitted. Every new track and its stem
+separation use credits. **Stop** stops playback and automatic generation;
+opening or restoring the mixer does not start either.
 
 Use **Connections input** for live or recorded signals, or explicitly choose
 **Simulated demo signals**. Add up to four signal mixes, each combining up to six
@@ -117,9 +429,19 @@ Each mix identifies whether it uses a single input or combines several inputs.
 Each channel has a volume fader, mute, pan, filters, delay, and reverb; stems also
 have solo. **Map a signal** routes a combined signal mix to a channel effect.
 Reuse one mix across channels, or add several effect mappings to one channel.
+**More effects** includes independent **Playback speed** (75–125%, master only)
+and **Pitch shift** (−12 to +12 semitones, master and each stem). Speed preserves
+the notes while changing tempo; pitch shifts preserve playback timing. Master
+and stem pitch offsets add together. Both controls can be mapped to signals and
+use the mapping's **Signal strength** percentage.
+Pitch processing runs locally in an AudioWorklet, using the vendored
+[SoundTouchJS](https://github.com/cutterbl/SoundTouchJS) processor. It adds a short
+buffering delay (about 256 ms) that playback fades and the rap clock account for.
+Large shifts can soften or move individual transients; the rap beat grid still
+uses the track's requested BPM.
 Mapped volume multiplies the manual fader, and mute/solo takes priority. The
 vertical meters show effective volume settings, not measured audio loudness.
-An audible mapped channel waits for all its input signals; missing inputs on
+An audible mapped channel waits for the input signals of mappings above 0% strength; missing inputs on
 muted or solo-excluded channels do not silence the other channels.
 
 Mixer preferences save separately from the existing interface. Switching tabs
@@ -130,8 +452,8 @@ recovered by checking its saved result when playback resumes.
 
 ### Previous generated music interface
 
-Start with `make dashboard-sonify`, open **Music mixer**, switch to **Advanced**,
-and choose **Previous version**. This
+Start with `make dashboard-sonify`, open **Music mixer**, and choose
+**Previous version**. This
 workspace uses the existing local server and works without MIDI hardware.
 It has its own generated-audio mappings and saved music, and defaults to the
 recording or live RAPP stream selected in Connections. Playback, **What creates
@@ -148,7 +470,7 @@ paths are never included in the provider request.
 
 **Realtime playback:** choose a saved track as the starting sound, choose a
 control source, and press **Play**. The shared Connections input is the
-default. Advanced source settings also offer **Separate RAPP WebSocket**
+default. **Input override for this instrument** also offers **Separate RAPP WebSocket**
 to connect directly, **Replay this track's recording** for the analyzed flat file, or
 the clearly labeled demo movement to try the controls. Replay of a track's
 recording is available for older tracks that have a saved analysis. New starting
@@ -157,8 +479,9 @@ example dataset. RAPP recordings still work as mapping inputs through Connection
 
 Each live mapping follows **input(s) → audio source → filter/effect**. Choose
 the master or an available stem, then low-pass cutoff, resonance, high-pass
-cutoff, volume, stereo pan, delay, or reverb. Speed/pitch applies to the master
-so stems stay synchronized. Create up to 16 mappings, combining up to six
+cutoff, volume, stereo pan, pitch shift, delay, or reverb. Playback speed applies
+to the master so stems stay synchronized; pitch can also be changed per stem.
+Create up to 16 mappings, combining up to six
 inputs in each with average, weighted average, normalized sum, difference,
 minimum, or maximum. Each input is normalized before combining; later rows win
 when they address the same audio source and control.
@@ -169,10 +492,10 @@ saved range. **Freeze** keeps the learned range fixed; **Relearn** starts it
 again. **Adjust input range** also accepts manual bounds, and output range,
 inversion, and smoothing remain editable. Existing saved fixed ranges are kept.
 The Synth tab exposes the same combine, auto-learning, freeze, and manual-range
-workflow under each input in Basic. Controls
+workflow under each input. Controls
 update at 20 Hz with audio-parameter smoothing. Missing or stale input fades
-the audio and prevents new automatic generation. Playback speed also changes
-pitch; tempo and key in a generation plan remain musical requests.
+the audio and prevents new automatic generation. Playback speed preserves pitch;
+tempo and key in a generation plan remain musical requests.
 Mapping rows, source settings and the starter selection are saved in the browser.
 Automatic upcoming music generation always starts off after a reload.
 
@@ -186,7 +509,7 @@ sliders and mapping destinations control each layer independently; separation
 quality and instrument isolation depend on the provider. Stem filters and
 effects run before the layers reach the master filters and effects. A missing
 stem is marked unavailable and its mappings never redirect to the master.
-The **Stem mixer** is visible in Basic and includes a **Mute/Unmute** button
+The **Stem mixer** includes a **Mute/Unmute** button
 for each stem. Mute overrides the stem's mapped volume; unmute restores its
 manual level while mappings keep working. Mutes and volume preferences are
 remembered by stem name across Stop/Play, upcoming segments, and reloads.
@@ -230,7 +553,7 @@ and a local crossfade. Neither path guarantees beat or melody continuity.
 Editing settings never submits a generation request. Duplicate requests reuse
 an existing attempt; generating another version is a deliberate paid action.
 Previously saved music remains available, including older tracks created from
-recordings. Downloads and exports remain available in Advanced.
+recordings. Downloads and exports remain available with each saved track.
 
 Jobs, inputs, immutable plan revisions, and audio persist under ignored
 `var/elevenlabs/`. One worker sends generation requests at a time. Interrupted
@@ -303,27 +626,39 @@ compensated levels to avoid a large volume jump when adding voices. The observer
 shows all notes in the chord. MIDI chords use channel 1; the synth patch must be
 configured for polyphonic playing.
 
-The browser **Sound** menu provides Glass, Pluck, Warm pad, Reed, Bell and Soft
-bass. Wave/envelope/brightness edits return to Custom. **Sound changes** can
+The Synth mixer **Browser voice** menu provides Glass, Pluck, Warm pad, Reed, Bell and Soft
+bass. Wave/envelope/brightness edits return to Custom. Under **Sounds & patches**, **Automatic sound changes** can
 keep the selected sound, cycle, choose randomly without immediately repeating,
 or **Follow mapping** using the **Sound palette position** destination (0–100%).
 Changes are sampled at the start of playback and every 16, 32, 64 or 128 steps.
 A mapping alone does not enable patch changes; select Follow mapping to use it.
+In Synth mixer this adds the Sound palette position parameter if needed; choose
+a signal mix on that parameter to drive patch selection.
 
 For MIDI output, the default **All banks A–H** palette explores all 1,024
-locations. **My shortlist** optionally narrows that to 1–32 locations such as
+locations. **Custom selection** optionally narrows that to 1–32 locations such as
 `A001, B017, H128`. The manual **Bank** and
-**Patch** selectors and **Send bank / patch** button select a specific location
-and stop playback. Selecting a patch replaces any unsaved edit-buffer sound on
-the synth. Automatic changes release active notes, send bank MSB/LSB and Program
+**Patch** selectors and **Select patch** button select a specific location
+while keeping playback running. Notes continue automatically after the brief
+sound change, without resetting the sequence or pressing Play again. Selecting
+a patch while stopped leaves playback stopped. Selecting a patch replaces any
+unsaved edit-buffer sound on the synth. Changes release active notes, send bank MSB/LSB and Program
 Change with the same 20 ms gaps as the native driver, and wait 100 ms before
-resuming notes. Changes are at least two seconds apart; Stop, tab changes and
-output changes cancel pending sends. The observer reports the location *sent*,
+resuming notes. Automatic changes are at least two seconds apart; Stop and output changes
+cancel pending sends. Workspace navigation keeps playback running. The observer reports the location *sent*,
 not an acknowledgement from the hardware or a known patch name.
+
+Enable **Pgm Chg RX** on the Hydrasynth and match its MIDI receive channel to
+channel 1. Banks A–H are documented in the current
+[ASM Keyboard/Desktop manual](https://www.mecldata.com/download/asm/Hydrasynth_KB_DR_Owners_Manual_2.2.0.pdf).
+These controls select sounds already stored on the instrument. Import new
+sound packs or rearrange banks with [ASM Manager](https://www.ashunsoundmachines.com/downloads);
+the dashboard does not transfer patch-library files or read patch names.
 
 Browser automation uses the six preview sounds; MIDI automation uses instrument
 patch locations. Their timbres are independent. Harmony and sound-change settings,
-including the MIDI shortlist, are stored with mapping tabs and presets. Existing
+including the MIDI palette, are stored with the Synth mixer session (and with
+mapping tabs and presets in the previous Synth interface). Existing
 tabs default to keeping the current sound until automation is enabled.
 
 Recording samples advance at the musical clock's pace, not their original
@@ -332,18 +667,18 @@ recordings or tabs cancels an unfinished playback preparation.
 
 ### Full Hydrasynth parameter mappings
 
-Click **+ Destinations** in a mapping row to search the catalog, filter by group,
+In the previous Synth interface, click **+ Destinations** in a mapping row to search the catalog, filter by group,
 and select several targets at once. Each target has an enable switch, its own
 curve, and independent From/To values. This allows one joint angle, for example,
 to move filter cutoff, invert a mutant depth, change oscillator wave selection,
 and increase rhythmic density together. A recipe can also combine up to six
 input signals before sending the result to its destinations.
 
-The picker exposes **1,039 usable hardware destinations**, including **929 NRPN
+The picker exposes **1,043 usable hardware destinations**, including **929 NRPN
 parameters**: oscillators, mutants, filters, envelopes, LFOs and steps, mixer,
 effects, arpeggiator, voice settings, macros and modulation routing. CC entries
-are often aliases of these parameters, so this count is not 1,039 independent
-synthesis controls. Another 110 reference entries remain visible but disabled
+are often aliases of these parameters, so this count is not 1,043 independent
+synthesis controls. Another 106 reference entries remain visible but disabled
 because their ranges are missing, addresses conflict, or they use reserved MIDI
 control numbers. The catalog is based on ASM's legacy v1.5 MIDI specification;
 behavior on the connected instrument's firmware still needs hardware checking.
@@ -369,11 +704,20 @@ output cancels pending updates and releases active notes.
 
 ### Live RAPP input
 
-The **Live RAPP** card connects directly to the robot or the supplied replay
+**Connections → Live stream** connects directly to the robot or the supplied replay
 server, using the protocol in the
 [RAPP student pack](https://github.com/maleenj/RAPP-Realtime-Viz/tree/main/viz_student_pack).
-Enter the server's `ws://` or `wss://` address, click **Connect live**, then
-**Preview**. The default is `ws://localhost:8765`; replace localhost with the
+Enter the server's `ws://` or `wss://` address and click **Connect live**. The
+incoming-data monitor works before playback: inspect channel freshness, signal
+values and a selected signal's recent history. Unlabelled arrays and tensors show their
+mean, with the selected input's raw elements available in the inspector.
+**Pause display** freezes the inspection view while the stream and mappings
+continue. **Troubleshooting** provides recent connection events, invalid-message
+details, the latest message, a JSON format example, reconnect and diagnostic
+copy/download controls. Clearing diagnostics keeps learned mapping ranges.
+
+Open Synth mixer, Drums or Music mixer when ready to play. The default stream
+address is `ws://localhost:8765`; replace localhost with the
 robot or workshop server's address when needed. Allow local-network access if
 the browser requests it. An HTTPS-hosted dashboard requires a `wss://` stream.
 
@@ -387,7 +731,7 @@ channel/field names from recordings.
 
 Missing or stale mapped data silences playback after three seconds. A closed
 connection immediately releases notes and retries with bounded backoff when
-**Reconnect automatically** is enabled. Press **Preview** again after a
+**Reconnect automatically** is enabled. Start playback again after a
 reconnection. Clicking a recording returns to file playback. See
 [docs/live_streaming.md](docs/live_streaming.md) for replay setup and protocol
 limits.

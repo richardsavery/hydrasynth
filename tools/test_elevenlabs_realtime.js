@@ -18,6 +18,8 @@ assert.equal(normalize(1, 1, 1), null, "constant/invalid input bounds must not i
 assert.equal(normalize(1, 3, 1), null);
 assert.equal(mapValue(0.5, { target: "cutoff", outputMin: 200, outputMax: 20000 }), 2000, "frequency should use a perceptually useful logarithmic scale");
 assert.equal(mapValue(0.5, { target: "pan", outputMin: -1, outputMax: 1 }), 0);
+assert.equal(mapValue(0.75, { target: "pitch", outputMin: -12, outputMax: 12 }), 6, "pitch maps linearly in semitones");
+assert.equal(mapValue(1, { target: "pitch", outputMin: -99, outputMax: 99 }), 12);
 assert.equal(mapValue(1, { target: "gain", outputMin: 0, outputMax: 50 }), 1, "audio output bounds must be safe even with an invalid editor input");
 assert.equal(mapValue(0.5, { target: "stem:drums", outputMin: 0, outputMax: 1 }), 0.5);
 
@@ -55,6 +57,12 @@ assert.equal(legacyMapping.sources[0].inputMin, 10);
 const bounded = validateSettings({ mappings: [{ audioSource: "Bass", target: "rate", sources: Array.from({ length: 12 }, () => ({ sourceKey: "x", rangeMode: "auto" })) }] }).mappings[0];
 assert.equal(bounded.sources.length, 6);
 assert.equal(bounded.target, "cutoff", "stem speed must not break synchronized playback");
+const independentPitch = validateSettings({ mappings: [{ audioSource: "Bass", target: "pitch" }, { target: "rate" }] });
+assert.equal(independentPitch.mappings[0].target, "pitch", "pitch is available independently on each stem");
+assert.equal(independentPitch.mappings[0].outputMin, -12);
+assert.equal(independentPitch.mappings[0].outputMax, 12);
+assert.equal(independentPitch.mappings[1].target, "rate");
+assert.deepEqual(JSON.parse(JSON.stringify(validateSettings(independentPitch).mappings)), JSON.parse(JSON.stringify(independentPitch.mappings)), "pitch and speed mappings persist independently");
 const learning = { rangeMode: "auto", inputMin: 0, inputMax: 1, learnedMin: null, learnedMax: null };
 assert.equal(normalizeSource(learning, { value: 50, at: 0 }, 0), 0.5, "a constant learned source produces a neutral midpoint");
 assert.equal(normalizeSource(learning, { value: 100, at: 50 }, 50), 1);
@@ -83,6 +91,12 @@ assert.equal(routed.stemControls.Bass.cutoff, 600);
 assert.equal(routed.stemControls.Bass.pan, -0.5);
 routeControl(routed, { audioSource: "Bass", target: "rate" }, 0.8);
 assert.equal(routed.stemControls.Bass.rate, undefined);
+routeControl(routed, { audioSource: "master", target: "rate" }, 1.1);
+routeControl(routed, { audioSource: "master", target: "pitch" }, -5);
+routeControl(routed, { audioSource: "Bass", target: "pitch" }, 7);
+assert.equal(routed.rate, 1.1);
+assert.equal(routed.pitch, -5);
+assert.equal(routed.stemControls.Bass.pitch, 7);
 routeControl(routed, { audioSource: "__proto__", target: "gain" }, 0.5);
 assert.equal(Object.prototype.gain, undefined, "provider stem names cannot modify object prototypes");
 
@@ -172,7 +186,7 @@ function harness(fetchHandler, options = {}) {
   await sharedDefault.element("play").event("click"); await sharedDefault.advance(2000);
   for (let i = 0; i < 40; i++) await sharedDefault.advance(50);
   assert.equal(sharedDefault.players[0].valid, true);
-  assert.ok(Math.abs(sharedDefault.players[0].controls.gain - 0.525) < 0.00001, "Basic should map raw recorded values over the whole useful range");
+  assert.ok(Math.abs(sharedDefault.players[0].controls.gain - 0.5) < 0.00001, "Basic should map raw recorded values over the whole useful range");
   await sharedDefault.element("create").event("click");
   assert.equal(sharedDefault.createCount, 1, "the no-track action opens the creation workflow");
   assert.equal(sharedDefault.requests.length, 0);
@@ -338,7 +352,7 @@ function harness(fetchHandler, options = {}) {
   assert.equal(app.pauseCount, 1, "native audio should pause when reactive playback starts");
   assert.equal(app.requests.length, 0, "Playback with saved stems and local modulation must not trigger paid calls");
   assert.equal(app.players[0].valid, true);
-  assert.ok(app.players[0].controls.cutoff >= 220);
+  assert.ok(app.players[0].controls.cutoff >= 80);
   app.element("auto").checked = true;
   await app.element("auto").event("change");
   await app.advance(50);

@@ -70,6 +70,8 @@
 .mm-workspace .mm-prompt-panel { padding: 18px 20px; border: 1px solid #495c78; border-radius: 9px; background: linear-gradient(110deg, #253249, #1b222d 75%); }
 .mm-workspace .mm-prompt-panel > .mm-section-heading { margin: 0 0 17px; }
 .mm-workspace .mm-next-state { color: var(--mm-accent); font: 11px/1.5 var(--mono); text-align: right; }
+.mm-workspace .mm-next-controls { display: grid; grid-template-columns: minmax(160px, 230px) minmax(0, 1fr); gap: 13px; margin-bottom: 13px; }
+.mm-workspace .mm-next-controls [hidden] { display: none; }
 .mm-workspace .mm-prompt-grid { display: grid; grid-template-columns: minmax(0, 1fr) 90px 130px 135px; gap: 13px; align-items: end; }
 .mm-workspace .mm-prompt-text { grid-column: 1 / -1; }
 .mm-workspace .mm-instruments { grid-column: 1; grid-row: 2; }
@@ -80,6 +82,7 @@
 .mm-workspace .mm-now-playing { display: flex; gap: 12px; align-items: baseline; color: var(--mm-muted); font-size: 11px; }
 .mm-workspace .mm-now-playing > span { flex-shrink: 0; }
 .mm-workspace .mm-now-playing b { color: var(--mm-text); font-weight: 500; overflow-wrap: anywhere; }
+.mm-workspace .mm-up-next { margin-top: 7px; }
 .mm-workspace .mm-prompt-panel .mm-transport-readout { padding: 11px 0; margin: 0; border: 0; border-radius: 0; background: transparent; }
 .mm-workspace .mm-recent { border-top: 1px solid var(--mm-border); margin-top: 3px; padding-top: 13px; }
 .mm-workspace .mm-recent > summary { cursor: pointer; color: var(--mm-muted); font-size: 12px; }
@@ -87,6 +90,7 @@
 .mm-workspace .mm-recent-row select { flex: 1; }
 @media (max-width: 700px) {
   .mm-workspace .mm-prompt-panel { padding: 15px; }
+  .mm-workspace .mm-next-controls { grid-template-columns: minmax(0, 1fr); gap: 11px; }
   .mm-workspace .mm-prompt-grid { grid-template-columns: 1fr 1fr 1fr; gap: 11px; }
   .mm-workspace .mm-instruments { grid-column: 1 / -1; grid-row: 3; }
   .mm-workspace .mm-prompt-actions .mm-primary { min-width: 0; }
@@ -208,6 +212,10 @@
 .mm-workspace .mm-route .mm-pair { gap: 6px; }
 .mm-workspace .mm-route summary { margin-top: 9px; font-size: 10px; }
 .mm-workspace .mm-route output { color: var(--bus-color); font: 10px var(--mono); }
+.mm-workspace .mm-strength { min-width: 0; }
+.mm-workspace .mm-strength > span { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+.mm-workspace .mm-strength output { flex-shrink: 0; color: var(--bus-color, var(--mm-accent)); font: 11px var(--mono); white-space: nowrap; }
+.mm-workspace .mm-strength input[type="range"] { width: 100%; min-width: 0; height: 4px; margin: 8px 0; }
 .mm-workspace label.mm-check { display: flex; align-items: center; gap: 6px; margin-top: 8px; }
 .mm-workspace .mm-check input { flex: 0 0 auto; width: 13px; height: 13px; margin: 0; }
 .mm-workspace .mm-add-route { width: calc(100% - 18px); margin: 2px 9px 12px; min-height: 32px; padding: 7px 5px; border-style: dashed; color: #b0bfd5; background: #202a38; font-size: 10px; }

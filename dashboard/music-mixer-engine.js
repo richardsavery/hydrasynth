@@ -16,16 +16,18 @@ globalThis.HydraMusicMixerEngine = (() => {
   const onlyVocalStems = (selected) => selectedStems(selected).length > 0 && instrumentalStems(selectedStems(selected)).length === 0;
   const unavailableInstrumentalMessage = "This track has no instrumental stems. Choose another track or generate new music.";
   const operators = ["average", "weighted", "difference", "minimum", "maximum"];
-  const effects = ["cutoff", "highpass", "pan", "reverbMix", "delayMix", "resonance", "rate"];
+  const effects = ["cutoff", "highpass", "pan", "reverbMix", "delayMix", "resonance", "rate", "pitch"];
+  const EFFECT_DEFAULTS_VERSION = 2;
+  const previousRanges = { cutoff: [220, 14000], resonance: [0.7, 6], highpass: [20, 900],
+    gain: [0.2, 0.85], pan: [-0.8, 0.8], rate: [0.85, 1.15], delayMix: [0, 0.4], reverbMix: [0.05, 0.5] };
   const DEMO_FIELDS = ["movement", "energy", "pace"].map((name) => ({
     key: `demo:${name}`, name: `${name[0].toUpperCase()}${name.slice(1)} · simulated`,
     label: `${name[0].toUpperCase()}${name.slice(1)}`, reducers: ["value"], default_reducer: "value", minimum: 0, maximum: 1
   }));
-  let activeEngine = null;
 
   function defaultChannel(name = "master") {
     return { name, level: name === "master" ? 0.8 : 1, muted: false, solo: false,
-      cutoff: 20000, highpass: 20, pan: 0, reverbMix: 0, delayMix: 0, resonance: 0.7, rate: 1, routes: [] };
+      cutoff: 20000, highpass: 20, pan: 0, reverbMix: 0, delayMix: 0, resonance: 0.7, rate: 1, pitch: 0, routes: [] };
   }
   function validateConfig(value) {
     const incoming = value && typeof value === "object" ? value : {};
@@ -55,18 +57,21 @@ globalThis.HydraMusicMixerEngine = (() => {
       }
       // One route per effect; the last supplied route wins deterministically.
       const routes = new Map();
-      for (const route of list(channel.routes).slice(0, 8)) {
+      for (const route of list(channel.routes).slice(0, 9)) {
         if (!route || !safeName(route.busId) || !Object.hasOwn(TARGETS, route.target) ||
             (channel.name !== "master" && route.target === "rate")) continue;
         const target = TARGETS[route.target];
+        const previous = previousRanges[route.target];
+        const upgrade = previous && incoming.effectDefaultsVersion !== EFFECT_DEFAULTS_VERSION &&
+          route.outputMin === previous[0] && route.outputMax === previous[1];
         routes.set(route.target, { busId: route.busId, target: route.target,
-          outputMin: finite(route.outputMin) ? clamp(route.outputMin, target.min, target.max) : target.low,
-          outputMax: finite(route.outputMax) ? clamp(route.outputMax, target.min, target.max) : target.high,
-          invert: route.invert === true });
+          outputMin: !upgrade && finite(route.outputMin) ? clamp(route.outputMin, target.min, target.max) : target.low,
+          outputMax: !upgrade && finite(route.outputMax) ? clamp(route.outputMax, target.min, target.max) : target.high,
+          invert: route.invert === true, strength: finite(route.strength) ? clamp(route.strength, 0, 1) : 1 });
       }
       result.routes = [...routes.values()]; channels.push(result);
     }
-    return { mode: incoming.mode === "demo" ? "demo" : "shared", buses, channels };
+    return { mode: incoming.mode === "demo" ? "demo" : "shared", buses, channels, effectDefaultsVersion: EFFECT_DEFAULTS_VERSION };
   }
 
   function create({ sourceBridge, onUpdate = () => {}, onError = () => {}, onTransition = () => {},
@@ -74,7 +79,7 @@ globalThis.HydraMusicMixerEngine = (() => {
     let config = validateConfig({}), active = false, running = false, starting = false;
     let track = null, player = null, unlockedPlayer = null, timer = null, epoch = 0, error = null;
     let trackHasOnlyVocals = false;
-    let queuedTrack = null, preparingTrack = null, queueing = false;
+    let queuedTrack = null, preparingTrack = null, queueing = false, queueSequence = 0;
     const retainedChannels = new Map();
     let fields = [], sourceLabel = "Choose an input in Connections", buses = [], channels = [];
     let controls = {}, sourceValid = true, preparedKey = null, pendingKey = null, preparation = 0;
@@ -103,13 +108,40 @@ globalThis.HydraMusicMixerEngine = (() => {
         sourceValid, position: player?.currentPosition || 0,
         duration: player?.duration || track?.audio?.duration_seconds || track?.requested_duration_seconds || track?.duration_seconds || 0, error });
     }
+    function transportClock(bpm) {
+      const selected = player?.currentTrack || track;
+      const requested = selected?.realtime?.generation_settings?.bpm ?? selected?.generation_settings?.bpm ?? selected?.request?.settings?.bpm ?? bpm;
+      const clock = (player || unlockedPlayer)?.transportClock?.(requested);
+      if (!running) {
+        if (!clock && !selected) return null;
+        // A recalled track already has a tempo before its audio is unlocked.
+        // Use the same current rate that start() will seed into the player;
+        // an unlocked, empty player still has its default rate at this point.
+        const tempo = Number(requested), validTempo = Number.isFinite(tempo) && tempo >= 20 && tempo <= 300;
+        const rate = Number(controls.rate) || 1;
+        return { context: clock?.context || null, destination: clock?.destination || null,
+          playing: false, valid: validTempo, bpm: validTempo ? tempo * rate : null,
+          baseBpm: validTempo ? tempo : null, rate, beat: 0, at: clock?.at || 0,
+          token: `${epoch}:stopped:${trackIdentity(selected)}:${tempo}:${rate}`, estimated: true, rateChanging: false };
+      }
+      if (!clock) return null;
+      return { ...clock, playing: active && running && clock.playing,
+        valid: clock.valid && (!running || sourceValid), token: `${epoch}:${clock.token}` };
+    }
     function emit() { onUpdate(snapshot()); }
     function report(cause) {
       error = cause?.message || String(cause); onError(error);
     }
     function newPlayer() {
       if (!Player) throw new Error("Audio playback is unavailable in this browser.");
-      const candidate = new Player({ onTransition(next, details) {
+      let candidate = null;
+      candidate = new Player({ onState(state) {
+        // Runtime audio failures happen after start() has returned. Keep the
+        // transport honest, but let a failed upcoming decode keep playing.
+        if (!candidate || candidate !== player || !active || state.status !== "error") return;
+        report(state.error || "Audio playback stopped. Press Play to restart the track.");
+        stop();
+      }, onTransition(next, details) {
         if (candidate !== player || !active || !running || trackIdentity(next) === trackIdentity(track)) return;
         track = normalizeTrack(next);
         trackHasOnlyVocals = onlyVocalStems(next);
@@ -188,7 +220,7 @@ globalThis.HydraMusicMixerEngine = (() => {
       const masterSolo = configured.get("master")?.solo;
       const anySolo = !masterSolo && all.some((channel) => sounding.has(channel.name) && channel.solo);
       const nextSolo = !masterSolo && all.some((channel) => available.has(channel.name) && channel.solo);
-      controls = { cutoff: 20000, highpass: 20, pan: 0, reverbMix: 0, delayMix: 0, resonance: 0.7, rate: 1, gain: 0.8,
+      controls = { cutoff: 20000, highpass: 20, pan: 0, reverbMix: 0, delayMix: 0, resonance: 0.7, rate: 1, pitch: 0, gain: 0.8,
         stemGains: Object.create(null), stemControls: Object.create(null) };
       sourceValid = true;
       channels = all.map((channel) => {
@@ -196,9 +228,17 @@ globalThis.HydraMusicMixerEngine = (() => {
         const effective = { ...defaultChannel(channel.name), ...channel, gain: 1 };
         let valid = true;
         for (const route of channel.routes) {
+          // Turning modulation off restores the manual setting, even when its
+          // input is disconnected. Volume modulation multiplies the fader.
+          if (route.strength === 0) continue;
           const input = values.get(route.busId);
           if (!finite(input)) { valid = false; continue; }
-          effective[route.target] = helpers.mapValue(route.invert ? 1 - input : input, route);
+          const mapped = helpers.mapValue(route.invert ? 1 - input : input, route);
+          const baseline = effective[route.target];
+          effective[route.target] = route.strength === 1 ? mapped
+            : TARGETS[route.target].logarithmic && baseline > 0 && mapped > 0
+              ? baseline * Math.pow(mapped / baseline, route.strength)
+              : baseline + route.strength * (mapped - baseline);
         }
         const muted = channel.muted || (!isMaster && (sounding.has(channel.name) ? anySolo : nextSolo) && !channel.solo);
         const level = muted ? 0 : channel.level;
@@ -232,7 +272,7 @@ globalThis.HydraMusicMixerEngine = (() => {
       emit();
     }
     function stop(preserveUnlocked = false) {
-      epoch++; starting = false; running = false; queuedTrack = null; preparingTrack = null; queueing = false;
+      epoch++; queueSequence++; starting = false; running = false; queuedTrack = null; preparingTrack = null; queueing = false;
       const previous = player; player = null; previous?.dispose();
       if (!preserveUnlocked) { unlockedPlayer?.dispose(); unlockedPlayer = null; }
       computeControls(); emit();
@@ -240,13 +280,13 @@ globalThis.HydraMusicMixerEngine = (() => {
     function deactivate() {
       active = false; preparation++; preparedKey = null; pendingKey = null; attemptedKey = null;
       if (timer !== null) { globalThis.clearInterval(timer); timer = null; }
-      if (activeEngine === api) activeEngine = null;
       stop();
     }
     function activate() {
       if (active) return;
-      if (activeEngine && activeEngine !== api) activeEngine.deactivate();
-      activeEngine = api; active = true; error = null;
+      // Music playback and Synth input buses are independent engine instances.
+      // Opening another workspace must not stop this instance's audio or clock.
+      active = true; error = null;
       timer = globalThis.setInterval(tick, 100); tick();
     }
     function setConfig(incoming) {
@@ -276,26 +316,32 @@ globalThis.HydraMusicMixerEngine = (() => {
       stop(true); trackHasOnlyVocals = onlyVocalStems(next); track = normalizeTrack(next); error = null;
       computeControls(); emit(); return true;
     }
+    function clearQueuedTrack() {
+      queueSequence++; queuedTrack = null; preparingTrack = null; queueing = false;
+      const cleared = player?.clearQueuedTrack?.() !== false;
+      if (active) tick(); else { computeControls(); emit(); }
+      return cleared;
+    }
     async function queueTrack(next) {
       if (!active || !running || !player || queueing || queuedTrack) return false;
       if (onlyVocalStems(next)) { report(new Error(unavailableInstrumentalMessage)); emit(); return false; }
       const incoming = normalizeTrack(next);
       if (!incoming?.audio_url || trackIdentity(incoming) === trackIdentity(track)) return false;
-      const candidate = player, run = epoch;
+      const candidate = player, run = epoch, sequence = ++queueSequence;
       preparingTrack = incoming; queueing = true; error = null;
       // A queue may start its crossfade as soon as decode completes. Seed all
       // upcoming controls first, especially solo and mute on new stem names.
       readInputs(now()); computeControls(); candidate.updateControls(controls, true); candidate.setSourceValid(sourceValid); emit();
       try {
         const prepared = await candidate.queueTrack(incoming, { requireStems: true });
-        if (!active || !running || run !== epoch || player !== candidate || prepared === false) return false;
+        if (!active || !running || run !== epoch || sequence !== queueSequence || player !== candidate || prepared === false) return false;
         queuedTrack = trackIdentity(track) === trackIdentity(incoming) ? null : incoming;
         return true;
       } catch (cause) {
-        if (active && run === epoch && player === candidate) report(cause);
+        if (active && run === epoch && sequence === queueSequence && player === candidate) report(cause);
         return false;
       } finally {
-        if (run === epoch && player === candidate) {
+        if (run === epoch && sequence === queueSequence && player === candidate) {
           preparingTrack = null; queueing = false; tick();
         }
       }
@@ -355,7 +401,7 @@ globalThis.HydraMusicMixerEngine = (() => {
       Object.assign(source, { rangeMode: "fixed", inputMin: source.learnedMin, inputMax: source.learnedMax, awaitingBounds: false });
       if (active) tick(); else emit(); return true;
     }
-    const api = { activate, deactivate, setConfig, getConfig, setTrack, queueTrack, unlock, start, stop, snapshot, relearn, freeze };
+    const api = { activate, deactivate, setConfig, getConfig, setTrack, queueTrack, clearQueuedTrack, unlock, start, stop, snapshot, transportClock, relearn, freeze };
     computeControls(); return api;
   }
   return { create, validateConfig, defaultChannel, instrumentalStems, TARGETS, DEMO_FIELDS };

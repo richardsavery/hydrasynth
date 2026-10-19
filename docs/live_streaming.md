@@ -18,11 +18,42 @@ python3 player.py recordings/enact_viz_01.jsonl.txt --loop
 The checked-in recordings currently have `.jsonl.txt` names; use the actual
 filename in your checkout. `--host 127.0.0.1 --port 8765` restricts playback to the
 local machine. In **Connections → Live stream**, enter `ws://localhost:8765`
-and click **Connect live**. Open **Synth** or **Drums** and press **Preview**
-once sources appear, or use the shared input in **Generated music**. For the robot,
+and click **Connect live**. Inspect the incoming data in Connections, then open
+**Synth mixer**, **Drums** or **Music mixer** once sources appear. For the robot,
 use the address supplied by the workshop, such as `ws://192.168.1.50:8765`.
 Browser local-network permission and network access to that host/port are needed.
 A dashboard served over HTTPS requires a secure `wss://` endpoint.
+
+## Inspect and troubleshoot the connection
+
+The live monitor works without playing sound. It shows message rate, time since
+the last usable data, channel freshness, and current signal values. Choose a
+channel and signal to see its recent graph. Joint positions and velocities are
+separate inputs; unlabelled arrays and tensors use their mean for the graph and show a
+bounded preview of the underlying elements.
+
+**Pause display** freezes only the inspection view. Incoming messages, automatic
+range learning and sonification continue. Resume to see current values.
+
+Open **Troubleshooting** for connection events, invalid-message reasons, a
+bounded latest-message preview and a valid JSON example. Reconnect retries the
+address in the form. Diagnostic reports can be copied or downloaded; clearing
+diagnostic history does not reset mapping ranges.
+
+- **Cannot connect:** check the sender is running and the host/port match. Check
+  browser local-network permission if prompted. A generic WebSocket error does
+  not identify whether the sender, network, TLS or browser permission caused it.
+- **Connected, no data:** the sender may be idle or paused. It must broadcast
+  text messages in the format below, without a subscription request.
+- **Status messages only:** the greeting confirms a connection, but contains no
+  values for mappings. Start the sender's replay or robot data feed.
+- **Invalid messages:** inspect the reason and latest message. Each message must
+  be one JSON object with a channel and supported numeric arrays or tensors.
+- **Stale channel:** that channel has stopped updating for over three seconds.
+  Activity on another channel cannot make its old values usable.
+
+Diagnostic history and message previews are bounded, and are not included in
+saved sessions. Freshness uses browser receipt time, not the sender's timestamp.
 
 ## Protocol
 
@@ -55,7 +86,7 @@ an invalid indexed element is treated as missing, without shifting indices.
 The musical clock samples the latest values at the chosen tempo. It does not
 play one note per network frame. MIDI parameter updates run independently at
 25, 50 or 100 changes/second and replace queued values with the newest values.
-In both Synth and Generated music, each mapping input can automatically learn
+In both Synth mixer and Music mixer, each mapping input can automatically learn
 its incoming minimum and maximum, or use an editable fixed range. Registered
 inputs learn every fresh frame, including peaks between playback ticks.
 Constant learned signals map to the midpoint. **Freeze** keeps the learned

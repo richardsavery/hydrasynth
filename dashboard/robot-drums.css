@@ -1,0 +1,21 @@
+.robot-live-workspace .robot-drums { grid-column: 1 / -1; min-width: 0; margin-bottom: 22px; }
+.robot-drums .robot-drums-panel { height: 100%; }
+.robot-drums .robot-drums-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 20px; margin: 22px 0; }
+.robot-drums .robot-drums-arms { display: flex; flex-wrap: wrap; gap: 14px 26px; padding: 16px 0; margin: 0 0 14px; border: 0; }
+.robot-drums .robot-drums-arms legend { color: var(--muted); font-size: 12px; }
+.robot-drums .robot-drums-arms label { display: flex; flex-direction: row; align-items: center; gap: 9px; cursor: pointer; }
+.robot-drums .robot-drums-arms input[type="checkbox"] { width: 16px; height: 16px; min-height: 0; margin: 0; padding: 0; accent-color: var(--accent); }
+.robot-drums .robot-drums-amounts { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 24px; margin: 8px 0 16px; }
+.robot-drums .robot-drums-amounts .is-muted { opacity: .5; }
+.robot-drums .robot-drums-preview { padding: 15px 17px; margin: 23px 0; border: 1px solid var(--line-soft); border-radius: 8px; background: var(--panel-inset); overflow-x: auto; }
+.robot-drums .robot-drums-grid-row, .robot-drums .robot-drums-grid-head { display: grid; grid-template-columns: 60px repeat(16, minmax(11px, 1fr)); gap: 6px; align-items: center; min-width: 355px; }
+.robot-drums .robot-drums-grid-head { margin-bottom: 10px; color: var(--muted-2); font: 10px var(--mono); text-align: center; }
+.robot-drums .robot-drums-grid-row { margin: 9px 0; }
+.robot-drums .robot-drums-grid-row > span { color: var(--muted); font: 10px var(--mono); }
+.robot-drums .robot-drums-grid-row i { display: block; height: 16px; border-radius: 3px; background: var(--line-soft); border: 1px solid transparent; }
+.robot-drums .robot-drums-grid-row i.is-hit { background: color-mix(in srgb, var(--accent) 65%, var(--panel-inset)); }
+.robot-drums .robot-drums-grid-row i.is-current { border-color: var(--accent); box-shadow: 0 0 6px color-mix(in srgb, var(--accent) 30%, transparent); }
+.robot-drums .robot-drums-bottom { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 14px; }
+.robot-drums .robot-drums-clock { color: var(--muted); font: 11px var(--mono); }
+.robot-drums .robot-drums-bottom .robot-actions { flex-wrap: wrap; }
+@media (max-width: 650px) { .robot-drums .robot-drums-fields, .robot-drums .robot-drums-amounts { grid-template-columns: minmax(0, 1fr); gap: 20px; } .robot-drums .robot-drums-preview { padding: 12px; } }

@@ -7,6 +7,8 @@ globalThis.HydraLive = (() => {
   const finite = (value) => typeof value === "number" && Number.isFinite(value);
   const sourceId = (source) => `${source.sourceKey}|${source.reducer}|${source.index}`;
   const display = (value) => value.replaceAll("_", " ").replaceAll("-", " ");
+  const fieldLabel = (value, index) => ["string", "number", "boolean"].includes(typeof value)
+    ? String(value).slice(0, 80) : `Input ${index + 1}`;
   function flatten(raw) {
     if (!Array.isArray(raw)) return null;
     const values = [];
@@ -38,34 +40,42 @@ globalThis.HydraLive = (() => {
     return finite(value) ? value : null;
   }
   class Stream {
-    constructor() { this.channels = new Map(); this.fieldIndex = new Map(); this.samples = new Map(); this.ranges = new Map(); this.lastAt = null; this.frames = 0; this.invalid = 0; }
+    constructor() { this.channels = new Map(); this.fieldIndex = new Map(); this.samples = new Map(); this.ranges = new Map(); this.lastAt = null; this.frames = 0; this.invalid = 0; this.lastResult = null; }
     ingest(frame, now) {
-      if (!finite(now) || !frame || typeof frame !== "object" || typeof frame.channel !== "string" || frame.channel.length > 160) { this.invalid++; return false; }
-      if (frame.channel === "__status__") return false;
+      const reject = (reason) => { this.invalid++; this.lastResult = { accepted: false, kind: "invalid", reason }; return false; };
+      if (!finite(now) || !frame || typeof frame !== "object" || typeof frame.channel !== "string" || frame.channel.length > 160) return reject("shape");
+      if (frame.channel === "__status__") { this.lastResult = { accepted: false, kind: "status" }; return false; }
       const channelId = frame.channel;
-      if (!this.channels.has(channelId) && this.channels.size >= 32) { this.invalid++; return false; }
+      // JSON permits lone surrogate escapes, which cannot become URI-encoded source keys.
+      try { encodeURIComponent(channelId); } catch (_) { return reject("shape"); }
+      if (!this.channels.has(channelId) && this.channels.size >= 32) return reject("channel_limit");
       const arrays = new Map();
-      let size = 0;
+      let size = 0, fieldLimitReached = false;
       for (const key of ["data", "velocity"]) {
-        if (Array.isArray(frame[key])) { const values = flatten(frame[key]); if (!values) { this.invalid++; return false; } arrays.set(key, values); size += values.length; }
+        if (Array.isArray(frame[key])) { const values = flatten(frame[key]); if (!values) return reject("array_limit"); arrays.set(key, values); size += values.length; }
       }
       if (frame.tensors && typeof frame.tensors === "object") {
-        for (const [name, tensor] of Object.entries(frame.tensors).slice(0, 256)) {
+        const tensors = Object.entries(frame.tensors);
+        if (tensors.length > 256) fieldLimitReached = true;
+        for (const [name, tensor] of tensors.slice(0, 256)) {
           if (name.length > 160 || !Array.isArray(tensor?.data)) continue;
+          try { encodeURIComponent(name); } catch (_) { return reject("shape"); }
           const values = flatten(tensor.data);
-          if (!values) { this.invalid++; return false; }
+          if (!values) return reject("array_limit");
           arrays.set(`tensor:${name}`, values); size += values.length;
         }
       }
-      if (!size || size > MAX_VALUES) { this.invalid++; return false; }
+      if (!size) return reject("no_values");
+      if (size > MAX_VALUES) return reject("value_limit");
       const previous = this.channels.get(channelId);
-      if (previous && now < previous.at) { this.invalid++; return false; }
+      if (previous && now < previous.at) return reject("out_of_order");
       const channel = { arrays, at: now, revision: (previous?.revision || 0) + 1 };
       this.channels.set(channelId, channel); this.lastAt = now; this.frames++;
       let discovered = false;
       const add = (fieldId, name, kind, indexed = false) => {
         const key = `${encodeURIComponent(channelId)}|${encodeURIComponent(fieldId)}`;
-        if (this.fieldIndex.has(key) || this.fieldIndex.size >= 256) return;
+        if (this.fieldIndex.has(key)) return;
+        if (this.fieldIndex.size >= 256) { fieldLimitReached = true; return; }
         const reducers = indexed ? ["value"] : REDUCERS;
         this.fieldIndex.set(key, { key, id: fieldId, fieldId, name, kind, channelId,
           channelName: display(channelId), optionLabel: name, reducers, default_reducer: reducers[0] });
@@ -73,7 +83,8 @@ globalThis.HydraLive = (() => {
       };
       for (const [key, values] of arrays) {
         if (["data", "velocity"].includes(key) && Array.isArray(frame.labels) && frame.labels.length === values.length) {
-          values.slice(0, 256).forEach((_, index) => add(`${key}:${index}`, `${String(frame.labels[index]).slice(0, 80)} ${key === "data" ? "position" : "velocity"}`, key === "data" ? "position" : "velocity", true));
+          if (values.length > 256) fieldLimitReached = true;
+          values.slice(0, 256).forEach((_, index) => add(`${key}:${index}`, `${fieldLabel(frame.labels[index], index)} ${key === "data" ? "position" : "velocity"}`, key === "data" ? "position" : "velocity", true));
         } else add(key, display(key.replace(/^tensor:/, "")), key.startsWith("tensor:") ? "tensor" : "array");
       }
       // Learn every incoming frame for registered mapping inputs, even between UI/audio ticks.
@@ -85,6 +96,7 @@ globalThis.HydraLive = (() => {
         const value = reductions.get(range.key);
         if (value !== null) this.learn(source, value, channel.revision);
       }
+      this.lastResult = { accepted: true, kind: "data", channelId, discovered, fieldLimitReached };
       return discovered;
     }
     valueFor(source, field, channel) {

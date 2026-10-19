@@ -25,10 +25,14 @@ function harness(options = {}) {
     resetRange(source) { resets.push(source); }
   };
   class Player {
-    constructor(callbacks = {}) { this.callbacks = callbacks; this.stemNames = []; this.duration = 20; this.currentPosition = 3; players.push(this); }
+    constructor(callbacks = {}) {
+      this.callbacks = callbacks; this.stemNames = []; this.duration = 20; this.currentPosition = 3; players.push(this);
+      if (options.constructorState) callbacks.onState?.(options.constructorState);
+    }
     updateControls(controls, valid) { this.controls = plain(controls); this.valid = valid; }
     setSourceValid(valid) { this.valid = valid; }
     async resume() { this.resumed = true; if (options.resume) await options.resume(); }
+    transportClock(bpm) { return { bpm, playing: Boolean(this.playing), valid: this.valid !== false, token: "fake-deck", context: this }; }
     async loadTrack(selected) {
       this.track = selected;
       if (options.load) await options.load();
@@ -41,11 +45,13 @@ function harness(options = {}) {
       this.playing = !this.disposed; return this.playing;
     }
     async queueTrack(selected, queueOptions) {
+      const sequence = this.queueSequence || 0;
       this.queueOptions = queueOptions; this.queueInitialControls = plain(this.controls);
-      if (options.queue) await options.queue();
-      if (this.disposed) return false;
+      if (options.queue) await options.queue(selected);
+      if (this.disposed || sequence !== (this.queueSequence || 0)) return false;
       this.queued = selected; return true;
     }
+    clearQueuedTrack() { this.queueSequence = (this.queueSequence || 0) + 1; this.queued = null; return true; }
     promote() {
       const next = this.queued;
       this.playingStemNames = [...this.stemNames, ...next.stems.map((stem) => stem.name)];
@@ -71,6 +77,130 @@ function harness(options = {}) {
 
 async function main() {
   {
+    const { library: lib } = harness();
+    const old = lib.validateConfig({ channels: [{ name: "master", routes: [
+      route("mix", "cutoff", 220, 14000), route("mix", "delayMix", 0, 0.4), route("mix", "pan", -0.25, 0.25)
+    ] }] });
+    assert.deepEqual(plain(old.channels[0].routes.map(r => [r.outputMin, r.outputMax])), [[80, 20000], [0, 0.85], [-0.25, 0.25]], "upgrade only the old default ranges");
+    Object.assign(old.channels[0].routes[1], { outputMin: 0, outputMax: 0.4 });
+    assert.equal(lib.validateConfig(old).channels[0].routes[1].outputMax, 0.4, "a later custom choice is not upgraded again");
+    assert.deepEqual([lib.TARGETS.highpass.low, lib.TARGETS.highpass.high], [20, 6000]);
+    assert.deepEqual([lib.TARGETS.pan.low, lib.TARGETS.pan.high], [-1, 1]);
+    assert.deepEqual([lib.TARGETS.gain.low, lib.TARGETS.gain.high], [0, 1]);
+    assert.deepEqual([lib.TARGETS.pitch.low, lib.TARGETS.pitch.high], [-12, 12]);
+  }
+  {
+    const { library: lib } = harness();
+    assert.equal(lib.defaultChannel().pitch, 0);
+    assert.equal(lib.defaultChannel("Bass").pitch, 0);
+    const allRoutes = Object.entries(lib.TARGETS).map(([target, bounds]) => route("mix", target, bounds.low, bounds.high));
+    const validated = lib.validateConfig({ channels: [
+      { name: "master", rate: 1.2, pitch: -7, routes: allRoutes },
+      { name: "Bass", rate: 1.2, pitch: 99, routes: allRoutes }
+    ] });
+    assert.equal(validated.channels[0].routes.length, 9, "the master accepts all nine effects together");
+    assert.equal(validated.channels[1].routes.length, 8, "stems accept independent pitch with all other stem effects");
+    assert.equal(validated.channels[0].pitch, -7);
+    assert.equal(validated.channels[0].rate, 1.2);
+    assert.equal(validated.channels[1].pitch, 12, "manual pitch is limited to one octave");
+    assert.equal(validated.channels[1].rate, 1, "stems retain shared transport speed");
+    assert.ok(!validated.channels[1].routes.some((mapping) => mapping.target === "rate"));
+    assert.deepEqual(plain(lib.validateConfig(plain(validated))), plain(validated), "independent pitch and speed survive saved configurations");
+    const malformed = lib.validateConfig({ channels: [{ name: "master", pitch: NaN }, { name: "Bass", pitch: -99,
+      routes: [route("mix", "pitch", -99, 99)] }] });
+    assert.equal(malformed.channels[0].pitch, 0);
+    assert.equal(malformed.channels[1].pitch, -12);
+    assert.deepEqual(plain(malformed.channels[1].routes[0]), { ...route("mix", "pitch", -12, 12), strength: 1 });
+  }
+  {
+    const { library: lib } = harness();
+    for (const [input, expected] of [[undefined, 1], [null, 1], ["0.5", 1], [NaN, 1], [Infinity, 1], [-0.2, 0], [1.2, 1], [0, 0], [0.5, 0.5], [1, 1]]) {
+      const validated = lib.validateConfig({ channels: [{ name: "master", routes: [{ ...route("mix", "pan", -1, 1), strength: input }] }] });
+      assert.equal(validated.channels[0].routes[0].strength, expected, `strength ${input} is validated`);
+      assert.equal(lib.validateConfig(plain(validated)).channels[0].routes[0].strength, expected, "strength survives a saved configuration round trip");
+    }
+  }
+  {
+    const h = harness(), { engine: e, library: lib } = h;
+    const routes = [route("mix", "cutoff", 200, 20000), route("mix", "highpass", 20, 2000),
+      route("mix", "pan", -1, 1), route("mix", "gain", 0, 1), route("mix", "rate", 0.75, 1.25), route("mix", "pitch", -12, 12)];
+    e.setConfig({ buses: [bus("mix", [fixed("a"), fixed("b")])], channels: [
+      { ...lib.defaultChannel(), level: 0.6, highpass: 80, pan: 0.4, rate: 1.1, pitch: -4, routes },
+      { ...lib.defaultChannel("Bass"), level: 0.4, cutoff: 5000, pitch: 3, routes: [route("mix", "cutoff", 200, 20000), route("mix", "gain", 0, 1), route("mix", "pitch", 0, 12)] }
+    ] });
+    await e.setTrack(track); e.activate(); await settle(); assert.equal(await e.start(), true);
+    const player = h.players[0];
+    for (const strength of [0, 0.5, 1]) {
+      const config = e.getConfig();
+      for (const channel of config.channels) for (const mapping of channel.routes) mapping.strength = strength;
+      e.setConfig(config);
+      assert.equal(e.getConfig().channels[0].routes[0].strength, strength);
+      assert.ok(Math.abs(player.controls.cutoff - (strength === 0 ? 20000 : strength === 1 ? 2000 : Math.sqrt(20000 * 2000))) < 1e-9, "frequency strength is perceptual, with exact endpoints");
+      assert.ok(Math.abs(player.controls.highpass - (strength === 0 ? 80 : strength === 1 ? 200 : Math.sqrt(80 * 200))) < 1e-9);
+      assert.ok(Math.abs(player.controls.pan - 0.4 * (1 - strength)) < 1e-9);
+      assert.ok(Math.abs(player.controls.rate - (1.1 - 0.1 * strength)) < 1e-9);
+      assert.ok(Math.abs(player.controls.pitch - -4 * (1 - strength)) < 1e-9, "pitch strength blends semitones linearly without altering speed");
+      assert.equal(player.controls.stemControls.Bass.pitch, 3 + 3 * strength, "stem pitch has its own manual value and signal range");
+      assert.equal(player.controls.stemControls.Bass.rate, undefined);
+      assert.ok(Math.abs(player.controls.gain - 0.6 * (1 - 0.5 * strength)) < 1e-9, "gain strength blends modulation before multiplying the manual fader");
+      assert.equal(player.controls.stemGains.Bass, 0.4);
+      assert.ok(Math.abs(player.controls.stemControls.Bass.gain - (1 - 0.5 * strength)) < 1e-9);
+      assert.ok(Math.abs(player.controls.stemControls.Bass.cutoff - 5000 * Math.pow(2000 / 5000, strength)) < 1e-9);
+    }
+    h.samples.a = 0; h.samples.b = 0;
+    let config = e.getConfig();
+    Object.assign(config.channels[0].routes[0], { outputMin: 20000, outputMax: 200, invert: true, strength: 0.5 });
+    e.setConfig(config);
+    assert.equal(player.controls.cutoff, 2000, "strength follows both an inverted signal and a descending frequency range");
+    h.samples.a = null; await h.tick();
+    assert.equal(player.valid, false, "nonzero strength retains missing-input gating");
+    config = e.getConfig();
+    for (const channel of config.channels) for (const mapping of channel.routes) { mapping.strength = 0; mapping.busId = "deleted"; }
+    e.setConfig(config);
+    assert.equal(player.valid, true, "zero strength ignores unavailable and deleted input mixes");
+    assert.equal(e.snapshot().sourceValid, true);
+    assert.equal(player.controls.cutoff, 20000); assert.equal(player.controls.pan, 0.4); assert.equal(player.controls.gain, 0.6);
+    assert.equal(player.controls.stemControls.Bass.cutoff, 5000); assert.equal(player.controls.stemControls.Bass.gain, 1);
+    assert.equal(player.controls.pitch, -4); assert.equal(player.controls.stemControls.Bass.pitch, 3);
+    e.deactivate();
+  }
+  {
+    const h = harness(), e = h.engine;
+    assert.equal(e.transportClock(100), null, "idle inspection does not create a player");
+    e.activate();
+    await e.unlock();
+    assert.equal(e.transportClock(100).playing, false);
+    assert.equal(e.transportClock(100).context, h.players[0], "standalone rap can use the gesture-unlocked context");
+    await e.setTrack({ ...track, generation_settings: { bpm: 112 } });
+    assert.equal(e.transportClock(175).bpm, 112, "a stopped recalled track keeps its tempo when the next-track prompt differs");
+    await e.start();
+    assert.equal(e.transportClock(144).bpm, 112, "the sounding track tempo wins over a changed next-track prompt");
+    assert.equal(e.transportClock(144).playing, true);
+    const token = e.transportClock(144).token;
+    e.stop();
+    assert.equal(e.transportClock(144).context, null, "stopping disposes the accompaniment's voice context");
+    assert.equal(e.transportClock(144).bpm, 112, "the selected track tempo remains available after disposing its player");
+    await e.unlock();
+    assert.notEqual(e.transportClock(144).token, token, "a new transport cannot retain a queued voice");
+    e.deactivate();
+  }
+  {
+    const h = harness(), e = h.engine;
+    await e.setTrack({ ...track, generation_settings: { bpm: 100 } });
+    const clock = e.transportClock(175);
+    assert.equal(clock.bpm, 100, "preparing rap before any Play uses the recalled track tempo");
+    assert.equal(clock.context, null);
+    assert.equal(clock.playing, false);
+    assert.equal(h.players.length, 0, "reading the stopped tempo cannot create or unlock audio");
+    e.setConfig({ channels: [{ name: "master", rate: 1.25, pitch: 12 }] });
+    assert.equal(e.transportClock(175).bpm, 125, "preparation includes the rate that playback will apply");
+    e.setConfig({ channels: [{ name: "master", rate: 1.25, pitch: -12 }] });
+    assert.equal(e.transportClock(175).bpm, 125, "pitch changes do not change the tempo used to prepare rap");
+    e.activate(); await e.unlock();
+    assert.equal(e.transportClock(175).bpm, 125, "unlocking an empty player does not revert the prepared tempo to its default rate");
+    e.deactivate();
+  }
+  {
     const h = harness(), { engine: e, library: lib } = h;
     const validated = lib.validateConfig({ buses: Array.from({ length: 10 }, (_, i) => bus(i ? "duplicate" : "bus-2-1", Array(10).fill(fixed("a")))),
       channels: Array.from({ length: 12 }, (_, i) => ({ ...lib.defaultChannel(`stem${i}`), level: 100, cutoff: -1,
@@ -82,7 +212,7 @@ async function main() {
     assert.equal(validated.channels[0].name, "master");
     assert.equal(validated.channels[1].level, 1);
     assert.equal(validated.channels[1].cutoff, 20);
-    assert.deepEqual(plain(validated.channels[1].routes), [route("y", "gain", 0, 1)], "only the last valid route to an effect survives");
+    assert.deepEqual(plain(validated.channels[1].routes), [{ ...route("y", "gain", 0, 1), strength: 1 }], "only the last valid route to an effect survives");
     e.setConfig({ buses: [bus("combined", [fixed("a"), fixed("b", { weight: 3 })], "weighted")] });
     e.activate(); await settle();
     assert.equal(e.snapshot().running, false);
@@ -331,12 +461,79 @@ async function main() {
     e.deactivate();
   }
   {
+    const oldDecode = defer(), freshDecode = defer();
+    const h = harness({ queue: (selected) => selected.id === "obsolete" ? oldDecode.promise : freshDecode.promise }), e = h.engine;
+    await e.setTrack(track); e.activate(); await e.start();
+    const old = e.queueTrack({ ...track, id: "obsolete", audio_url: "/obsolete.mp3" });
+    assert.equal(e.snapshot().queueing, true);
+    assert.equal(e.clearQueuedTrack(), true);
+    assert.equal(e.snapshot().queueing, false);
+    const latest = e.queueTrack({ ...track, id: "latest", audio_url: "/latest.mp3" });
+    oldDecode.resolve(); assert.equal(await old, false);
+    assert.equal(e.snapshot().queueing, true, "a canceled decode's finally cannot clear its replacement's preparation state");
+    assert.equal(e.snapshot().queuedTrack, null);
+    freshDecode.resolve(); assert.equal(await latest, true);
+    assert.equal(e.snapshot().queueing, false);
+    assert.equal(e.snapshot().queuedTrack.id, "latest");
+    assert.equal(h.players[0].queued.id, "latest");
+    assert.equal(e.snapshot().track.id, "saved", "prompt edits keep the current song playing");
+    assert.equal(e.clearQueuedTrack(), true);
+    assert.equal(e.snapshot().queuedTrack, null);
+    assert.equal(h.players[0].queued, null);
+    assert.equal(h.players[0].playing, true);
+    assert.deepEqual(h.errors, []);
+    e.deactivate();
+  }
+  {
     const h = harness({ queue: () => { throw new Error("The saved stems could not be loaded"); } }), e = h.engine;
     await e.setTrack(track); e.activate(); await e.start();
     assert.equal(await e.queueTrack({ id: "broken", audio_url: "/broken.mp3", stems: track.stems }), false);
     assert.equal(e.snapshot().running, true); assert.equal(e.snapshot().track.id, "saved");
     assert.equal(h.players[0].playing, true, "a failed replacement leaves current audio repeating");
     assert.equal(e.snapshot().queuedTrack, null); assert.match(e.snapshot().error, /saved stems/);
+    e.deactivate();
+  }
+  {
+    const h = harness(), e = h.engine;
+    await e.setTrack(track); e.activate(); await e.start();
+    const player = h.players[0];
+    player.callbacks.onState({ status: "playing", error: "An upcoming track could not be decoded." });
+    assert.equal(e.snapshot().running, true, "a queue preparation warning does not stop current playback");
+    assert.equal(player.disposed, undefined);
+    await e.queueTrack({ ...track, id: "upcoming", audio_url: "/upcoming.mp3" });
+    player.callbacks.onState({ status: "error", error: "Pitch processing stopped. Press Play to restart the track." });
+    assert.equal(e.snapshot().running, false, "runtime processing errors stop the mixer transport");
+    assert.equal(e.snapshot().starting, false);
+    assert.equal(e.snapshot().queueing, false);
+    assert.equal(e.snapshot().queuedTrack, null);
+    assert.match(e.snapshot().error, /Pitch processing stopped/);
+    assert.equal(player.disposed, true);
+    assert.equal(h.errors.length, 1);
+    assert.equal(await e.start(), true, "the user can restart after a runtime processor failure");
+    player.callbacks.onState({ status: "error", error: "Late error from the disposed player" });
+    assert.equal(e.snapshot().running, true, "a stale player's error cannot stop its replacement");
+    assert.equal(h.errors.length, 1);
+    e.deactivate();
+  }
+  {
+    const h = harness({ constructorState: { status: "error", error: "Not yet an active player" } }), e = h.engine;
+    await e.setTrack(track); e.activate();
+    assert.equal(await e.start(), true, "a constructor callback cannot access an uninitialized candidate");
+    assert.equal(h.errors.length, 0);
+    e.deactivate();
+  }
+  {
+    const h = harness({ load: () => {
+      h.players[0].callbacks.onState({ status: "error", error: "The initial audio could not be loaded" });
+      throw new Error("The initial audio could not be loaded");
+    } }), e = h.engine;
+    await e.setTrack(track); e.activate();
+    assert.equal(await e.start(), false);
+    assert.equal(e.snapshot().running, false);
+    assert.equal(e.snapshot().starting, false);
+    assert.equal(h.players[0].disposed, true);
+    assert.equal(h.errors.length, 1, "a loading error is reported once without recursive disposal");
+    assert.match(e.snapshot().error, /initial audio/);
     e.deactivate();
   }
   {
@@ -369,10 +566,23 @@ async function main() {
     const loading = defer(), h = harness({ prepare: () => loading.promise }), e = h.engine;
     e.setConfig({ buses: [bus("a", [fixed("a")])] }); e.activate(); await settle();
     e.deactivate(); const count = h.updates.length; loading.resolve(); await settle();
-    assert.equal(h.updates.length, count, "late input preparation cannot reactivate the hidden workspace");
+    assert.equal(h.updates.length, count, "late input preparation cannot reactivate a stopped workspace");
     const other = h.library.create({ sourceBridge: h.bridge, Player: h.Player });
-    e.activate(); other.activate(); assert.equal(e.snapshot().active, false);
-    assert.equal(h.timers.size, 1, "only one mixer transport/preview may be active"); other.deactivate();
+    await e.setTrack(track); e.activate(); await settle(); await e.start();
+    const player = h.players[0];
+    other.activate();
+    assert.equal(e.snapshot().active, true);
+    assert.equal(e.snapshot().running, true);
+    assert.equal(player.playing, true, "another workspace input engine cannot stop the sounding player");
+    assert.equal(player.disposed, undefined);
+    assert.equal(h.timers.size, 2, "independent mixer input engines can stay active together");
+    e.activate(); other.activate();
+    assert.equal(h.timers.size, 2, "repeated activation cannot create duplicate timers");
+    h.samples.a = 60; await h.tick();
+    assert.equal(e.snapshot().buses[0].value, 0.6, "playing mappings still update with another workspace active");
+    other.deactivate(); assert.equal(h.timers.size, 1);
+    assert.equal(player.playing, true);
+    e.deactivate(); assert.equal(h.timers.size, 0); assert.equal(player.disposed, true);
   }
   console.log("Music mixer engine: combined inputs, learning, stem DSP, mute/solo, stale-data gating and canceled playback passed.");
 }

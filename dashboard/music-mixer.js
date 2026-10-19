@@ -5,15 +5,18 @@ globalThis.HydraMusicMixer = (() => {
   const KEY = "hydra.music-mixer.demo.v1";
   const OPERATORS = { average: "Average", weighted: "Weighted blend", difference: "Difference", minimum: "Lowest", maximum: "Highest" };
   const READ_MODES = { value: "Direct value", mean: "Average", rms: "RMS magnitude", minimum: "Lowest value", maximum: "Highest value", index: "One element" };
-  const LABELS = { cutoff: "Low-pass filter", highpass: "High-pass filter", resonance: "Resonance", gain: "Volume", pan: "Pan", delayMix: "Delay", reverbMix: "Reverb", rate: "Speed + pitch" };
+  const LABELS = { cutoff: "Low-pass filter", highpass: "High-pass filter", resonance: "Resonance", gain: "Volume", pan: "Pan", delayMix: "Delay", reverbMix: "Reverb", rate: "Playback speed", pitch: "Pitch shift · semitones" };
   const escape = (value) => String(value ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
   const finite = (value) => typeof value === "number" && Number.isFinite(value);
   const format = (value) => !finite(value) ? "—" : Math.abs(value) >= 1000 ? value.toFixed(0) : Number(value.toFixed(3)).toString();
   const percent = (value) => finite(value) ? `${Math.round(value * 100)}%` : "—";
+  const controlValue = (key, value) => key === "rate" ? percent(value)
+    : key === "pitch" ? `${value > 0 ? "+" : ""}${format(value)} st`
+      : format(value) + (["cutoff", "highpass"].includes(key) ? " Hz" : "");
   const time = (value) => `${Math.floor((value || 0) / 60)}:${String(Math.floor((value || 0) % 60)).padStart(2, "0")}`;
-  let root, engine, generation, config, snapshot, sourceBridge, initialized = false, active = false;
+  let root, engine, generation, config, snapshot, sourceBridge, signalLibrary, savedRap, initialized = false, active = false;
   let generationState = { phase: "idle", enabled: false }, shownTrackId = null;
-  let tracks = [], selectedId = "", fieldsKey = "", fetchRun = 0, controller, lastSave = 0, loadingTrack = false, rendering = false;
+  let tracks = [], selectedId = "", nextTrackId = "", fieldsKey = "", fetchRun = 0, controller, lastSave = 0, loadingTrack = false, rendering = false;
   const history = new Map();
   const $ = (id) => root.querySelector(`#mm-${id}`);
   const api = () => globalThis.HydraMusicMixerEngine;
@@ -28,9 +31,16 @@ globalThis.HydraMusicMixer = (() => {
     $("notice").hidden = !message;
     $("notice").classList.toggle("is-error", error);
   }
+  function nextTrackChoice() {
+    const mode = $("next-mode").value;
+    return { mode: ["loop", "similar", "new", "old"].includes(mode) ? mode : "new", trackId: nextTrackId };
+  }
   function promptDraft() {
+    const next = nextTrackChoice();
     return { style: $("prompt").value, bpm: $("bpm").value, key: $("key").value,
-      palette: $("instruments").value, duration: $("duration").value };
+      palette: $("instruments").value, duration: $("duration").value,
+      next_mode: next.mode, next_track_id: next.trackId,
+      continuity_mode: next.mode === "similar" ? "evolve" : "fresh" };
   }
   function generationSettings() {
     const draft = promptDraft();
@@ -39,7 +49,7 @@ globalThis.HydraMusicMixer = (() => {
       instrument_palette: draft.palette.split(",").map((value) => value.trim()).filter(Boolean),
       enable_variability: false, context_adherence: "high", seed: null
     });
-    return { duration_seconds: request.duration_seconds, settings: request.settings };
+    return { duration_seconds: request.duration_seconds, settings: request.settings, continuity_mode: draft.continuity_mode };
   }
   function restorePrompt(draft = {}) {
     $("prompt").value = typeof draft?.style === "string" ? draft.style.slice(0, 300) : "Warm instrumental electronic music, evolving textures and a steady groove";
@@ -47,13 +57,39 @@ globalThis.HydraMusicMixer = (() => {
     $("key").value = typeof draft?.key === "string" ? draft.key.slice(0, 80) : "D minor";
     $("instruments").value = typeof draft?.palette === "string" ? draft.palette : "synthesizer, bass, drums";
     $("duration").value = [20, 40, 60].includes(Number(draft?.duration)) ? String(draft.duration) : "60";
+    $("next-mode").value = ["loop", "similar", "new", "old"].includes(draft?.next_mode)
+      ? draft.next_mode : draft?.continuity_mode === "evolve" ? "similar" : "new";
+    nextTrackId = typeof draft?.next_track_id === "string" && /^[a-zA-Z0-9_-]{1,128}$/.test(draft.next_track_id) ? draft.next_track_id : "";
+    renderNextTracks();
   }
-  function save() {
-    try { localStorage.setItem(KEY, JSON.stringify({ trackId: selectedId, config: engine.getConfig(), prompt: promptDraft() })); } catch (_) { /* Session-only mixing remains available. */ }
+  function getState() { return engine ? { trackId: selectedId, config: engine.getConfig(), prompt: promptDraft(), signalLinks: signalLibrary?.getLinks() || {}, ...(savedRap !== undefined ? { rap: savedRap } : {}) } : null; }
+  function flush() { const state = getState(); if (state) localStorage.setItem(KEY, JSON.stringify(state)); return state; }
+  function save() { try { flush(); } catch (_) { /* Session-only mixing remains available. */ } }
+  function publishSignals() {
+    try { signalLibrary?.publish(config); } catch (error) { notice(error.message || "Could not save the shared mix.", true); }
+  }
+  function libraryRow(bus) {
+    const linked = signalLibrary?.linkFor(bus.id);
+    return `<div class="mm-library-state ${linked ? "is-shared" : ""}"><span>${linked ? "Shared mix" : "Independent mix"}</span><button class="mm-button" data-action="${linked ? "detach-mix" : "share-mix"}">${linked ? "Make independent" : "Share mix"}</button></div>`;
+  }
+  function renderLibrary() {
+    const select = $("shared-mix"), previous = select.value;
+    const mixes = globalThis.HydraSignalLibrary?.getState().mixes || [];
+    const added = new Set(config.buses.map((bus) => signalLibrary?.linkFor(bus.id)?.id).filter(Boolean));
+    select.innerHTML = '<option value="">Choose a shared mix…</option>' + mixes.map((entry) => `<option value="${escape(entry.id)}" ${entry.mode !== config.mode || added.has(entry.id) ? "disabled" : ""}>${escape(entry.bus.name)} · ${entry.mode === "demo" ? "Demo signals" : "Connections input"}${added.has(entry.id) ? " · Already added" : ""}</option>`).join("");
+    if (mixes.some((entry) => entry.id === previous && entry.mode === config.mode && !added.has(entry.id))) select.value = previous;
+    $("add-shared").disabled = config.buses.length >= 4 || !select.value;
+    select.disabled = !mixes.length || config.buses.length >= 4;
+  }
+  function syncSignals() {
+    config = engine.getConfig();
+    if (signalLibrary?.sync(config)) { engine.setConfig(config); config = engine.getConfig(); history.clear(); }
+    renderBuses(); renderChannels(); save();
   }
   function commit(render = "all") {
     engine.setConfig(config);
     config = engine.getConfig();
+    publishSignals();
     if (render === "all" || render === "buses") renderBuses();
     if (render === "all" || render === "channels") renderChannels();
     save();
@@ -106,12 +142,13 @@ globalThis.HydraMusicMixer = (() => {
     try {
     $("buses").innerHTML = config.buses.map((bus, i) => `<article class="mm-bus mm-color-${i % 4}" data-bus="${escape(bus.id)}">
       <div class="mm-bus-head"><span class="mm-bus-letter">${String.fromCharCode(65 + i)}</span><input data-bus-name value="${escape(bus.name)}" maxlength="30" aria-label="Signal mix name"><output data-bus-value>—</output><button class="mm-button mm-icon" data-action="remove-bus" aria-label="Remove ${escape(bus.name)}" ${config.buses.length === 1 ? "disabled" : ""}>×</button></div>
-      <p class="mm-bus-combination">${escape(combinationLabel(bus))}</p>
+      <p class="mm-bus-combination">${escape(combinationLabel(bus))}</p>${libraryRow(bus)}
       <svg class="mm-scope" viewBox="0 0 300 54" preserveAspectRatio="none" role="img" aria-label="${escape(bus.name)} ${bus.sources.length > 1 ? "combined " : ""}signal history"><path class="mm-scope-grid" d="M0 13.5H300 M0 27H300 M0 40.5H300 M75 0V54 M150 0V54 M225 0V54"/><path data-scope d=""/></svg>
       <div class="mm-sources">${bus.sources.map((source, index) => sourceHTML(source, index, bus)).join("")}</div>
       <div class="mm-bus-footer"><label>Combine inputs<select data-operator ${bus.sources.length < 2 ? 'disabled title="Add another input to combine signals"' : ""}>${Object.entries(OPERATORS).map(([value, label]) => `<option value="${value}" ${bus.operator === value ? "selected" : ""}>${label}</option>`).join("")}</select></label><button class="mm-button" data-action="add-source" ${bus.sources.length >= 6 ? "disabled" : ""}>+ Input</button></div>
       <p class="mm-bus-status" data-bus-status>Waiting for input</p></article>`).join("");
     $("add-bus").disabled = config.buses.length >= 4;
+    renderLibrary();
     renderRouteSources();
     } finally { rendering = false; }
   }
@@ -122,6 +159,7 @@ globalThis.HydraMusicMixer = (() => {
       <label>Signal mix<select data-route-field="busId">${!config.buses.some((bus) => bus.id === route.busId) ? '<option value="">Choose a mix</option>' : ""}${config.buses.map((bus) => `<option value="${escape(bus.id)}" ${route.busId === bus.id ? "selected" : ""}>${escape(bus.name)}</option>`).join("")}</select></label>
       <p class="mm-route-source" data-route-source></p>
       <label>Controls<select data-route-field="target">${targets.map((value) => `<option value="${value}" ${route.target === value ? "selected" : ""}>${LABELS[value]}</option>`).join("")}</select></label>
+      <label class="mm-strength" title="0% keeps the manual setting; 100% applies the full signal mapping."><span>Signal strength <output data-strength-value>${percent(route.strength ?? 1)}</output></span><input type="range" min="0" max="100" step="1" value="${Math.round((route.strength ?? 1) * 100)}" data-route-field="strength" aria-label="${escape(channel.name === "master" ? "Master" : channel.name)} ${LABELS[route.target]} signal strength" aria-valuetext="${percent(route.strength ?? 1)}"></label>
       <details><summary>Range & direction</summary><div class="mm-pair"><label>From<input type="number" step="any" min="${limits.min}" max="${limits.max}" value="${route.outputMin}" data-route-field="outputMin"></label><label>To<input type="number" step="any" min="${limits.min}" max="${limits.max}" value="${route.outputMax}" data-route-field="outputMax"></label></div><label class="mm-check"><input type="checkbox" data-route-field="invert" ${route.invert ? "checked" : ""}> Reverse</label></details></div>`;
   }
   function renderRouteSources() {
@@ -146,32 +184,48 @@ globalThis.HydraMusicMixer = (() => {
         <div class="mm-fader-area"><div class="mm-fader-scale" aria-hidden="true"><span>100</span><span>75</span><span>50</span><span>25</span><span>0</span></div><input class="mm-fader" type="range" min="0" max="1" step="0.01" value="${channel.level}" data-channel-field="level" aria-label="${escape(name)} volume"><div class="mm-level-meter" title="Effective volume setting after mappings" role="meter" aria-label="${escape(name)} effective volume setting" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><i data-level-meter></i></div></div>
         <div class="mm-level-readout"><output data-fader-value>${percent(channel.level)}</output><small data-effective-level>Effective —</small></div>
         <div class="mm-knob-row"><label><span>Pan <output data-control-value="pan">${format(channel.pan)}</output></span><input type="range" min="-1" max="1" step="0.01" value="${channel.pan}" data-channel-field="pan" aria-label="${escape(name)} pan"></label><label><span>Low pass <output data-control-value="cutoff">${format(channel.cutoff)} Hz</output></span><input type="range" min="20" max="20000" step="1" value="${channel.cutoff}" data-channel-field="cutoff" aria-label="${escape(name)} low-pass filter"></label></div>
-        <details class="mm-effects"><summary>More effects</summary>${[["highpass", "High pass", 20, 2000], ["reverbMix", "Reverb", 0, 0.65], ["delayMix", "Delay", 0, 0.65]].map(([key, label, min, max]) => `<label><span>${label} <output data-control-value="${key}">${format(channel[key])}</output></span><input type="range" min="${min}" max="${max}" step="${max > 1 ? 1 : 0.01}" value="${channel[key]}" data-channel-field="${key}" aria-label="${escape(name)} ${label}"></label>`).join("")}</details>
-        <div class="mm-routes">${channel.routes.map((route, index) => routeHTML(route, index, channel)).join("")}</div><button class="mm-button mm-add-route" data-action="add-route" ${channel.routes.length >= (master ? 8 : 7) ? "disabled" : ""}>+ Map a signal</button></article>`;
+        <details class="mm-effects"><summary>More effects</summary>${[["highpass", "High pass", 20, 6000, 1], ["reverbMix", "Reverb", 0, 0.85, 0.01], ["delayMix", "Delay", 0, 0.85, 0.01], ["pitch", "Pitch shift", -12, 12, 0.1], ...(master ? [["rate", "Playback speed", 0.75, 1.25, 0.01]] : [])].map(([key, label, min, max, step]) => `<label><span>${label} <output data-control-value="${key}">${controlValue(key, channel[key])}</output></span><input type="range" min="${min}" max="${max}" step="${step}" value="${channel[key]}" data-channel-field="${key}" aria-label="${escape(name)} ${label}"></label>`).join("")}</details>
+        <div class="mm-routes">${channel.routes.map((route, index) => routeHTML(route, index, channel)).join("")}</div><button class="mm-button mm-add-route" data-action="add-route" ${channel.routes.length >= (master ? 9 : 8) ? "disabled" : ""}>+ Map a signal</button></article>`;
     }).join("");
     $("stem-hint").textContent = config.channels.length > 1 ? `${config.channels.length - 1} stems` : selectedId ? "Full mix" : "";
     renderRouteSources();
     } finally { rendering = false; }
   }
   function renderTransport() {
-    const next = snapshot || {}, first = generationState.phase === "generating-first";
+    const next = snapshot || {}, first = generationState.phase === "generating-first", choice = nextTrackChoice();
+    const saved = choice.mode === "old", looping = choice.mode === "loop";
+    $("next-track-field").hidden = !saved;
     $("play").disabled = loadingTrack || !next.track || next.running || next.starting || first;
-    $("generate").disabled = loadingTrack || next.running || next.starting || first;
-    $("generate").textContent = first ? "Generating…" : "Generate & play";
+    $("generate").disabled = loadingTrack || next.running || next.starting || first
+      || (generationState.busy && !saved && !(looping && next.track)) || generationState.savedBusy === true || (saved && !choice.trackId);
+    $("generate").textContent = first ? "Creating music…" : saved ? "Play selected track"
+      : looping ? next.track ? "Play current track" : "Create starting track" : "Start music";
     $("stop").disabled = !next.running && !next.starting && !generationState.enabled && !first;
-    $("play").textContent = next.starting ? "Loading…" : "▶ Play";
+    $("play").textContent = next.starting ? "Loading…" : "▶ Play saved track";
     $("track").disabled = first;
     $("retry").hidden = generationState.phase !== "error";
     $("current").textContent = next.track ? trackLabel(next.track) : "—";
-    $("next").textContent = generationState.phase === "generating-first" ? "Creating first track…"
-      : generationState.phase === "generating-next" ? "Generating…"
-      : generationState.phase === "ready" ? "Ready to crossfade"
+    $("next").textContent = generationState.phase === "looping" ? "Repeating current track"
+      : generationState.phase === "loading-saved" ? "Loading selected track…"
+      : generationState.phase === "waiting-track" ? "Choose a saved track"
+      : generationState.phase === "generating-first" ? "Creating first track…"
+      : generationState.phase === "updating-prompt" ? "Updating next track…"
+      : generationState.phase === "waiting-prompt" ? "Finish the next track prompt"
+      : generationState.phase === "waiting-retry" ? "Waiting to generate next track…"
+      : generationState.phase === "generating-next" ? "Generating next track…"
+      : generationState.phase === "ready" && generationState.queuedId ? "Next track ready · automatic crossfade"
       : generationState.phase === "error" ? next.running ? "Repeating current track" : "Generation stopped"
       : generationState.enabled ? "Preparing next track…" : "—";
+    const savedTrack = tracks.find((track) => track.id === choice.trackId);
+    const nextLabel = looping ? "" : saved ? choice.trackId ? savedTrack ? trackLabel(savedTrack) : "Selected saved track" : "" : generationState.nextPrompt || "";
+    $("up-next").hidden = !next.running || !generationState.enabled || !nextLabel;
+    $("next-prompt").textContent = nextLabel;
   }
   function updateGeneration(next) {
+    const previous = generationState;
     generationState = next; renderTransport();
-    if (next.phase === "error") notice(next.error || "Could not prepare the next track.", true);
+    if (next.phase === "error" || next.phase === "waiting-prompt") notice(next.error || "Could not prepare the next track.", true);
+    else if (["error", "waiting-prompt"].includes(previous.phase)) notice("");
   }
   function rememberTrack(track) {
     tracks = [track, ...tracks.filter((item) => item.id !== track.id)].slice(0, 100);
@@ -234,10 +288,18 @@ globalThis.HydraMusicMixer = (() => {
   }
   function renderTracks() {
     $("track").innerHTML = '<option value="">Recall a track…</option>' + tracks.map((track) => `<option value="${escape(track.id)}" ${track.id === selectedId ? "selected" : ""}>${escape(trackLabel(track))}</option>`).join("");
+    renderNextTracks();
+  }
+  function renderNextTracks() {
+    const missing = nextTrackId && !tracks.some((track) => track.id === nextTrackId);
+    $("next-track").innerHTML = '<option value="">Choose a saved track…</option>'
+      + (missing ? `<option value="${escape(nextTrackId)}">Saved track unavailable</option>` : "")
+      + tracks.map((track) => `<option value="${escape(track.id)}">${escape(trackLabel(track))}</option>`).join("");
+    $("next-track").value = nextTrackId;
   }
   function trackLabel(track) {
     const date = new Date(track.created_at), when = Number.isNaN(date.getTime()) ? "Saved track" : date.toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", second: "2-digit" });
-    const title = track.realtime?.generation_settings?.style;
+    const title = track.realtime?.generation_settings?.style || track.generation_settings?.style;
     return `${when} · ${Math.round(track.audio?.duration_seconds || track.requested_duration_seconds || 0)}s${title ? ` · ${title.slice(0, 45)}` : ""}`;
   }
   function readyTrack(job) {
@@ -250,6 +312,11 @@ globalThis.HydraMusicMixer = (() => {
       const job = await read(`/generations/${encodeURIComponent(id)}`, signal);
       if (run !== fetchRun || !active) return;
       if (!readyTrack(job)) throw new Error("This track's stems are not ready yet.");
+      if (!job.generation_settings && !job.realtime?.generation_settings && job.plan_id) {
+        try { job.generation_settings = (await read(`/plans/${encodeURIComponent(job.plan_id)}`, signal)).settings; }
+        catch (error) { if (error.name === "AbortError") throw error; }
+        if (run !== fetchRun || !active) return;
+      }
       const stems = job.stem_separation?.state === "complete" ? job.stem_separation.stems : [];
       const names = ["master", ...[...new Set(api().instrumentalStems(stems).map((stem) => stem.name))].filter((name) => name !== "master").slice(0, 6)];
       config = engine.getConfig();
@@ -287,17 +354,33 @@ globalThis.HydraMusicMixer = (() => {
     const routeIndex = Number(element.closest("[data-route]")?.dataset.route);
     return { bus, channel, sourceIndex, source: bus?.sources[sourceIndex], routeIndex, route: channel?.routes[routeIndex] };
   }
+  function updateStrength(el, route, persist = false) {
+    const value = Number(el.value);
+    if (!Number.isFinite(value)) return;
+    route.strength = Math.max(0, Math.min(1, value / 100));
+    engine.setConfig(config);
+    const label = percent(route.strength);
+    el.closest(".mm-strength").querySelector("[data-strength-value]").textContent = label;
+    el.setAttribute("aria-valuetext", label);
+    if (persist) save();
+  }
   function onChange(event) {
     if (rendering) return;
     const el = event.target;
+    if (el.hasAttribute("data-next-field")) {
+      if (el.id === "mm-next-track") nextTrackId = el.value;
+      save(); renderTransport(); generation?.settingsChanged(); return;
+    }
+    if (el.hasAttribute("data-prompt-field")) { save(); generation?.settingsChanged(); return; }
     const { bus, channel, source, route } = context(el);
-    if (el.hasAttribute("data-prompt-field")) { save(); return; }
+    if (el.id === "mm-shared-mix") { renderLibrary(); return; }
     if (el.id === "mm-track") {
       generation.stop(); const run = ++fetchRun; controller?.abort(); controller = new AbortController();
       selectTrack(el.value, run, controller.signal, true).catch((error) => { if (run === fetchRun && error.name !== "AbortError") notice(error.message, true); });
       return;
     }
     if (el.id === "mm-mode") {
+      signalLibrary?.detachAll();
       config.mode = el.value;
       const available = el.value === "demo" ? api().DEMO_FIELDS : sourceBridge?.describe?.().fields || [];
       config.buses.forEach((item, index) => { item.sources = [sourceFor(available[index % Math.max(1, available.length)]?.key, available)]; });
@@ -319,6 +402,7 @@ globalThis.HydraMusicMixer = (() => {
     }
     if (route && el.dataset.routeField) {
       const key = el.dataset.routeField;
+      if (key === "strength") { updateStrength(el, route, true); return; }
       if (key === "target") {
         if (channel.routes.some((item) => item !== route && item.target === el.value)) { notice("This channel already has a mapping for that effect. Edit the existing mapping to change its signal mix.", true); renderChannels(); return; }
         route.target = el.value; const target = globalThis.HydraElevenRealtime.TARGETS[el.value]; route.outputMin = target.low; route.outputMax = target.high;
@@ -330,14 +414,19 @@ globalThis.HydraMusicMixer = (() => {
   }
   function onInput(event) {
     if (rendering) return;
-    if (event.target.hasAttribute("data-prompt-field")) { save(); return; }
+    if (event.target.hasAttribute("data-prompt-field")) { save(); generation?.settingsChanged(); return; }
     const el = event.target, key = el.dataset.channelField;
+    if (el.dataset.routeField === "strength") {
+      const { route } = context(el);
+      if (route) updateStrength(el, route);
+      return;
+    }
     if (!key) return;
     const { channel } = context(el); if (!channel) return;
     channel[key] = Number(el.value); engine.setConfig(config); save();
     const row = el.closest("[data-channel]");
     if (key === "level") row.querySelector("[data-fader-value]").textContent = percent(channel.level);
-    else row.querySelector(`[data-control-value="${key}"]`).textContent = format(channel[key]) + (key === "cutoff" ? " Hz" : "");
+    else row.querySelector(`[data-control-value="${key}"]`).textContent = controlValue(key, channel[key]);
   }
   function onClick(event) {
     const el = event.target.closest("button"); if (!el) return;
@@ -350,6 +439,17 @@ globalThis.HydraMusicMixer = (() => {
     }
     if (el.id === "mm-stop") { generation.stop(); return; }
     const { bus, channel, sourceIndex, routeIndex } = context(el);
+    if (el.id === "mm-add-shared") {
+      try { signalLibrary?.attach($("shared-mix").value, config, `mix-${Date.now().toString(36)}`); commit(); notice(""); }
+      catch (error) { notice(error.message, true); }
+      return;
+    }
+    if (el.dataset.action === "share-mix") {
+      try { signalLibrary?.share(bus, config.mode); renderBuses(); save(); notice(""); }
+      catch (error) { notice(error.message, true); }
+      return;
+    }
+    if (el.dataset.action === "detach-mix") { signalLibrary?.detach(bus.id); renderBuses(); save(); return; }
     if (el.id === "mm-add-bus") {
       if (config.buses.length >= 4) return;
       const id = `mix-${Date.now().toString(36)}`; config.buses.push(newBus(id, `Mix ${String.fromCharCode(65 + config.buses.length)}`, fields()[config.buses.length % Math.max(1, fields().length)]?.key)); commit(); return;
@@ -360,14 +460,14 @@ globalThis.HydraMusicMixer = (() => {
       case "remove-bus":
         if (config.buses.length === 1) return;
         config.buses = config.buses.filter((item) => item !== bus); config.channels.forEach((item) => { item.routes = item.routes.filter((route) => route.busId !== bus.id); }); history.delete(bus.id); commit(); break;
-      case "freeze": engine.freeze(bus.id, sourceIndex); config = engine.getConfig(); renderBuses(); save(); break;
-      case "relearn": engine.relearn(bus.id, sourceIndex); config = engine.getConfig(); renderBuses(); save(); break;
+      case "freeze": engine.freeze(bus.id, sourceIndex); config = engine.getConfig(); publishSignals(); renderBuses(); save(); break;
+      case "relearn": engine.relearn(bus.id, sourceIndex); config = engine.getConfig(); publishSignals(); renderBuses(); save(); break;
       case "mute": channel.muted = !channel.muted; commit("channels"); break;
       case "solo": channel.solo = !channel.solo; commit("channels"); break;
       case "add-route": {
-        const target = ["cutoff", "gain", "pan", "reverbMix", "delayMix", "highpass", "resonance", ...(channel.name === "master" ? ["rate"] : [])].find((key) => !channel.routes.some((route) => route.target === key));
+        const target = ["cutoff", "gain", "pan", "reverbMix", "delayMix", "highpass", "resonance", "pitch", ...(channel.name === "master" ? ["rate"] : [])].find((key) => !channel.routes.some((route) => route.target === key));
         if (!target || !config.buses.length) return;
-        const bounds = globalThis.HydraElevenRealtime.TARGETS[target]; channel.routes.push({ busId: config.buses[0].id, target, outputMin: bounds.low, outputMax: bounds.high, invert: false }); commit("channels"); break;
+        const bounds = globalThis.HydraElevenRealtime.TARGETS[target]; channel.routes.push({ busId: config.buses[0].id, target, outputMin: bounds.low, outputMax: bounds.high, invert: false, strength: 1 }); commit("channels"); break;
       }
       case "remove-route": channel.routes.splice(routeIndex, 1); commit("channels"); break;
     }
@@ -377,29 +477,41 @@ globalThis.HydraMusicMixer = (() => {
     initialized = true; root = options.container; sourceBridge = options.sourceBridge; root.classList.add("mm-workspace");
     root.innerHTML = `<header class="mm-header"><div><span class="mm-eyebrow">INSTRUMENTAL MUSIC</span><h1 id="music-mixer-title">Music mixer</h1></div><a class="mm-button" href="#elevenlabs" data-workspace="elevenlabs" data-advanced>Previous version ↗</a></header>
       <section class="mm-prompt-panel" aria-labelledby="mm-prompt-title"><div class="mm-section-heading"><div><span class="mm-eyebrow">01 / MUSIC CREATION</span><h2 id="mm-prompt-title">Create instrumental music</h2></div><span id="mm-next" class="mm-next-state" role="status">—</span></div>
-        <div class="mm-prompt-grid"><label class="mm-prompt-text">Next track prompt<textarea id="mm-prompt" data-prompt-field rows="2" maxlength="300"></textarea></label><label>BPM<input id="mm-bpm" data-prompt-field type="number" min="20" max="300" step="1"></label><label>Key<input id="mm-key" data-prompt-field maxlength="80"></label><label>Track length<select id="mm-duration" data-prompt-field><option value="20">20 seconds</option><option value="40">40 seconds</option><option value="60">60 seconds</option></select></label><label class="mm-instruments">Instruments<input id="mm-instruments" data-prompt-field placeholder="Synthesizer, bass, drums"></label></div>
-        <div class="mm-prompt-actions"><button id="mm-generate" class="mm-button mm-primary">Generate &amp; play</button><button id="mm-play" class="mm-button" disabled>▶ Play</button><button id="mm-stop" class="mm-button" disabled>■ Stop</button><button id="mm-retry" class="mm-button" hidden>Retry next track</button></div>
+        <div class="mm-next-controls"><label>Next track<select id="mm-next-mode" data-next-field><option value="loop">Loop</option><option value="similar">Generate similar</option><option value="new">Generate new</option><option value="old">Choose old</option></select></label><label id="mm-next-track-field" hidden>Saved track<select id="mm-next-track" data-next-field><option value="">Choose a saved track…</option></select></label></div>
+        <div class="mm-prompt-grid"><label class="mm-prompt-text">Next track prompt<textarea id="mm-prompt" data-prompt-field rows="2" maxlength="300" title="Used for Generate similar, Generate new, or a starting track."></textarea></label><label>BPM<input id="mm-bpm" data-prompt-field type="number" min="20" max="300" step="1"></label><label>Key<input id="mm-key" data-prompt-field maxlength="80"></label><label>Track length<select id="mm-duration" data-prompt-field><option value="20">20 seconds</option><option value="40">40 seconds</option><option value="60">60 seconds</option></select></label><label class="mm-instruments">Instruments<input id="mm-instruments" data-prompt-field placeholder="Synthesizer, bass, drums"></label></div>
+        <div class="mm-prompt-actions"><button id="mm-generate" class="mm-button mm-primary">Start music</button><button id="mm-play" class="mm-button" disabled>▶ Play saved track</button><button id="mm-stop" class="mm-button" disabled>■ Stop</button><button id="mm-retry" class="mm-button" hidden>Retry next track</button></div>
         <div class="mm-now-playing"><span>Now playing</span><b id="mm-current">—</b></div>
+        <div id="mm-up-next" class="mm-now-playing mm-up-next" hidden><span>Up next</span><b id="mm-next-prompt"></b></div>
         <div class="mm-transport-readout"><span id="mm-transport-status">Stopped</span><progress id="mm-progress" value="0" max="1" aria-label="Track progress"></progress><span id="mm-clock">0:00 / 0:00</span></div>
         <details class="mm-recent"><summary>Recent tracks</summary><div class="mm-recent-row"><label class="sr-only" for="mm-track">Recall a recent track</label><select id="mm-track"><option value="">Recall a track…</option></select><button id="mm-refresh" class="mm-button">Refresh</button></div></details>
       </section>
       <p id="mm-notice" class="mm-notice" role="status" hidden></p>
-      <section aria-labelledby="mm-input-title"><div class="mm-section-heading"><div><span class="mm-eyebrow">02 / SIGNALS</span><h2 id="mm-input-title">Signal mixes</h2></div><button id="mm-add-bus" class="mm-button">+ Signal mix</button></div><div class="mm-source-toolbar"><label>Signals from<select id="mm-mode"><option value="shared">Connections input</option><option value="demo">Simulated demo signals</option></select></label><span id="mm-source-label">Choose an input in Connections</span><a href="#connections" data-workspace="connections">Connections ↗</a></div><div id="mm-buses" class="mm-buses"></div></section>
+      <section aria-labelledby="mm-input-title"><div class="mm-section-heading"><div><span class="mm-eyebrow">02 / SIGNALS</span><h2 id="mm-input-title">Signal mixes</h2></div><button id="mm-add-bus" class="mm-button">+ Signal mix</button></div><div class="mm-source-toolbar"><label>Signals from<select id="mm-mode"><option value="shared">Connections input</option><option value="demo">Simulated demo signals</option></select></label><span id="mm-source-label">Choose an input in Connections</span><a href="#connections" data-workspace="connections">Connections ↗</a></div><div class="mm-library-toolbar"><label>Shared signal mixes<select id="mm-shared-mix"></select></label><button id="mm-add-shared" class="mm-button">Add shared mix</button></div><div id="mm-buses" class="mm-buses"></div></section>
       <div class="mm-flowline" aria-hidden="true"><span>INPUT SIGNALS</span><i>→</i><span>SIGNAL MIXES</span><i>→</i><span>CHANNEL EFFECTS</span></div>
       <section aria-labelledby="mm-mix-title"><div class="mm-section-heading"><div><span class="mm-eyebrow">03 / MIXING DESK</span><h2 id="mm-mix-title">Mixer</h2></div></div><p id="mm-stem-hint" class="mm-footnote"></p><div class="mm-console-scroll" role="region" tabindex="0" aria-label="Music mixer channels; scroll horizontally for more stems"><div id="mm-channels" class="mm-console"></div></div></section>`;
     let saved = {};
     try { saved = JSON.parse(localStorage.getItem(KEY) || "{}"); } catch (_) { /* Fresh mix. */ }
+    // Keep earlier voice drafts in saved sessions without mounting another rap player.
+    savedRap = saved?.rap;
+    signalLibrary = globalThis.HydraSignalLibrary?.create(saved?.signalLinks);
     restorePrompt(saved?.prompt);
     engine = api().create({ sourceBridge: options.sourceBridge, onUpdate: updateView, onError: (error) => notice(error.message || String(error), true) });
-    generation = globalThis.HydraMusicMixerGeneration.create({ engine, getSettings: generationSettings,
+    generation = globalThis.HydraMusicMixerGeneration.create({ engine, getSettings: generationSettings, getNextTrack: nextTrackChoice,
       onUpdate: updateGeneration, onTrack: rememberTrack, onError: (error) => notice(error.message || String(error), true) });
     selectedId = typeof saved?.trackId === "string" && /^[a-zA-Z0-9_-]{1,128}$/.test(saved.trackId) ? saved.trackId : "";
     config = api().validateConfig(saved?.config || { mode: "shared", buses: [newBus("mix-a", "Mix A")], channels: [api().defaultChannel("master")] });
     engine.setConfig(config); config = engine.getConfig(); $("mode").value = config.mode;
-    renderBuses(); renderChannels();
+    renderBuses(); renderChannels(); renderTransport();
     root.addEventListener("change", onChange); root.addEventListener("input", onInput); root.addEventListener("click", onClick);
   }
-  function activate() { if (!initialized) return; active = true; engine.activate(); refresh(); }
+  function activate() {
+    if (!initialized) return;
+    syncSignals();
+    if (active) { renderTransport(); return; }
+    active = true; engine.activate(); refresh();
+  }
   function deactivate() { if (!initialized) return; active = false; ++fetchRun; controller?.abort(); loadingTrack = false; $("refresh").disabled = false; save(); generation.deactivate(); engine.deactivate(); }
-  return { init, activate, deactivate, refresh, get snapshot() { return engine?.snapshot(); }, get generationSnapshot() { return generation?.snapshot(); } };
+  return { init, activate, deactivate, refresh, getState, flush, save,
+    transportClock: () => engine?.transportClock?.(Number($("bpm").value)),
+    get snapshot() { return engine?.snapshot(); }, get generationSnapshot() { return generation?.snapshot(); } };
 })();

@@ -1,0 +1,2 @@
+# Local Whisper small transcription, using CPU int8 inference.
+faster-whisper>=1.2,<2

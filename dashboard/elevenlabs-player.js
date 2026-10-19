@@ -5,11 +5,11 @@
 // cannot leave silence between segments. Ready replacements fade in at a boundary.
 globalThis.HydraElevenPlayer = (() => {
   const DEFAULTS = Object.freeze({ cutoff: 20000, resonance: 0.7, highpass: 20, gain: 0.8,
-    pan: 0, rate: 1, delayMix: 0, reverbMix: 0 });
-  const LIMITS = Object.freeze({ cutoff: [20, 20000], resonance: [0.1, 12], highpass: [20, 2000],
-    gain: [0, 1], pan: [-1, 1], rate: [0.75, 1.25], delayMix: [0, 0.65], reverbMix: [0, 0.65] });
+    pan: 0, rate: 1, pitch: 0, delayMix: 0, reverbMix: 0 });
+  const LIMITS = Object.freeze({ cutoff: [20, 20000], resonance: [0.1, 12], highpass: [20, 6000],
+    gain: [0, 1], pan: [-1, 1], rate: [0.75, 1.25], pitch: [-12, 12], delayMix: [0, 0.85], reverbMix: [0, 0.85] });
   const STEM_DEFAULTS = Object.freeze({ cutoff: 20000, resonance: 0.7, highpass: 20,
-    gain: 1, pan: 0, delayMix: 0, reverbMix: 0 });
+    gain: 1, pan: 0, pitch: 0, delayMix: 0, reverbMix: 0 });
   const MAX_STEMS = 6;
   const MAX_STEM_CONTROLS = MAX_STEMS * 2;
   const RATE_RAMP = 0.08;
@@ -21,6 +21,7 @@ globalThis.HydraElevenPlayer = (() => {
   class Player {
     constructor(options = {}) {
       this._AudioContext = options.AudioContext || globalThis.AudioContext || globalThis.webkitAudioContext;
+      this._Pitch = options.Pitch || globalThis.HydraPitch;
       this._fetch = options.fetch || globalThis.fetch?.bind(globalThis);
       this._setTimeout = options.setTimeout || globalThis.setTimeout.bind(globalThis);
       this._clearTimeout = options.clearTimeout || globalThis.clearTimeout.bind(globalThis);
@@ -35,6 +36,8 @@ globalThis.HydraElevenPlayer = (() => {
       this._operations = new Set();
       this._preparation = Promise.resolve();
       this._epoch = 0;
+      this._deckSequence = 0;
+      this._clockRevision = 0;
       this._queueSequence = 0;
       this._status = "empty";
       this._running = false;
@@ -52,10 +55,10 @@ globalThis.HydraElevenPlayer = (() => {
 
     get status() { return this._status; }
     get currentTrack() { return (this._active?.prepared || this._prepared)?.track || null; }
-    get queuedTrack() { return this._queued?.track || (!this._transition?.promoted && this._transition?.next.prepared.track) || null; }
+    get queuedTrack() { return this._queued?.track || (this._transition?.reason === "crossfade" && !this._transition.promoted && this._transition.next.prepared.track) || null; }
     get duration() { return (this._active?.prepared || this._prepared)?.duration || 0; }
-    get currentPosition() { return this._active ? this._position(this._active, this._context.currentTime) : 0; }
-    get remainingSeconds() { return this._active ? this._remaining(this._active, this._context.currentTime) : this.duration / this._controls.rate; }
+    get currentPosition() { return this._active ? this._position(this._active, this._context.currentTime - this._active.latency) : 0; }
+    get remainingSeconds() { return this._active ? this._remaining(this._active, this._context.currentTime - this._active.latency) : this.duration / this._controls.rate; }
     get stemNames() { return (this._active?.prepared || this._prepared)?.parts.filter((part) => part.name !== null).map((part) => part.name) || []; }
     get playingStemNames() {
       const decks = this._decks();
@@ -66,6 +69,33 @@ globalThis.HydraElevenPlayer = (() => {
     get controls() { return { ...this._controls, stemGains: { ...this._controls.stemGains },
       stemControls: Object.fromEntries(Object.entries(this._controls.stemControls).map(([name, values]) => [name, { ...values }])) }; }
     get decodedBytes() { return [...this._cache.values()].reduce((total, entry) => total + entry.bytes, 0); }
+
+    // Read-only bridge for separately rendered voices. Generated music has no
+    // detected beat grid: bpm is the requested tempo, with the deck start as
+    // beat zero. Never create or resume an AudioContext while inspecting it.
+    transportClock(bpm) {
+      const context = this._context;
+      const now = context?.currentTime || 0;
+      const deck = this._transition && now >= this._transition.start ? this._transition.next : this._active;
+      const at = deck ? Math.max(now, deck.sourceStart + deck.latency) : now;
+      const track = deck?.prepared.track || this._prepared?.track;
+      const tempo = Number(track?.realtime?.generation_settings?.bpm ?? track?.generation_settings?.bpm ?? track?.request?.settings?.bpm ?? bpm);
+      const usableTempo = Number.isFinite(tempo) && tempo >= 20 && tempo <= 300;
+      const sourceTime = deck ? at - deck.latency : at;
+      const position = deck ? this._clockAt(deck, sourceTime) : null;
+      // A buffer can loop before the UI timer schedules its replacement.
+      // Include that loop in the token so a voice cannot keep the old phase.
+      const cycle = deck ? Math.floor(position.position / deck.prepared.duration) : 0;
+      return { context, destination: context?.destination || null,
+        playing: this._running && Boolean(deck) && !this._disposed,
+        valid: this._valid && usableTempo && !this._disposed,
+        bpm: usableTempo ? tempo * (position?.rate || this._controls.rate) : null,
+        baseBpm: usableTempo ? tempo : null, rate: position?.rate || this._controls.rate,
+        beat: usableTempo && deck ? positiveModulo(position.position, deck.prepared.duration) * tempo / 60 : 0,
+        at, token: `${this._epoch}:${this._clockRevision}:${deck?.syncId || 0}:${cycle}:${deck?.clock.target || this._controls.rate}:${tempo}`,
+        rateChanging: Boolean(position?.rampRemaining || (deck && deck.clock.time > sourceTime + 1e-8)),
+        estimated: true };
+    }
 
     _emit(status = this._status) {
       this._status = status;
@@ -101,17 +131,17 @@ globalThis.HydraElevenPlayer = (() => {
       this._delay = ctx.createDelay(1);
       this._delay.delayTime.value = 0.24;
       this._feedback = ctx.createGain();
-      this._feedback.gain.value = 0.22;
+      this._feedback.gain.value = 0.42;
       this._delayWet = ctx.createGain();
       this._reverbWet = ctx.createGain();
       this._convolver = ctx.createConvolver();
-      const impulse = ctx.createBuffer(2, Math.ceil(ctx.sampleRate * 1.2), ctx.sampleRate);
+      const impulse = ctx.createBuffer(2, Math.ceil(ctx.sampleRate * 2.4), ctx.sampleRate);
       let random = 12345;
       for (let channel = 0; channel < 2; channel++) {
         const samples = impulse.getChannelData(channel);
         for (let i = 0; i < samples.length; i++) {
           random = (Math.imul(random, 1664525) + 1013904223) >>> 0;
-          samples[i] = (random / 2147483648 - 1) * Math.pow(1 - i / samples.length, 3);
+          samples[i] = (random / 2147483648 - 1) * Math.pow(1 - i / samples.length, 2);
         }
       }
       this._convolver.buffer = impulse;
@@ -189,6 +219,7 @@ globalThis.HydraElevenPlayer = (() => {
 
     setSourceValid(valid) {
       const changed = this._valid !== Boolean(valid);
+      if (changed) this._clockRevision += 1;
       this._valid = Boolean(valid);
       if (this._context) this._smooth(this._gate.gain, this._running && this._valid ? 1 : 0, 0.04);
       if (changed) this._emit();
@@ -260,6 +291,9 @@ globalThis.HydraElevenPlayer = (() => {
     async _prepare(track, operation, options = {}) {
       this._assertValid(operation);
       if (!track || typeof track !== "object") throw new Error("Choose a saved generated track first.");
+      if (!this._Pitch) throw new Error("Pitch processing is unavailable. Refresh the dashboard and try again.");
+      await this._Pitch.register(this._ensureContext());
+      this._assertValid(operation);
       const mix = await this._decode(track.audio_url, operation);
       const prepared = { track: { ...track }, duration: mix.duration,
         parts: [{ name: null, key: track.audio_url, buffer: mix }], warnings: [] };
@@ -322,17 +356,48 @@ globalThis.HydraElevenPlayer = (() => {
       } finally { this._operations.delete(operation); }
     }
 
-    async queueTrack(track, options = {}) {
-      if (this._disposed) throw new Error("This audio player has been disposed.");
-      if (!this._prepared) return this.loadTrack(track, options);
+    _withdrawScheduledTransition() {
+      const transition = this._transition, now = this._context.currentTime;
+      if (!transition || now >= transition.start) return false;
+      transition.old.gain.gain.cancelScheduledValues(now);
+      transition.old.gain.gain.setValueAtTime(1, now);
+      this._destroyDeck(transition.next);
+      this._transition = null;
+      return true;
+    }
+
+    clearQueuedTrack() {
+      if (this._disposed) return true;
       this._queueSequence++;
       for (const operation of this._operations) if (operation.queue) operation.controller.abort();
       this._queued = null;
+      const transition = this._transition;
+      const audible = transition?.reason === "crossfade" && this._context.currentTime >= transition.start;
+      if (transition?.reason === "crossfade" && !audible) {
+        // A prompt edit may arrive after scheduling but before the first new
+        // sample. Withdraw that deck and leave the original song playing.
+        this._withdrawScheduledTransition();
+      } else if (audible && !transition.promoted) {
+        // Audio runs independently of the UI timer. Report the actual current
+        // song before a coordinator chooses the parent for another generation.
+        this._tick();
+      }
+      this._emit();
+      return !audible;
+    }
+
+    async queueTrack(track, options = {}) {
+      if (this._disposed) throw new Error("This audio player has been disposed.");
+      if (!this._prepared) return this.loadTrack(track, options);
+      this.clearQueuedTrack();
       const operation = this._newOperation(true);
       try {
         const prepared = await this._prepareSerial(track, operation, options);
         this._assertValid(operation);
         this._queued = prepared;
+        // Use a just-finished generation at this boundary if the fallback
+        // repeat was scheduled but has not actually started sounding yet.
+        if (this._transition?.reason === "loop") this._withdrawScheduledTransition();
         this._error = null;
         this._emit();
         if (this._running) this._tick();
@@ -358,9 +423,11 @@ globalThis.HydraElevenPlayer = (() => {
       this._running = true;
       this._error = null;
       const when = ctx.currentTime + 0.02;
-      this._active = this._createDeck(this._prepared, when);
-      this._active.gain.gain.setValueAtTime(0, when);
-      this._active.gain.gain.linearRampToValueAtTime(1, when + 0.03);
+      try { this._active = this._createDeck(this._prepared, when); }
+      catch (error) { this._running = false; this._error = error.message; this._emit("error"); throw error; }
+      const audible = when + this._active.latency;
+      this._active.gain.gain.setValueAtTime(0, audible);
+      this._active.gain.gain.linearRampToValueAtTime(1, audible + 0.03);
       this._smooth(this._gate.gain, this._valid ? 1 : 0, 0.03);
       this._emit("playing");
       this._tick();
@@ -373,8 +440,10 @@ globalThis.HydraElevenPlayer = (() => {
 
     _createDeck(prepared, when) {
       const ctx = this._context;
-      const deck = { prepared, gain: ctx.createGain(), parts: [], disposed: false,
+      const deck = { prepared, gain: ctx.createGain(), parts: [], disposed: false, syncId: ++this._deckSequence,
+        sourceStart: when, latency: this._Pitch.latencySeconds(ctx), clockHistory: [],
         clock: { time: when, position: 0, initial: this._controls.rate, target: this._controls.rate, ramp: 0 } };
+      deck.gain.gain.value = 0;
       deck.gain.connect(this._input);
       try {
         for (const part of prepared.parts) {
@@ -384,10 +453,18 @@ globalThis.HydraElevenPlayer = (() => {
           source.loopStart = 0;
           source.loopEnd = prepared.duration;
           source.playbackRate.setValueAtTime(this._controls.rate, when);
-          const playing = { name: part.name, source, gain, nodes: [source, gain] };
+          const pitch = this._Pitch.create(ctx, { playbackRate: this._controls.rate,
+            pitchSemitones: this._controls.pitch + (part.name === null ? 0 : this._controls.stemControls[part.name]?.pitch || 0) });
+          const playing = { name: part.name, source, gain, pitch, nodes: [source, pitch, gain] };
           deck.parts.push(playing);
+          pitch.onprocessorerror = () => {
+            if (deck.disposed || this._disposed) return;
+            this._error = "Pitch processing stopped. Press Play to restart the track.";
+            this.stop(); this._emit("error");
+          };
+          source.connect(pitch);
           if (part.name === null) {
-            source.connect(gain); gain.connect(deck.gain);
+            pitch.connect(gain); gain.connect(deck.gain);
           } else {
             // Each stem is processed before summing into the master chain.
             // Playback rate stays shared so instrument layers remain aligned.
@@ -399,9 +476,9 @@ globalThis.HydraElevenPlayer = (() => {
             const feedback = make("feedback", "createGain"), delayWet = make("delayWet", "createGain");
             const reverb = make("reverb", "createConvolver"), reverbWet = make("reverbWet", "createGain");
             highpass.type = "highpass"; highpass.Q.value = 0.707; lowpass.type = "lowpass";
-            delay.delayTime.value = 0.24; feedback.gain.value = 0.22;
+            delay.delayTime.value = 0.24; feedback.gain.value = 0.42;
             reverb.buffer = this._convolver.buffer;
-            source.connect(highpass); highpass.connect(lowpass); lowpass.connect(gain);
+            pitch.connect(highpass); highpass.connect(lowpass); lowpass.connect(gain);
             lowpass.connect(delay); delay.connect(feedback); feedback.connect(delay); delay.connect(delayWet); delayWet.connect(gain);
             lowpass.connect(reverb); reverb.connect(reverbWet); reverbWet.connect(gain);
             gain.connect(pan); pan.connect(deck.gain);
@@ -415,6 +492,8 @@ globalThis.HydraElevenPlayer = (() => {
 
     _applyPartControls(part, initial = false) {
       const set = (param, value) => { if (initial) param.value = value; else this._smooth(param, value); };
+      set(part.pitch.parameters.get("pitchSemitones"), this._controls.pitch +
+        (part.name === null ? 0 : this._controls.stemControls[part.name]?.pitch || 0));
       if (part.name === null) { set(part.gain.gain, 1); return; }
       const values = { ...STEM_DEFAULTS, ...this._controls.stemControls[part.name] };
       set(part.gain.gain, values.gain * (this._controls.stemGains[part.name] ?? 1));
@@ -427,40 +506,59 @@ globalThis.HydraElevenPlayer = (() => {
     }
 
     _clockAt(deck, when) {
-      const clock = deck.clock, elapsed = Math.max(0, when - clock.time);
+      // The audible clock lags source automation by the processor latency.
+      // Keep prior ramp segments so another live update cannot erase that past.
+      let clock = deck.clock;
+      for (let index = deck.clockHistory.length - 1; when < clock.time && index >= 0; index--) clock = deck.clockHistory[index];
+      const elapsed = Math.max(0, when - clock.time);
       const rampTime = Math.min(clock.ramp, elapsed);
       const slope = clock.ramp ? (clock.target - clock.initial) / clock.ramp : 0;
       return { position: clock.position + clock.initial * rampTime + slope * rampTime * rampTime / 2 +
         clock.target * Math.max(0, elapsed - clock.ramp),
         rate: rampTime < clock.ramp ? clock.initial + slope * rampTime : clock.target,
-        rampRemaining: Math.max(0, clock.ramp - elapsed) };
+        target: clock.target, rampRemaining: Math.max(0, clock.ramp - elapsed) };
     }
 
     _position(deck, when) { return positiveModulo(this._clockAt(deck, when).position, deck.prepared.duration); }
 
     _remaining(deck, when) {
-      const state = this._clockAt(deck, when);
-      const distance = deck.prepared.duration - positiveModulo(state.position, deck.prepared.duration);
-      const pendingStart = Math.max(0, deck.clock.time - when);
-      const average = (state.rate + deck.clock.target) / 2;
+      let state = this._clockAt(deck, when);
+      let distance = deck.prepared.duration - positiveModulo(state.position, deck.prepared.duration);
+      let cursor = Math.max(when, deck.sourceStart), pendingStart = cursor - when;
+      // A delayed audible query can precede several already-known rate changes.
+      // Integrate those segments before solving the final ramp to the boundary.
+      for (const clock of [...deck.clockHistory, deck.clock]) {
+        if (clock.time <= cursor) continue;
+        const next = this._clockAt(deck, clock.time), covered = next.position - state.position;
+        if (covered >= distance) break;
+        distance -= covered; pendingStart += clock.time - cursor;
+        cursor = clock.time; state = next;
+      }
+      const average = (state.rate + state.target) / 2;
       const rampDistance = average * state.rampRemaining;
       if (state.rampRemaining && distance < rampDistance) {
-        const slope = (deck.clock.target - state.rate) / state.rampRemaining;
+        const slope = (state.target - state.rate) / state.rampRemaining;
         return pendingStart + (Math.abs(slope) < 1e-8 ? distance / state.rate :
           2 * distance / (state.rate + Math.sqrt(state.rate * state.rate + 2 * slope * distance)));
       }
-      return pendingStart + state.rampRemaining + (distance - rampDistance) / deck.clock.target;
+      return pendingStart + state.rampRemaining + (distance - rampDistance) / state.target;
     }
 
     _changeRate(deck, target) {
       if (deck.clock.target === target) return;
+      this._clockRevision += 1;
       const when = Math.max(this._context.currentTime, deck.clock.time);
       const current = this._clockAt(deck, when);
+      deck.clockHistory.push(deck.clock);
+      while (deck.clockHistory.length > 1 && deck.clockHistory[1].time < when - deck.latency - RATE_RAMP - 1) deck.clockHistory.shift();
       deck.clock = { time: when, position: current.position, initial: current.rate, target, ramp: RATE_RAMP };
       for (const part of deck.parts) {
-        part.source.playbackRate.cancelScheduledValues(when);
-        part.source.playbackRate.setValueAtTime(current.rate, when);
-        part.source.playbackRate.linearRampToValueAtTime(target, when + RATE_RAMP);
+        // Match compensation to source-rate automation on the audio thread.
+        for (const param of [part.source.playbackRate, part.pitch.parameters.get("playbackRate")]) {
+          param.cancelScheduledValues(when);
+          param.setValueAtTime(current.rate, when);
+          param.linearRampToValueAtTime(target, when + RATE_RAMP);
+        }
       }
     }
 
@@ -471,9 +569,10 @@ globalThis.HydraElevenPlayer = (() => {
         next.duration / this._controls.rate / 4);
       const remaining = this._remaining(old, now);
       if (remaining > fade + 0.2) return;
-      const start = Math.max(now + 0.01, now + remaining - fade);
+      const sourceStart = Math.max(now + 0.01, now + remaining - fade);
+      const deck = this._createDeck(next, sourceStart);
+      const start = sourceStart + deck.latency;
       const end = start + fade;
-      const deck = this._createDeck(next, start);
       deck.gain.gain.setValueAtTime(0, start);
       // Linear fades also preserve loudness for a correlated replacement (e.g.
       // the same composition after stem extraction) without a +3 dB midpoint.
@@ -481,7 +580,9 @@ globalThis.HydraElevenPlayer = (() => {
       old.gain.gain.cancelScheduledValues(start);
       old.gain.gain.setValueAtTime(1, start);
       old.gain.gain.linearRampToValueAtTime(0, end);
-      for (const part of old.parts) part.source.stop(end + 0.01);
+      // Destroy the silent old deck after the fade in _tick. Scheduling a
+      // source stop here would make a not-yet-audible replacement impossible
+      // to withdraw when the user changes the next-track prompt.
       this._queued = null;
       this._transition = { old, next: deck, start, end, promoted: false, reason };
     }
@@ -506,7 +607,10 @@ globalThis.HydraElevenPlayer = (() => {
         this._destroyDeck(transition.old);
         this._transition = null;
       }
-      if (!this._transition) this._scheduleTransition(now);
+      if (!this._transition) {
+        try { this._scheduleTransition(now); }
+        catch (error) { this._error = error.message; this.stop(); this._emit("error"); return; }
+      }
       this._timer = this._setTimeout(() => {
         this._timer = null;
         if (epoch === this._epoch && this._running) this._tick();
@@ -518,6 +622,9 @@ globalThis.HydraElevenPlayer = (() => {
       deck.disposed = true;
       for (const part of deck.parts) {
         try { part.source.stop(); } catch (_) { /* A scheduled source may already have stopped. */ }
+        part.pitch.onprocessorerror = null;
+        part.pitch.port?.postMessage({ type: "dispose" });
+        part.pitch.port?.close();
         for (const node of part.nodes) node.disconnect();
       }
       deck.gain.disconnect();

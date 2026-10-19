@@ -136,6 +136,22 @@ the synth has no held notes.
 
 ## 6. Dashboard: NRPN transmit mode
 
+The Synth mixer parameter picker exposes all 1,149 catalog definitions: 929
+usable NRPN controls, 114 usable CC controls/aliases, and 106 entries with an
+explicit reason they cannot be mapped. CC and NRPN aliases are not independent
+synth parameters. The catalog preserves the published ranges and selector
+bytes; it does not fill undocumented ranges with guessed values.
+
+The source remains ASM's [Keyboard/Desktop MIDI specification 1.5.0](https://www.mecldata.com/download/asm/legacy/Hydrasynth_KB_DR_MIDI_Spec_1.5.0.pdf),
+linked from [ASM's legacy downloads](https://www.ashunsoundmachines.com/download-legacy)
+when reviewed on 13 October 2026. Explorer firmware 2.2 hardware compatibility
+still requires this physical acceptance run.
+
+The documented CC assignments include ENV3 Sustain (96), ENV3 Release (97),
+and ARP Octave (120). Do not use CC120 as a panic message on this instrument.
+Stopping playback releases sustain with CC64=0 before individual Note Off
+messages. Panic also sends All Notes Off (123).
+
 Set PARAM TX to NRPN, restart the dashboard, and move the same controls. Also
 move an arpeggiator control and a modulation-matrix source or target if the
 current patch exposes them.

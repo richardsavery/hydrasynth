@@ -6,8 +6,13 @@ globalThis.HydraParameters = (() => {
   let entries = [];
   let byId = new Map();
   let ccEntries = new Map();
+  let summary = null;
   const clamp = (n, lo, hi) => Math.max(lo, Math.min(hi, n));
-  const excludedCc = new Set([0, 6, 32, 38, 64, 96, 97, 98, 99, 100, 101, 120, 121, 123]);
+  // ASM assigns 96, 97 and 120 to sound parameters in CC receive mode.
+  // Keep bank/transport messages separate, but do not hide documented controls
+  // just because a generic MIDI receiver gives their CC number another meaning.
+  const excludedCc = new Set([0, 6, 32, 38, 98, 99, 100, 101, 121, 123]);
+  const systemCc = new Set([1, 7, 11, 64]);
 
   function install(catalog) {
     if (catalog?.schema_version !== 1 || !Array.isArray(catalog.nrpn_parameters) || !Array.isArray(catalog.cc_parameters)) {
@@ -46,6 +51,8 @@ globalThis.HydraParameters = (() => {
         family: entry.group, kind, number, min: minimum, max: maximum, from: minimum, to: maximum,
         choices, discrete, unavailable, valueSpec: value, selector, equivalents: entry.nrpn_equivalents || [],
         ccEquivalent: entry.cc_equivalent, hardware: true,
+        sourcePage: entry.source?.page,
+        sourceUrl: catalog.specification?.official_direct_url,
         randomEligible: !unavailable && value.kind !== "packed_index" && !/BPM Sync on/i.test(entry.name),
         hint: value.documented_out_of_7bit_range ? "Limited to 0–127: the reference's upper value cannot fit in one MIDI data byte."
           : value.kind === "packed_index" ? "Routing index; consult the synth's modulation source/destination list."
@@ -55,9 +62,14 @@ globalThis.HydraParameters = (() => {
     ccEntries = new Map(entries.filter((entry) => entry.kind === "cc").map((entry) => [entry.number, entry]));
     const music = globalThis.HydraSonification;
     music.DESTINATIONS.splice(27, music.DESTINATIONS.length - 27, ...entries);
-    return { total: entries.length, available: entries.filter((entry) => !entry.unavailable).length,
+    summary = { total: entries.length, available: entries.filter((entry) => !entry.unavailable).length,
+      cc: entries.filter((entry) => entry.kind === "cc" && !entry.unavailable).length,
       nrpn: entries.filter((entry) => entry.kind === "nrpn" && !entry.unavailable).length,
-      unavailable: entries.filter((entry) => entry.unavailable).length };
+      ccTotal: catalog.cc_parameters.length, nrpnTotal: catalog.nrpn_parameters.length,
+      unavailable: entries.filter((entry) => entry.unavailable).length,
+      specification: { title: catalog.specification?.title, version: catalog.specification?.document_version,
+        url: catalog.specification?.official_direct_url } };
+    return summary;
   }
 
   function logicalValue(entry, value) {
@@ -65,6 +77,25 @@ globalThis.HydraParameters = (() => {
     if (entry.choices?.length) output = entry.choices.reduce((best, item) =>
       Math.abs(item.value - output) < Math.abs(best.value - output) ? item : best).value;
     return output;
+  }
+
+  function displayValue(entry, value) {
+    if (typeof value !== "number" || !Number.isFinite(value)) return "—";
+    const logical = entry ? logicalValue(entry, value) : value;
+    const label = entry?.choices?.find((item) => item.value === logical)?.label;
+    const number = Number(logical.toFixed(2)).toString();
+    return label ? `${label} (${number})` : number;
+  }
+
+  function availability(destination, { output = "midi", midiFormat = "nrpn" } = {}) {
+    if (!destination) return "Parameter unavailable";
+    if (destination.unavailable) return destination.unavailable;
+    if (destination.hardware && output !== "midi") return "MIDI only";
+    if (output === "midi" && destination.kind === "nrpn" && midiFormat !== "nrpn") return "Select NRPN in Connections";
+    if (output === "midi" && destination.hardware && !command(destination, destination.from, midiFormat)) {
+      return "No documented NRPN equivalent is available; select CC in Connections";
+    }
+    return "";
   }
 
   function encode(entry, value) {
@@ -103,8 +134,8 @@ globalThis.HydraParameters = (() => {
       if (!target) return null;
       return encode(target, target.min + clamp(value, 0, 127) / 127 * (target.max - target.min));
     }
-    // Mod wheel, volume and expression are System MIDI controls in either mode.
-    if (format === "nrpn" && ![1, 7, 11].includes(number)) return null;
+    // System MIDI controls keep their CC messages in either parameter mode.
+    if (format === "nrpn" && !systemCc.has(number)) return null;
     return { key: `cc:${number}`, kind: "cc", number, value: Math.round(clamp(value, 0, 127)), parameterId: destination.id };
   }
 
@@ -138,5 +169,6 @@ globalThis.HydraParameters = (() => {
     }
     reset() { this.pending.clear(); this.sent.clear(); }
   }
-  return { install, encode, command, messages, logicalValue, Pacer, get entries() { return entries; }, get byId() { return byId; } };
+  return { install, encode, command, messages, logicalValue, displayValue, availability, Pacer,
+    get summary() { return summary; }, get entries() { return entries; }, get byId() { return byId; } };
 })();

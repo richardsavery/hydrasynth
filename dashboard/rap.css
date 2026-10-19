@@ -1,0 +1,20 @@
+.rap-panel { margin: 22px 0; padding: 18px 20px; border: 1px solid var(--line); border-radius: 9px; background: var(--panel); }
+.rap-panel .mm-section-heading { margin: 0 0 14px; }
+.rap-panel h2 { margin: 0; font-size: 18px; }
+.rap-panel [data-rap-tempo] { color: var(--accent); font: 11px var(--mono); }
+.rap-panel .rap-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 9px; margin: 14px 0; }
+.rap-panel .rap-check { display: flex; align-items: center; gap: 7px; }
+.rap-panel .rap-check input { width: auto; margin: 0; }
+.rap-panel .rap-checks { display: flex; flex-wrap: wrap; align-items: center; gap: 13px 20px; padding-top: 4px; }
+.rap-panel .rap-direction { margin-top: 14px; }
+.rap-panel [data-rap-custom] { margin-top: 10px; }
+.rap-panel [data-rap-custom][hidden] { display: none; }
+.rap-panel .rap-voice-status { margin: 5px 0 0; color: var(--muted); font-size: 11px; }
+.rap-panel .rap-voice-status:empty { display: none; }
+.rap-panel .rap-options { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); align-items: start; gap: 22px; }
+.rap-panel .rap-options input[type=range] { margin-top: 7px; }
+.rap-panel summary { cursor: pointer; color: var(--muted); font-size: 11px; }
+.rap-panel details label { margin-top: 7px; }
+.mm-workspace .rap-status { margin-top: 12px; font-size: 11px; color: var(--muted); overflow-wrap: anywhere; }
+.mm-workspace .rap-status.is-error { color: var(--rose); }
+@media (max-width: 500px) { .rap-panel { padding: 15px; } .rap-panel .rap-options { grid-template-columns: minmax(0,1fr); gap: 12px; } }

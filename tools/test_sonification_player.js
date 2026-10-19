@@ -20,7 +20,7 @@ const context = vm.createContext({
 for (const file of ["drums.js", "sonification.js", "parameters.js", "live.js", "drum-workspace.js", "app.js"]) {
   vm.runInContext(fs.readFileSync(path.join(__dirname, "../dashboard", file), "utf8"), context);
 }
-vm.runInContext("globalThis.player = {state, dom, controlsAt, runPlaybackTick, stopPlayback, playMidiNote, stopActiveMidiNotes, togglePlayback, Music, CONTROL_IDS, sendMidiPatch, changeSoundAtBoundary, loadMappingSourceSeries, learnedMappingRange, resetMappingSourceRange, usableFixedRange};", context);
+vm.runInContext("globalThis.player = {state, dom, controlsAt, runPlaybackTick, stopPlayback, playMidiNote, stopActiveMidiNotes, togglePlayback, Music, CONTROL_IDS, sendMidiPatch, selectMidiPatch, changeSoundAtBoundary, loadMappingSourceSeries, learnedMappingRange, resetMappingSourceRange, usableFixedRange};", context);
 const { state, dom, Music, CONTROL_IDS } = context.player;
 for (const [key, id] of Object.entries(CONTROL_IDS)) dom[id] = element(String(Music.DEFAULT_CONTROLS[key]));
 dom["scale-root"].selectedIndex = 0;
@@ -67,7 +67,8 @@ async function main() {
   context.player.playMidiNote(60, 90, 1000);
   state.midiOutput = second;
   context.player.stopActiveMidiNotes();
-  assert.deepEqual(messages, [["first", 0x90, 60, 90], ["first", 0x80, 60, 0]]);
+  assert.deepEqual(messages, [["first", 0x90, 60, 90], ["first", 0xB0, 64, 0], ["first", 0x80, 60, 0]],
+    "Stop releases sustain and notes on the original MIDI output");
   assert.equal(timers.size, 0);
 
   state.midiOutput = first;
@@ -126,6 +127,50 @@ async function main() {
     assert.ok(!messages.some((message) => message[1] === 0xC0), "stop cancels bank changes before program change");
     assert.equal(state.patchTimers.size, 0);
   }
+  messages.length = 0;
+  dom["patch-bank"].value = "A";
+  dom["patch-number"].value = "1";
+  state.playing = true;
+  state.playbackWorkspace = "synth-legacy";
+  const manualGeneration = state.playbackGeneration, manualStep = state.rhythmStep;
+  const manual = context.player.selectMidiPatch({ bank: "G", number: 96 }, "synth-mixer");
+  assert.equal(state.playing, true, "manual patch selection keeps the synth transport running");
+  assert.equal(state.preparing, false);
+  assert.equal(state.playbackWorkspace, "synth-legacy", "patch selection preserves the running transport's original controls");
+  assert.equal(state.playbackGeneration, manualGeneration);
+  await advancePatch(); await advancePatch(); await advancePatch();
+  assert.equal(await manual, true);
+  assert.deepEqual(messages, [["first", 0xb0, 0, 0], ["first", 0xb0, 32, 6], ["first", 0xc0, 95]],
+    "manual selection uses explicit mixer values rather than hidden legacy controls");
+  assert.equal(state.preparing, false);
+  assert.equal(state.patchTimers.size, 0);
+  assert.equal(state.playing, true, "settling the new patch does not stop playback");
+  assert.equal(state.rhythmStep, manualStep, "patch selection does not rewind the sequence");
+  for (const patch of [{ bank: "I", number: 1 }, { bank: "A", number: 129 }, { bank: "A", number: 1.5 }]) {
+    const sent = messages.length;
+    await assert.rejects(context.player.selectMidiPatch(patch), /Choose a bank/);
+    assert.equal(messages.length, sent, "invalid patch selection cannot send MIDI");
+  }
+  const canceledManual = context.player.selectMidiPatch({ bank: "A", number: 5 }, "synth-mixer");
+  context.player.stopPlayback();
+  assert.equal(await canceledManual, false);
+  assert.equal(state.playing, false, "Stop during patch loading remains stopped");
+  assert.equal(state.preparing, false);
+  assert.equal(state.patchTimers.size, 0);
+  const idleManual = context.player.selectMidiPatch({ bank: "B", number: 2 }, "synth-mixer");
+  assert.equal(state.playbackWorkspace, "synth-mixer", "the mixer's Stop button owns its idle patch selection");
+  assert.equal(state.preparing, true);
+  await advancePatch(); await advancePatch(); await advancePatch();
+  assert.equal(await idleManual, true);
+  assert.equal(state.playing, false, "selecting a patch while stopped never starts playback");
+  assert.equal(state.preparing, false);
+  state.playing = true;
+  state.midiOutput = { send() { throw new Error("Patch output disconnected"); } };
+  await assert.rejects(context.player.selectMidiPatch({ bank: "B", number: 3 }), /Patch output disconnected/);
+  assert.equal(state.playing, false, "a failed MIDI output still stops the affected transport");
+  assert.equal(state.patchChanging, false, "failed sends cannot leave patch loading latched");
+  assert.equal(state.patchTimers.size, 0);
+  state.midiOutput = first;
   dom["sound-mode"].value = "cycle";
   state.rhythmStep = 32;
   const sentBeforeThrottle = messages.length;

@@ -11,6 +11,10 @@ const catalog = JSON.parse(fs.readFileSync(path.join(__dirname, "../data/hydrasy
 const summary = P.install(catalog);
 assert.equal(summary.total, 1149);
 assert.equal(summary.nrpn, 929);
+assert.equal(summary.cc, 114);
+assert.equal(summary.unavailable, 106);
+assert.equal(P.summary, summary);
+assert.equal(summary.specification.version, "1.5.0");
 const find = (name) => P.entries.find((entry) => entry.kind === "nrpn" && entry.label === name);
 const encode = (name, value) => P.encode(find(name), value);
 assert.equal(encode("OSC1 Cent", -1).value, 8191);
@@ -35,9 +39,39 @@ assert.equal(P.command({cc: 74}, 127, "nrpn").value, 8192);
 assert.equal(P.command({cc: 74}, 127, "cc").value, 127);
 assert.equal(P.command(find("Mutator1 Mode"), 3, "cc"), null);
 assert.deepEqual(P.messages(encode("Mutator4 Mode", 7)), [[176,99,63],[176,98,33],[176,6,3],[176,38,7]]);
+// Every published sound control is exposed even where its CC number has a
+// different meaning on generic MIDI devices. NRPN mode uses its ASM equivalent.
+for (const [number, name] of [[96, "ENV3 Sustain"], [97, "ENV3 Release"], [120, "ARP Octave"]]) {
+  const entry = P.entries.find((item) => item.kind === "cc" && item.number === number);
+  assert.equal(entry.label, name);
+  assert.equal(entry.unavailable, "");
+  assert.deepEqual(P.messages(P.command(entry, 127, "cc")), [[176, number, 127]]);
+  assert.equal(P.command(entry, 127, "nrpn").kind, "nrpn");
+}
+const sustain = P.entries.find((entry) => entry.kind === "cc" && entry.number === 64);
+assert.deepEqual(P.messages(P.command(sustain, 127, "nrpn")), [[176, 64, 127]]);
+assert.deepEqual(P.messages(P.command(sustain, 0, "cc")), [[176, 64, 0]]);
+assert.equal(P.displayValue(find("Mutator4 Mode"), 7), "PhazDiff (7)");
+assert.equal(P.displayValue(find("OSC1 Cent"), -12), "-12");
+assert.equal(P.displayValue(find("OSC1 Cent"), null), "—");
+assert.equal(P.availability(find("Mutator4 Mode"), {output: "audio"}), "MIDI only");
+assert.equal(P.availability(find("Mutator4 Mode"), {output: "midi", midiFormat: "cc"}), "Select NRPN in Connections");
+assert.equal(P.availability(find("Mutator4 Mode"), {output: "midi", midiFormat: "nrpn"}), "");
+assert.equal(P.availability({id: "pitch", min: 0, max: 127}, {output: "audio"}), "");
+const futureCC = {id: "future-cc", kind: "cc", number: 2, hardware: true, from: 0};
+assert.match(P.availability(futureCC, {output: "midi", midiFormat: "nrpn"}), /select CC/);
+assert.equal(P.availability(futureCC, {output: "midi", midiFormat: "cc"}), "");
+assert.match(P.availability(find("ENV5 Loop")), /conflicting/);
+assert.match(P.availability(find("PRE-FX type")), /effect-type/);
+assert.ok(find("Mutator4 Mode").sourcePage > 0);
+assert.match(find("Mutator4 Mode").sourceUrl, /Hydrasynth_KB_DR_MIDI_Spec_1.5.0.pdf$/);
 // Exercise every enabled entry at boundaries and midpoint, including discrete lists.
 for (const entry of P.entries) {
   if (entry.unavailable) { assert.equal(P.encode(entry, 0), null); continue; }
+  for (const midiFormat of ["nrpn", "cc"]) {
+    assert.equal(Boolean(P.availability(entry, {output: "midi", midiFormat})), !P.command(entry, entry.from, midiFormat),
+      `${entry.label} must explain why its selected MIDI format cannot send it`);
+  }
   for (const value of [entry.min, (entry.min + entry.max) / 2, entry.max]) {
     const command = P.encode(entry, value);
     assert.ok(Number.isInteger(command.value));

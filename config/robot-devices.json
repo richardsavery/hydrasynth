@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "devices": {
+    "head": {
+      "identity": {
+        "vid": 12125,
+        "pid": 8706,
+        "serial_number": "6430A5355055344E312E3120FF0C0B25"
+      },
+      "baudrate": 1000000,
+      "label": "ROBOTIS OpenRB-150"
+    },
+    "ribs": {
+      "identity": {
+        "vid": 1027,
+        "pid": 24596,
+        "serial_number": "FT78LBUJ"
+      },
+      "baudrate": 1000000,
+      "label": "FTDI rib adapter"
+    },
+    "drums": {
+      "identity": {
+        "vid": 1027,
+        "pid": 24596,
+        "serial_number": "FT7WBEBD"
+      },
+      "baudrate": 1000000,
+      "label": "FTDI drum adapter"
+    }
+  }
+}

@@ -30,6 +30,10 @@ from urllib.parse import parse_qs, unquote, urlsplit
 
 from recording_library import RecordingLibrary, default_recordings_directory
 from elevenlabs_service import ElevenLabsService, FileResponse
+from rap_service import RapService
+from rap_experiment_service import RapExperimentService
+from rap_response_service import RapResponseService
+from robot_control import RobotControlService
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -2783,6 +2787,10 @@ def handler_for(
     recording_library: RecordingLibrary | None = None,
     signal_lab_feed: SignalLabFeed | None = None,
     elevenlabs: ElevenLabsService | None = None,
+    rap: RapService | None = None,
+    rap_experiment: RapExperimentService | None = None,
+    robot: RobotControlService | None = None,
+    rap_response: RapResponseService | None = None,
 ) -> type[BaseHTTPRequestHandler]:
     class DashboardHandler(BaseHTTPRequestHandler):
         server_version = "HydraDashboard/1"
@@ -2790,8 +2798,20 @@ def handler_for(
         def do_GET(self) -> None:  # noqa: N802
             request_url = urlsplit(self.path)
             path = unquote(request_url.path)
+            if path.startswith("/api/robot/"):
+                self._local_audio_request("GET", path, robot, "Robot control")
+                return
             if path.startswith("/api/elevenlabs/"):
-                self._elevenlabs_request("GET", path)
+                self._local_audio_request("GET", path, elevenlabs, "ElevenLabs")
+                return
+            if path.startswith("/api/rap/"):
+                self._local_audio_request("GET", path, rap, "Rap")
+                return
+            if path.startswith("/api/rap-experiment/"):
+                self._local_audio_request("GET", path, rap_experiment, "Rap experiment")
+                return
+            if path.startswith("/api/rap-response/"):
+                self._local_audio_request("GET", path, rap_response, "Rap response")
                 return
             if path == "/api/snapshot":
                 payload = json.dumps(
@@ -2915,11 +2935,19 @@ def handler_for(
                 "/sonification.js": "sonification.js",
                 "/parameters.js": "parameters.js",
                 "/live.js": "live.js",
+            "/live-monitor-model.js": "live-monitor-model.js",
+            "/live-monitor.js": "live-monitor.js",
+            "/live-monitor.css": "live-monitor.css",
                 "/drums.js": "drums.js",
                 "/drum-workspace.js": "drum-workspace.js",
                 "/elevenlabs.js": "elevenlabs.js",
                 "/elevenlabs.css": "elevenlabs.css",
                 "/elevenlabs-source.js": "elevenlabs-source.js",
+                "/audio-pitch.js": "audio-pitch.js",
+                "/audio-pitch-worklet.js": "audio-pitch-worklet.js",
+                "/vendor/soundtouch-2.1.1.js": "vendor/soundtouch-2.1.1.js",
+                "/vendor/soundtouch-2.1.1.js.map": "vendor/soundtouch-2.1.1.js.map",
+                "/vendor/soundtouch-LICENSE.txt": "vendor/soundtouch-LICENSE.txt",
                 "/elevenlabs-player.js": "elevenlabs-player.js",
                 "/elevenlabs-realtime.js": "elevenlabs-realtime.js",
                 "/elevenlabs-realtime.css": "elevenlabs-realtime.css",
@@ -2927,6 +2955,27 @@ def handler_for(
                 "/music-mixer-generation.js": "music-mixer-generation.js",
                 "/music-mixer.js": "music-mixer.js",
                 "/music-mixer.css": "music-mixer.css",
+                "/rap.js": "rap.js",
+                "/rap.css": "rap.css",
+                "/music-mixer-voice.js": "music-mixer-voice.js",
+                "/music-mixer-voice.css": "music-mixer-voice.css",
+                "/rap-experiment.js": "rap-experiment.js",
+                "/rap-experiment.css": "rap-experiment.css",
+                "/rap-response.js": "rap-response.js",
+                "/rap-response.css": "rap-response.css",
+                "/robot-control.js": "robot-control.js",
+                "/robot-control.css": "robot-control.css",
+                "/robot-live.js": "robot-live.js",
+                "/robot-live.css": "robot-live.css",
+                "/robot-drums.js": "robot-drums.js",
+                "/robot-drums.css": "robot-drums.css",
+                "/synth-mixer-engine.js": "synth-mixer-engine.js",
+                "/synth-mixer.js": "synth-mixer.js",
+                "/synth-mixer.css": "synth-mixer.css",
+            "/signal-library.js": "signal-library.js",
+            "/signal-library.css": "signal-library.css",
+            "/session-library.js": "session-library.js",
+            "/session-library.css": "session-library.css",
                 "/observer": "observer/index.html",
                 "/observer/": "observer/index.html",
                 "/observer/index.html": "observer/index.html",
@@ -2958,8 +3007,20 @@ def handler_for(
 
         def do_POST(self) -> None:  # noqa: N802
             path = unquote(urlsplit(self.path).path)
+            if path.startswith("/api/robot/"):
+                self._local_audio_request("POST", path, robot, "Robot control")
+                return
             if path.startswith("/api/elevenlabs/"):
-                self._elevenlabs_request("POST", path)
+                self._local_audio_request("POST", path, elevenlabs, "ElevenLabs")
+                return
+            if path.startswith("/api/rap/"):
+                self._local_audio_request("POST", path, rap, "Rap")
+                return
+            if path.startswith("/api/rap-experiment/"):
+                self._local_audio_request("POST", path, rap_experiment, "Rap experiment")
+                return
+            if path.startswith("/api/rap-response/"):
+                self._local_audio_request("POST", path, rap_response, "Rap response")
                 return
             if path == "/api/signal-lab/events":
                 if signal_lab_feed is None:
@@ -2994,11 +3055,11 @@ def handler_for(
                 "no-store",
             )
 
-        def _elevenlabs_request(self, method: str, path: str) -> None:
-            # These local file and billable-generation routes never share the
+        def _local_audio_request(self, method: str, path: str, audio_service: Any, label: str) -> None:
+            # Local hardware, file and billable-generation routes never share the
             # optional remote telemetry surface. Validate Host to stop DNS rebinding.
             if not host_is_loopback(self.client_address[0]) or not host_is_loopback(self.server.server_address[0]):
-                self._json_error(403, "ElevenLabs is available on a loopback server only.")
+                self._json_error(403, f"{label} is available on a loopback server only.")
                 return
             authority = self.headers.get("Host", "")
             try:
@@ -3011,10 +3072,10 @@ def handler_for(
                 valid_host = False
             origin = self.headers.get("Origin")
             if not valid_host or (origin is not None and origin != "http://" + authority) or self.headers.get("Sec-Fetch-Site") == "cross-site":
-                self._json_error(403, "Use the local dashboard origin for ElevenLabs.")
+                self._json_error(403, f"Use the local dashboard origin for {label}.")
                 return
-            if elevenlabs is None:
-                self._json_error(503, "ElevenLabs workspace unavailable.")
+            if audio_service is None:
+                self._json_error(503, f"{label} workspace unavailable.")
                 return
             document = None
             if method == "POST":
@@ -3025,8 +3086,11 @@ def handler_for(
                     length = int(self.headers.get("Content-Length", "0"))
                 except ValueError:
                     length = 0
-                if not 0 < length <= 12 * 1024 * 1024:
-                    self._json_error(413, "Upload exceeds the 12 MiB request limit.")
+                limit = (16 * 1024 if label == "Robot control" else
+                         128 * 1024 if label in {"Rap", "Rap experiment"} else
+                         2 * 1024 * 1024 if label == "Rap response" else 12 * 1024 * 1024)
+                if not 0 < length <= limit:
+                    self._json_error(413, "Request exceeds the local service size limit.")
                     return
                 try:
                     self.connection.settimeout(30)
@@ -3037,7 +3101,7 @@ def handler_for(
                     self._json_error(400, "Invalid JSON request.")
                     return
             try:
-                status, body = elevenlabs.dispatch(method, self.path, document)
+                status, body = audio_service.dispatch(method, self.path, document)
                 if isinstance(body, FileResponse):
                     self._send_elevenlabs_file(body)
                 else:
@@ -3046,7 +3110,7 @@ def handler_for(
                 return
             except Exception:
                 # Never echo provider exceptions: they may contain credentials.
-                self._json_error(500, "The local music service could not complete this request.")
+                self._json_error(500, "The local service could not complete this request.")
 
         def _send_elevenlabs_file(self, response: FileResponse) -> None:
             with response.path.open("rb") as stream:
@@ -3778,10 +3842,32 @@ def main(argv: list[str] | None = None) -> int:
     recording_library = RecordingLibrary(recordings_directory)
     store = SnapshotStore("demo" if arguments.demo else "live", catalog)
     signal_lab_feed = SignalLabFeed(catalog)
+    robot = RobotControlService()
     try:
         elevenlabs = ElevenLabsService(PROJECT_ROOT / "var" / "elevenlabs", PROJECT_ROOT / ".env")
     except (OSError, ValueError, RuntimeError) as error:
         print(f"error: unable to initialize local music storage: {error}", file=sys.stderr)
+        return 1
+    try:
+        rap = RapService(PROJECT_ROOT / "var" / "rap", PROJECT_ROOT / ".env")
+    except (OSError, ValueError, RuntimeError) as error:
+        elevenlabs.close()
+        print(f"error: unable to initialize local rap storage: {error}", file=sys.stderr)
+        return 1
+    try:
+        rap_experiment = RapExperimentService(PROJECT_ROOT / "var" / "rap-experiment", PROJECT_ROOT / ".env")
+    except (OSError, ValueError, RuntimeError) as error:
+        elevenlabs.close()
+        rap.close()
+        print(f"error: unable to initialize rap experiment storage: {error}", file=sys.stderr)
+        return 1
+    try:
+        rap_response = RapResponseService(PROJECT_ROOT / "var" / "rap-response", PROJECT_ROOT / ".env")
+    except (OSError, ValueError, RuntimeError) as error:
+        elevenlabs.close()
+        rap.close()
+        rap_experiment.close()
+        print(f"error: unable to initialize rap response storage: {error}", file=sys.stderr)
         return 1
     service: DemoService | LiveService
     if arguments.demo:
@@ -3820,6 +3906,9 @@ def main(argv: list[str] | None = None) -> int:
         except (OSError, ValueError) as error:
             service.stop()
             elevenlabs.close()
+            rap.close()
+            rap_experiment.close()
+            rap_response.close()
             print(f"error: unable to start command broker: {error}", file=sys.stderr)
             return 1
 
@@ -3847,6 +3936,10 @@ def main(argv: list[str] | None = None) -> int:
                 recording_library,
                 signal_lab_feed,
                 elevenlabs,
+                rap,
+                rap_experiment,
+                robot,
+                rap_response,
             ),
         )
     except OSError as error:
@@ -3854,6 +3947,9 @@ def main(argv: list[str] | None = None) -> int:
             broker.stop()
         service.stop()
         elevenlabs.close()
+        rap.close()
+        rap_experiment.close()
+        rap_response.close()
         print(f"error: unable to listen on {arguments.host}:{arguments.port}: {error}", file=sys.stderr)
         return 1
     server.timeout = 0.4
@@ -3899,6 +3995,10 @@ def main(argv: list[str] | None = None) -> int:
             broker.stop()
         service.stop()
         elevenlabs.close()
+        rap.close()
+        rap_experiment.close()
+        rap_response.close()
+        robot.close()
     return 0
 
 

@@ -597,7 +597,8 @@ class ElevenLabsService:
                 # saved by this backend from explicitly retained generations.
                 plan["request"]["store_for_inpainting"] = True
                 plan["realtime"]["conditioning_applied"] = False
-                if source:
+                continuity = validated.get("continuity_mode")
+                if source and continuity != "fresh":
                     source_request = json.loads((self.root / "jobs" / source["id"] / "request.json").read_text())
                     song_id = source["audio"].get("provider_song_id")
                     if source_request.get("store_for_inpainting") is True and song_id:
@@ -608,9 +609,13 @@ class ElevenLabsService:
                         if end_ms > 0:
                             chunk = plan["request"]["composition_plan"]["chunks"][0]
                             chunk["conditioning_ref"] = {"song_id": song_id, "range": {"start_ms": max(0, end_ms - 30000), "end_ms": end_ms}}
-                            chunk["condition_strength"] = "high"
+                            # Old saved requests keep their original high
+                            # conditioning; the explicit Evolve option leaves
+                            # more room for the next-track prompt to change it.
+                            strength = "low" if continuity == "evolve" else "high"
+                            chunk["condition_strength"] = strength
                             plan["sections"][0]["conditioning_ref"] = copy.deepcopy(chunk["conditioning_ref"])
-                            plan["sections"][0]["condition_strength"] = "high"
+                            plan["sections"][0]["condition_strength"] = strength
                             plan["realtime"]["conditioning_applied"] = True
                 validate_request(plan["request"])
                 plan["cache_key"] = plan_cache_key(plan)
@@ -727,6 +732,7 @@ class ElevenLabsService:
                 "requested_duration_seconds": sum(chunk["duration_ms"] for chunk in plan["request"]["composition_plan"]["chunks"]) / 1000,
                 "created_at": timestamp, "updated_at": timestamp, "error": None, "audio": None,
                 "model_id": plan["request"]["model_id"], "output_format": "auto",
+                "generation_settings": copy.deepcopy(plan["settings"]),
                 # Persist intent before generation so a restart retains the
                 # pipeline, without retroactively charging for older tracks.
                 "separate_stems": True,

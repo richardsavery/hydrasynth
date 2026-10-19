@@ -1,0 +1,123 @@
+body[data-workspace="robot-control"] .connection-strip { display: none; }
+.robot-workspace { max-width: 1320px; min-height: calc(100vh - 167px); margin: 0 auto; padding: 36px 30px 52px; }
+.robot-workspace .robot-heading { display: flex; justify-content: space-between; align-items: start; gap: 20px; margin-bottom: 26px; }
+.robot-workspace .robot-heading h1 { margin: 9px 0 0; font-size: 30px; font-weight: 600; letter-spacing: -.035em; }
+.robot-workspace .robot-heading p { margin: 10px 0 0; color: var(--muted); font-size: 14px; line-height: 1.6; }
+.robot-workspace .robot-badge { flex: 0 0 auto; margin-top: 15px; padding: 8px 11px; border: 1px solid var(--border-accent); border-radius: 5px; background: var(--panel-selected); color: var(--accent); font: 11px/1.5 var(--mono); }
+.robot-workspace .robot-badge.is-live { color: var(--amber); border-color: color-mix(in srgb, var(--amber) 50%, var(--line)); background: color-mix(in srgb, var(--amber) 8%, var(--panel)); }
+.robot-workspace .robot-connection { position: sticky; top: 0; z-index: 20; padding: 14px 20px; border: 1px solid var(--line); border-radius: 10px; background: var(--ink-2); box-shadow: 0 6px 18px #0003; }
+.robot-workspace .robot-connection .robot-feedback { margin-top: 9px; }
+.robot-workspace .robot-connection #robot-motor-hint { margin-top: 8px; }
+.robot-workspace label { display: grid; gap: 7px; min-width: 0; color: var(--muted); font-size: 12px; line-height: 1.5; }
+.robot-workspace input:not([type="range"]):not([type="color"]), .robot-workspace select { width: 100%; min-height: 39px; padding: 9px 10px; color: var(--text); background: var(--panel-inset); font: 13px var(--sans); }
+.robot-workspace .robot-button { min-height: 38px; padding: 9px 12px; border: 1px solid var(--line); border-radius: 5px; color: var(--text); background: var(--panel-2); font: 12px/1.5 var(--sans); cursor: pointer; }
+.robot-workspace .robot-button:hover:not(:disabled) { border-color: var(--accent); background: var(--panel-selected); }
+.robot-workspace .robot-button:disabled { opacity: .45; cursor: default; }
+.robot-workspace .robot-primary { background: var(--accent); border-color: var(--accent); color: var(--ink); font-weight: 600; }
+.robot-workspace .robot-primary:hover:not(:disabled) { background: var(--accent-hover); }
+.robot-workspace .robot-subtle { color: var(--muted); background: transparent; }
+.robot-workspace .robot-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 9px; }
+.robot-workspace .robot-connection-top { display: flex; flex-wrap: wrap; align-items: end; justify-content: space-between; gap: 15px; }
+.robot-workspace .robot-note { margin: 11px 0 0; color: var(--muted); font-size: 12px; line-height: 1.65; }
+.robot-workspace .robot-torque { display: flex; flex-wrap: wrap; align-items: center; gap: 12px 23px; margin-top: 20px; padding-top: 19px; border-top: 1px solid var(--line-soft); }
+.robot-workspace .robot-torque > p { flex: 1 1 280px; max-width: 590px; margin: 0; color: var(--muted); font-size: 12px; line-height: 1.65; }
+.robot-workspace .robot-release { border-color: color-mix(in srgb, var(--amber) 45%, var(--line)); color: var(--amber); }
+.robot-workspace .robot-emergency { min-height: 52px; padding: 12px 22px; border: 2px solid var(--rose); background: color-mix(in srgb, var(--rose) 18%, var(--panel)); color: var(--rose); font-size: 16px; font-weight: 700; }
+.robot-workspace .robot-emergency:hover:not(:disabled) { border-color: var(--rose); background: color-mix(in srgb, var(--rose) 28%, var(--panel)); }
+.robot-workspace .robot-motor-advanced { margin-top: 18px; padding-top: 13px; border-top: 1px solid var(--line-soft); }
+.robot-workspace .robot-motor-advanced > summary { margin-bottom: 16px; color: var(--muted); font-size: 12px; cursor: pointer; }
+.robot-workspace .robot-drums .robot-motor > .robot-test { margin-top: 12px; }
+.robot-workspace .robot-feedback { margin-top: 17px; font-size: 11px; }
+.robot-workspace .robot-status { min-height: 23px; margin: 15px 0 23px; color: var(--accent); font-size: 13px; line-height: 1.65; overflow-wrap: anywhere; }
+.robot-workspace .is-error { color: var(--rose); }
+.robot-workspace .robot-sections { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); align-items: start; gap: 22px; }
+.robot-workspace .robot-section { min-width: 0; padding: 22px; border: 1px solid var(--line); border-radius: 10px; background: var(--ink-2); }
+.robot-workspace .robot-head { grid-column: 1 / -1; }
+.robot-workspace .robot-head .robot-section-intro { min-height: 0; }
+.robot-workspace .robot-serial-fields { display: grid; grid-template-columns: minmax(0, 1fr) minmax(95px, .35fr); align-items: end; gap: 12px; }
+.robot-workspace .robot-head-upright { margin-top: 18px; }
+.robot-workspace .robot-head-upright .robot-note { overflow-wrap: anywhere; }
+.robot-workspace .robot-head-calibration { margin-top: 22px; padding-top: 20px; border-top: 1px solid var(--line); }
+.robot-workspace .robot-head-calibration > header { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; }
+.robot-workspace .robot-head-calibration h3 { margin: 0; font-size: 16px; font-weight: 550; }
+.robot-workspace .robot-head-calibration .robot-badge { margin: 0; }
+.robot-workspace .robot-head-calibration .robot-actions { margin-top: 15px; }
+.robot-workspace .robot-head-calibration input { min-width: 125px; max-width: 240px; }
+.robot-workspace .robot-saved-range { padding: 12px; border: 1px solid var(--line-soft); border-radius: 5px; background: var(--panel); overflow-wrap: anywhere; }
+.robot-workspace .robot-section-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.robot-workspace .robot-section-heading h2 { margin: 8px 0 0; font-size: 22px; font-weight: 550; letter-spacing: -.025em; }
+.robot-workspace .robot-section-heading > span { color: var(--muted); font: 10px/1.6 var(--mono); white-space: nowrap; }
+.robot-workspace .robot-section-intro { min-height: 43px; margin: 13px 0 20px; color: var(--muted); font-size: 12px; line-height: 1.75; }
+.robot-workspace .robot-motors { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); align-items: start; gap: 12px; }
+.robot-workspace .robot-motor { min-width: 0; padding: 15px; border: 1px solid var(--line-soft); border-radius: 7px; background: var(--panel); }
+.robot-workspace .robot-motor > header { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: baseline; gap: 6px; min-height: 40px; margin-bottom: 12px; }
+.robot-workspace .robot-motor h3 { margin: 0; font-size: 14px; font-weight: 550; }
+.robot-workspace .robot-motor > header > span { color: var(--muted-2); font: 9px/1.5 var(--mono); }
+.robot-workspace .robot-position-label { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; margin-bottom: 11px; }
+.robot-workspace .robot-position-label output { color: var(--accent); font: 20px/1.3 var(--mono); }
+.robot-workspace input[type="range"] { display: block; width: 100%; min-width: 0; margin: 0; accent-color: var(--accent); cursor: pointer; }
+.robot-workspace .robot-range { display: flex; justify-content: space-between; gap: 10px; margin: 6px 0 15px; color: var(--muted-2); font: 10px/1.5 var(--mono); }
+.robot-workspace .robot-pair { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+.robot-workspace .robot-pair label { font-size: 10px; }
+.robot-workspace .robot-pair input:not([type="range"]) { min-height: 34px; padding: 7px; font-size: 12px; }
+.robot-workspace .robot-presets { display: flex; flex-wrap: wrap; gap: 5px; margin: 12px 0 11px; }
+.robot-workspace .robot-presets .robot-button { min-height: 29px; padding: 5px 7px; font-size: 10px; }
+.robot-workspace .robot-test { color: var(--accent); border-color: var(--border-accent); background: var(--panel-selected); }
+.robot-workspace .robot-motor > .robot-test { width: 100%; }
+.robot-workspace .robot-range-source { margin: 11px 0 0; color: var(--muted-2); font-size: 10px; line-height: 1.6; overflow-wrap: anywhere; }
+.robot-workspace .robot-empty { grid-column: 1 / -1; margin: 0; padding: 20px 0; color: var(--muted); font-size: 12px; }
+.robot-workspace .robot-ribs-test { padding: 17px; border: 1px solid var(--line-soft); border-radius: 7px; background: var(--panel); }
+.robot-workspace .robot-rib-connection { min-width: 0; padding: 16px; border: 1px solid var(--border-accent); border-radius: 7px; background: var(--panel); }
+.robot-workspace .robot-rib-connection > .robot-actions { margin-top: 12px; }
+.robot-workspace .robot-rib-status { display: flex; flex-wrap: wrap; align-items: center; gap: 11px; margin-top: 17px; }
+.robot-workspace .robot-rib-status .robot-badge { margin: 0; }
+.robot-workspace .robot-rib-status > span:last-child { color: var(--muted-2); font: 10px/1.6 var(--mono); }
+.robot-workspace .robot-rib-status .is-error { color: var(--rose); border-color: var(--rose); }
+.robot-workspace .robot-checked { color: var(--muted-2); font-size: 11px; overflow-wrap: anywhere; }
+.robot-workspace .robot-rib-readback { overflow-x: auto; margin-top: 16px; }
+.robot-workspace .robot-rib-readback table { width: 100%; border-collapse: collapse; text-align: left; font-size: 11px; }
+.robot-workspace .robot-rib-readback caption { margin-bottom: 9px; text-align: left; color: var(--muted); font-size: 11px; }
+.robot-workspace .robot-rib-readback th, .robot-workspace .robot-rib-readback td { padding: 8px 7px; border-top: 1px solid var(--line-soft); vertical-align: top; }
+.robot-workspace .robot-rib-readback thead th { color: var(--muted); font-weight: 500; }
+.robot-workspace .robot-rib-readback td:last-child { min-width: 65px; overflow-wrap: anywhere; }
+.robot-workspace .robot-rib-actions { display: flex; align-items: end; gap: 13px; margin-top: 17px; }
+.robot-workspace .robot-rib-actions > label { max-width: 145px; }
+.robot-workspace .robot-rib-actions > button { flex: 1; }
+.robot-workspace .robot-rib-details { margin-top: 20px; }
+.robot-workspace .robot-rib-details summary { color: var(--muted); font-size: 12px; cursor: pointer; }
+.robot-workspace .robot-rib-details .robot-motors { margin-top: 15px; }
+.robot-workspace .robot-midi-controls { display: grid; gap: 11px; }
+.robot-workspace .robot-midi-controls > button { justify-self: start; }
+.robot-workspace .robot-colour-row { display: flex; align-items: center; gap: 18px; margin: 25px 0; }
+.robot-workspace .robot-led-swatch { width: 68px; height: 68px; flex: 0 0 68px; border: 1px solid #ffffff36; border-radius: 14px; box-shadow: 0 0 30px #78aaff16; }
+.robot-workspace input[type="color"] { width: 86px; height: 38px; padding: 3px; border-radius: 5px; cursor: pointer; }
+.robot-workspace .robot-led-actions { margin-top: 25px; }
+.robot-workspace .robot-log { margin-top: 25px; padding: 22px; border: 1px solid var(--line); border-radius: 10px; background: var(--ink-2); }
+.robot-workspace .robot-log > header { display: flex; align-items: center; justify-content: space-between; gap: 15px; }
+.robot-workspace .robot-log h2 { margin: 0; font-size: 17px; font-weight: 550; }
+.robot-workspace .robot-log ol { display: grid; gap: 0; max-height: 330px; overflow-y: auto; margin: 14px 0 0; padding: 0; list-style: none; }
+.robot-workspace .robot-log li { display: flex; align-items: baseline; gap: 13px; padding: 12px 0; border-top: 1px solid var(--line-soft); }
+.robot-workspace .robot-log-kind { flex: 0 0 55px; color: var(--accent); font: 10px/1.6 var(--mono); }
+.robot-workspace .robot-log strong { display: block; font-size: 12px; font-weight: 500; }
+.robot-workspace .robot-log code { display: block; margin-top: 5px; color: var(--muted); font: 11px/1.7 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; }
+@media (max-width: 1100px) {
+  .robot-workspace .robot-sections { grid-template-columns: minmax(0, 1fr); }
+}
+@media (max-width: 650px) {
+  .robot-workspace { padding: 27px 18px 35px; }
+  .robot-workspace .robot-heading { flex-direction: column; gap: 0; }
+  .robot-workspace .robot-heading h1 { font-size: 27px; }
+  .robot-workspace .robot-heading p { font-size: 13px; }
+  .robot-workspace .robot-connection, .robot-workspace .robot-section, .robot-workspace .robot-log { padding: 18px; }
+  .robot-workspace .robot-connection { padding: 10px 12px; }
+  .robot-workspace .robot-connection .robot-feedback { display: none; }
+  .robot-workspace .robot-serial-fields { grid-template-columns: minmax(0, 1fr); }
+  .robot-workspace .robot-head .robot-section-heading { flex-wrap: wrap; }
+  .robot-workspace .robot-section-intro { min-height: 0; }
+}
+@media (max-width: 440px) {
+  .robot-workspace .robot-motors { grid-template-columns: minmax(0, 1fr); }
+  .robot-workspace .robot-section-heading h2 { font-size: 20px; }
+  .robot-workspace .robot-motor > header { min-height: 0; margin-bottom: 18px; }
+  .robot-workspace .robot-log li { gap: 8px; }
+}

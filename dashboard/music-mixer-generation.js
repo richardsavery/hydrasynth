@@ -24,8 +24,9 @@ globalThis.HydraMusicMixerGeneration = (() => {
       signal.addEventListener("abort", abort, { once: true });
     });
   }
-  function create({ engine, getSettings, onUpdate = () => {}, onTrack = () => {}, onError = () => {},
-    request: send = request, sleep = wait, storage, now = () => Date.now() } = {}) {
+  function create({ engine, getSettings, getNextTrack, onUpdate = () => {}, onTrack = () => {}, onError = () => {},
+    request: send = request, sleep = wait, storage, now = () => Date.now(),
+    schedule = globalThis.setTimeout, unschedule = globalThis.clearTimeout } = {}) {
     if (!engine || typeof getSettings !== "function") throw new Error("Mixer generation needs an engine and musical direction.");
     if (storage === undefined) { try { storage = globalThis.localStorage; } catch (_) { /* Storage may be disabled. */ } }
     let pending = null;
@@ -39,10 +40,17 @@ globalThis.HydraMusicMixerGeneration = (() => {
     let epoch = 0, busy = false, enabled = false, phase = "idle", error = null, controller = null;
     let current = engine.snapshot().track || null, queued = null;
     const session = `mixer-${now().toString(36)}-${Math.random().toString(36).slice(2, 12)}`;
-    let sequence = 0;
+    let sequence = 0, promptTimer = null, retryTimer = null, retryAt = null, busyRetries = 0;
+    let editing = false, restartOriginal = false, savedBusy = false, savedLaunching = false, savedToken = 0, queuedIntent = null;
+    let latestChoice = readChoice();
+    let latestDirection = readDirection();
+    function generates() { return latestChoice.mode === "new" || latestChoice.mode === "similar"; }
     function snapshot() {
       return { phase, enabled, pendingId: pending?.jobId || null, queuedId: queued?.id || null,
-        currentId: current?.id || null, error, busy, recovering: Boolean(pending && !enabled) };
+        currentId: current?.id || null, error: error || ((generates() || restartOriginal) && latestDirection.error) || null, busy: busy || savedBusy,
+        nextMode: latestChoice.mode, selectedTrackId: latestChoice.trackId, savedBusy: savedBusy || savedLaunching,
+        nextPrompt: pending?.direction?.settings?.style || pending?.body?.settings?.style || null,
+        retryAt, recovering: Boolean(pending && !enabled) };
     }
     function emit() { onUpdate(snapshot()); }
     function persist() {
@@ -54,16 +62,109 @@ globalThis.HydraMusicMixerGeneration = (() => {
       const result = await send(path, { ...options, signal: controller.signal });
       assertActive(run); return result;
     }
+    function clearTimer(kind) {
+      const timer = kind === "prompt" ? promptTimer : retryTimer;
+      if (timer !== null) unschedule?.(timer);
+      if (kind === "prompt") promptTimer = null;
+      else { retryTimer = null; retryAt = null; }
+    }
+    const serviceBusy = (cause) => cause?.status === 409 && /^Another music or stem request is pending\./.test(cause.message || "");
     function fail(cause) {
+      if (cause?.draft) { error = null; phase = "waiting-prompt"; emit(); return; }
       error = cause?.message || String(cause); phase = "error";
-      onError(error); emit();
+      if (enabled && serviceBusy(cause)) {
+        const delay = Math.min(10000 * 2 ** busyRetries++, 60000), run = epoch;
+        retryAt = now() + delay; phase = "waiting-retry";
+        retryTimer = schedule(() => {
+          retryTimer = null; retryAt = null;
+          if (enabled && run === epoch) void retry();
+        }, delay);
+      } else onError(error);
+      emit();
     }
     function direction() {
-      const value = copy(getSettings());
-      if (![20, 40, 60].includes(value.duration_seconds) || !value.settings || typeof value.settings !== "object") {
-        throw new Error("Choose a track length and musical direction before generating.");
+      try {
+        const value = copy(getSettings());
+        if (![20, 40, 60].includes(value.duration_seconds) || !value.settings || typeof value.settings !== "object") {
+          throw new Error("Choose a track length and musical direction before generating.");
+        }
+        if (getNextTrack) value.continuity_mode = latestChoice.mode === "similar" ? "evolve" : "fresh";
+        if (value.continuity_mode === undefined) value.continuity_mode = "fresh";
+        if (!["fresh", "evolve"].includes(value.continuity_mode)) throw new Error("Choose how the next track should follow your prompt.");
+        return value;
+      } catch (cause) { throw Object.assign(cause, { draft: true }); }
+    }
+    function readDirection() {
+      try { const value = direction(); return { value, key: JSON.stringify(value), error: null }; }
+      catch (cause) { return { value: null, key: null, error: cause?.message || String(cause) }; }
+    }
+    function readChoice() {
+      if (typeof getNextTrack === "function") {
+        const value = getNextTrack() || {};
+        return { mode: ["loop", "similar", "new", "old"].includes(value.mode) ? value.mode : "new", trackId: typeof value.trackId === "string" ? value.trackId : "" };
       }
-      return value;
+      try { return { mode: getSettings()?.continuity_mode === "evolve" ? "similar" : "new", trackId: "" }; }
+      catch (_) { return { mode: "new", trackId: "" }; }
+    }
+    function outdated(intent) {
+      if (!intent) return false;
+      if (latestChoice.mode === "old") return true;
+      if (latestChoice.mode === "loop") return !(intent.kind === "original" && !intent.saveOnly && (!current || current.id === intent.jobId && restartOriginal));
+      const value = intent.direction || (intent.kind === "next" ? {
+        duration_seconds: intent.body.duration_seconds, settings: intent.body.settings,
+        ...(intent.body.continuity_mode === undefined ? {} : { continuity_mode: intent.body.continuity_mode })
+      } : null);
+      return value && JSON.stringify(value) !== latestDirection.key;
+    }
+    function discard(intent) {
+      if (pending === intent) { pending = null; persist(); }
+    }
+    function saveOriginalForHistory() {
+      if (pending?.kind === "original" && !pending.saveOnly) { pending.saveOnly = true; persist(); }
+    }
+    function settingsChanged() {
+      const previousChoice = latestChoice;
+      latestChoice = readChoice();
+      const choiceChanged = JSON.stringify(latestChoice) !== JSON.stringify(previousChoice);
+      const next = readDirection();
+      if (!choiceChanged && next.key === latestDirection.key && next.error === latestDirection.error) return;
+      latestDirection = next;
+      if (!choiceChanged && !generates()) return;
+      if (!enabled) return;
+      // Lock replacement submissions before clearing the player: clearing a
+      // fade can synchronously promote its already-audible incoming track.
+      editing = true; clearTimer("prompt");
+      if (choiceChanged) { ++savedToken; savedBusy = false; savedLaunching = false; clearTimer("retry"); }
+      if (choiceChanged && !["new", "similar"].includes(previousChoice.mode)) error = null;
+      if (!generates()) { error = null; if (latestChoice.mode === "old" || current) restartOriginal = false; }
+      if (pending?.serviceBusy) { discard(pending); clearTimer("retry"); error = null; }
+      phase = error ? "error" : "updating-prompt";
+      if (queued) {
+        const previous = queued, intent = queuedIntent;
+        engine.clearQueuedTrack?.();
+        const state = engine.snapshot();
+        // clearQueuedTrack can retain an audible fade while clearing a newer
+        // spare. Actual queue/current identity is authoritative.
+        if (queued === previous && state.queuedTrack?.id !== previous.id && !state.queueing) {
+          queued = null; queuedIntent = null;
+          if (intent?.stage === "ready") discard(intent);
+        }
+      }
+      if (!generates()) {
+        editing = false;
+        phase = latestChoice.mode === "loop" ? "looping" : latestChoice.trackId ? "ready" : "waiting-track";
+        emit(); fill(); return;
+      }
+      promptTimer = schedule(() => {
+        promptTimer = null; editing = false;
+        if (!enabled) return;
+        latestChoice = readChoice(); latestDirection = readDirection();
+        if (error) { phase = "error"; emit(); return; }
+        if (latestDirection.error) { phase = "waiting-prompt"; emit(); return; }
+        if (!busy) phase = queued ? "ready" : restartOriginal ? "generating-first" : "generating-next";
+        emit(); fill();
+      }, 650);
+      emit();
     }
     async function readyJob(job, run) {
       while (true) {
@@ -77,7 +178,7 @@ globalThis.HydraMusicMixerGeneration = (() => {
               audio_url: job.audio_url || `/api/elevenlabs/generations/${encodeURIComponent(job.id)}/audio` };
           }
           if (separation?.state === "failed" || separation?.state === "unknown" || separation?.state === "complete") {
-            pending.stage = "failed"; persist();
+            pending.stage = separation?.state === "unknown" ? "polling" : "failed"; persist();
             throw new Error(separation.error || "Stem separation failed. The current track will repeat.");
           }
           // Every new job requests stems on the server. Never issue a second
@@ -96,38 +197,57 @@ globalThis.HydraMusicMixerGeneration = (() => {
     }
     async function install(job, run) {
       assertActive(run);
-      pending.stage = "ready"; pending.jobId = job.id; persist();
+      const intent = pending;
+      intent.stage = "ready"; intent.jobId = job.id; persist();
       onTrack(job);
-      if (pending.kind === "original") {
-        if (pending.saveOnly) {
-          pending = null; persist(); phase = "ready"; emit(); return;
+      if (outdated(intent)) { discard(intent); return; }
+      if (intent.kind === "original") {
+        if (intent.saveOnly) {
+          discard(intent); phase = "ready"; emit(); return;
         }
         await engine.setTrack(job); assertActive(run);
+        if (outdated(intent)) { discard(intent); return; }
         current = job;
         if (await engine.start() === false) throw new Error(engine.snapshot().error || "The track is ready. Press Play to start audio.");
-        assertActive(run); pending = null; persist();
+        assertActive(run); discard(intent); restartOriginal = false;
       } else {
-        // A recalled track may have changed while a provider job was already
-        // underway. Save that result without inserting it into another song.
-        if (current?.id !== pending.sourceId) { pending = null; persist(); return; }
-        queued = job; emit();
-        if (await engine.queueTrack(job) === false) { queued = null; throw new Error(engine.snapshot().error || "The next track could not be loaded. The current track will repeat."); }
+        // Recalled songs and edited prompts retain finished results in history.
+        if (current?.id !== intent.sourceId) { discard(intent); return; }
+        queued = job; queuedIntent = intent; emit();
+        if (outdated(intent) || pending !== intent) { discard(intent); return; }
+        const loaded = await engine.queueTrack(job);
         assertActive(run);
+        if (outdated(intent) || pending !== intent) {
+          if (queued?.id === job.id) {
+            engine.clearQueuedTrack?.(); queued = null; queuedIntent = null;
+          }
+          discard(intent); return;
+        }
+        if (loaded === false) {
+          queued = null; queuedIntent = null;
+          throw new Error(engine.snapshot().error || "The next track could not be loaded. The current track will repeat.");
+        }
       }
-      phase = "ready"; emit();
+      busyRetries = 0; phase = "ready"; emit();
     }
     async function recover(run, retryMissing = false) {
       let job;
-      if (pending.jobId) job = await call(`/generations/${encodeURIComponent(pending.jobId)}`, {}, run);
+      if (pending.serviceBusy && outdated(pending)) { discard(pending); return; }
+      if (pending.serviceBusy) {
+        if (!generates()) throw new Error("The starting track has not been generated. Choose Generate new to retry it.");
+        // This exact rejection did not allocate a job, so its persisted
+        // idempotent payload can be retried without overlapping provider work.
+        job = await postPending(run);
+      } else if (pending.jobId) job = await call(`/generations/${encodeURIComponent(pending.jobId)}`, {}, run);
       else {
         const jobs = (await call("/generations", {}, run)).jobs || [];
         const matches = pending.kind === "next"
           ? jobs.filter((item) => item.realtime?.session_id === pending.body.session_id && item.realtime?.sequence === pending.body.sequence)
           : jobs.filter((item) => item.plan_id === pending.body.plan_id && !pending.previousIds?.includes(item.id));
-        if (matches.length === 0 && retryMissing && pending.kind === "next") {
+        if (matches.length === 0 && retryMissing && pending.kind === "next" && generates()) {
           // Only explicit Retry may repeat this POST. Its persisted session and
           // sequence make it idempotent even if the earlier response was lost.
-          job = await call(pending.path, { method: "POST", body: copy(pending.body) }, run);
+          job = await postPending(run);
         } else {
           if (matches.length !== 1) throw new Error("The last request has no confirmed result yet. Check again to recover it without submitting another generation.");
           job = matches[0];
@@ -135,19 +255,33 @@ globalThis.HydraMusicMixerGeneration = (() => {
       }
       await install(await readyJob(job, run), run);
     }
-    async function submit(path, body, kind, sourceId, run) {
-      const previousIds = kind === "original" ? ((await call("/generations", {}, run)).jobs || []).map((job) => job.id) : [];
-      pending = { kind, sourceId, path, body: copy(body), previousIds, stage: "submitting", jobId: null };
-      persist(); emit();
-      let job;
-      try { job = await call(path, { method: "POST", body }, run); }
+    async function postPending(run) {
+      const intent = pending;
+      delete intent.serviceBusy; intent.stage = "submitting"; persist();
+      try { return await call(intent.path, { method: "POST", body: copy(intent.body) }, run); }
       catch (cause) {
-        // An HTTP rejection is known not to have allocated this job. A lost
-        // response must retain intent: repeated Play cannot silently rebill.
-        if (cause.status && cause.status >= 400 && cause.status < 500 && run === epoch) { pending.stage = "failed"; persist(); }
+        // Preserve unknown submissions for GET recovery, never fresh retries.
+        if (run === epoch && pending === intent) {
+          if (serviceBusy(cause)) intent.serviceBusy = true;
+          else if (cause.status >= 400 && cause.status < 500) intent.stage = "failed";
+          persist();
+        }
         throw cause;
       }
-      await install(await readyJob(job, run), run);
+    }
+    async function submit(path, body, kind, sourceId, run, settings) {
+      const previousIds = kind === "original" ? ((await call("/generations", {}, run)).jobs || []).map((job) => job.id) : [];
+      if (editing || latestChoice.mode === "old" || latestChoice.mode === "loop" && (kind !== "original" || current) || JSON.stringify(settings) !== latestDirection.key && latestChoice.mode !== "loop") return;
+      pending = { kind, sourceId, path, body: copy(body), direction: copy(settings), previousIds, stage: "submitting", jobId: null };
+      persist(); emit();
+      await install(await readyJob(await postPending(run), run), run);
+    }
+    async function submitOriginal(run) {
+      const settings = direction(); latestDirection = readDirection();
+      const plan = await call("/plans", { method: "POST", body: { kind: "original",
+        duration_seconds: settings.duration_seconds, settings: settings.settings } }, run);
+      if (editing || latestChoice.mode === "old" || latestChoice.mode === "loop" && current || JSON.stringify(settings) !== latestDirection.key && latestChoice.mode !== "loop") return;
+      await submit("/generations", { plan_id: plan.id, variation: true }, "original", null, run, settings);
     }
     function launch(action, nextPhase) {
       if (busy) return Promise.resolve(false);
@@ -155,29 +289,113 @@ globalThis.HydraMusicMixerGeneration = (() => {
       const run = epoch; emit();
       return (async () => {
         try { await action(run); return true; }
-        catch (cause) { if (run === epoch && cause.name !== "AbortError") fail(cause); return false; }
+        catch (cause) {
+          if (run === epoch && cause.name !== "AbortError") {
+            // A superseded, definitively rejected request cannot block the
+            // latest direction. Ambiguous provider outcomes still need recovery.
+            if (outdated(pending) && (pending?.stage === "failed" || pending?.serviceBusy)) discard(pending);
+            else if (generates() || restartOriginal) fail(cause);
+          }
+          return false;
+        }
         finally {
-          if (run === epoch) { busy = false; emit(); fill(); }
+          if (run === epoch) {
+            busy = false;
+            if (!error && editing) phase = "updating-prompt";
+            else if (!error && (generates() || restartOriginal) && latestDirection.error) phase = "waiting-prompt";
+            else if (!error && latestChoice.mode === "loop") phase = "looping";
+            emit(); fill();
+          }
         }
       })();
     }
+    async function loadSaved(immediate = false) {
+      if (savedBusy || !enabled || latestChoice.mode !== "old" || !latestChoice.trackId) return false;
+      const id = latestChoice.trackId, token = ++savedToken, run = epoch;
+      const valid = () => enabled && run === epoch && token === savedToken && latestChoice.mode === "old" && latestChoice.trackId === id;
+      savedBusy = true; phase = "loading-saved"; error = null; emit();
+      try {
+        let track = await call(`/generations/${encodeURIComponent(id)}`, {}, run);
+        if (!valid()) return false;
+        const separation = track.stem_separation;
+        if (track.state !== "complete" || (track.separate_stems === true && !(separation?.state === "complete" && separation.stems?.length))) {
+          throw new Error("This saved track is not ready. Choose a completed track.");
+        }
+        if (!track.generation_settings && !track.realtime?.generation_settings && track.plan_id) {
+          try { track.generation_settings = (await call(`/plans/${encodeURIComponent(track.plan_id)}`, {}, run)).settings; }
+          catch (cause) { if (cause.name === "AbortError") throw cause; }
+          if (!valid()) return false;
+        }
+        track = { ...track, stems: copy(separation?.state === "complete" ? separation.stems || [] : track.stems || []),
+          audio_url: track.audio_url || `/api/elevenlabs/generations/${encodeURIComponent(id)}/audio` };
+        onTrack(track);
+        if (!valid()) return false;
+        // An explicit saved selection owns playback even if the user returns
+        // to generation before an earlier original request finishes.
+        saveOriginalForHistory();
+        if (current?.id === id) {
+          if (!engine.snapshot().running && await engine.start() === false) throw new Error(engine.snapshot().error || "Press Play to start this track.");
+        } else if (immediate || !current) {
+          await engine.setTrack(track);
+          if (!valid()) return false;
+          current = track;
+          if (await engine.start() === false) throw new Error(engine.snapshot().error || "Press Play to start this track.");
+          if (!valid()) return false;
+        } else {
+          queued = track; queuedIntent = null; emit();
+          if (!valid()) return false;
+          const loaded = await engine.queueTrack(track);
+          if (!valid()) return false;
+          if (loaded === false) {
+            queued = null;
+            throw new Error(engine.snapshot().error || "The saved track could not be loaded. The current track will repeat.");
+          }
+        }
+        if (!valid()) return false;
+        phase = current?.id === id ? "looping" : "ready"; emit(); return true;
+      } catch (cause) {
+        if (valid() && cause.name !== "AbortError") fail(cause);
+        return false;
+      } finally {
+        if (token === savedToken && run === epoch) { savedBusy = false; emit(); fill(); }
+      }
+    }
     function fill() {
-      if (!enabled || busy || error || queued || !current || !engine.snapshot().running) return;
+      if (!enabled || editing || savedLaunching) return;
+      if (!generates() && !restartOriginal) {
+        if (error) return;
+        const waiting = latestChoice.mode === "loop" || current?.id === latestChoice.trackId ? "looping" : !latestChoice.trackId ? "waiting-track" : null;
+        if (waiting) {
+          if (latestChoice.mode === "old" && current?.id === latestChoice.trackId) saveOriginalForHistory();
+          if (phase !== waiting) { phase = waiting; emit(); } return;
+        }
+        if (!savedBusy && !queued && (!current || engine.snapshot().running)) void loadSaved();
+        return;
+      }
+      if (!enabled || busy || error || editing || latestDirection.error || queued ||
+          !restartOriginal && (!current || !engine.snapshot().running)) return;
       // launch locks synchronously before any callback can re-enter update().
       void launch(async (run) => {
         if (pending) { await recover(run); return; }
-        const settings = direction();
+        if (restartOriginal) { await submitOriginal(run); return; }
+        const settings = direction(); latestDirection = readDirection();
         const body = { kind: "prompt", plan_id: current.plan_id, source_job_id: current.id,
           session_id: session, sequence: sequence++, ...settings };
-        await submit("/continuations", body, "next", current.id, run);
-      }, "generating-next");
+        await submit("/continuations", body, "next", current.id, run, settings);
+      }, restartOriginal ? "generating-first" : "generating-next");
     }
     function begin() {
-      enabled = true; error = null; controller?.abort(); controller = new AbortController(); epoch++;
+      enabled = true; error = null; clearTimer("retry");
+      latestChoice = readChoice(); latestDirection = readDirection();
+      ++savedToken; savedBusy = false; savedLaunching = false;
+      controller?.abort(); controller = new AbortController(); epoch++;
     }
     function startNew() {
+      latestChoice = readChoice(); latestDirection = readDirection();
+      if (latestChoice.mode === "old") return playSaved(true);
+      if (latestChoice.mode === "loop" && current) return resume();
       if (busy || enabled && queued) return Promise.resolve(false);
-      begin();
+      begin(); restartOriginal = true;
       return launch(async (run) => {
         // launch locks first; unlock can synchronously emit an engine update.
         // This still runs in the button gesture, before the first await.
@@ -186,6 +404,7 @@ globalThis.HydraMusicMixerGeneration = (() => {
         assertActive(run);
         if (pending && pending.stage !== "failed") {
           const recalledOriginal = pending.kind === "original" && pending.saveOnly;
+          if (pending.kind === "next") restartOriginal = false;
           if (pending.kind === "next" && current && !engine.snapshot().running && await engine.start() === false) {
             throw new Error(engine.snapshot().error || "Audio playback could not be started.");
           }
@@ -193,12 +412,44 @@ globalThis.HydraMusicMixerGeneration = (() => {
           if (!recalledOriginal) return;
         }
         pending = null; persist();
-        const settings = direction();
-        const plan = await call("/plans", { method: "POST", body: { kind: "original", ...settings } }, run);
-        await submit("/generations", { plan_id: plan.id, variation: true }, "original", null, run);
+        await submitOriginal(run);
       }, "generating-first");
     }
+    async function playSaved(immediate = false) {
+      // Saved audio is independent of a paid request already accepted by the
+      // service. Leave that request's journal and polling untouched.
+      if (!enabled) begin();
+      restartOriginal = false; error = null;
+      if (savedBusy || savedLaunching) return false;
+      savedLaunching = true;
+      const token = savedToken, run = epoch;
+      if (immediate && queued) {
+        engine.clearQueuedTrack?.(); queued = null; queuedIntent = null;
+      }
+      const unlocked = engine.unlock?.();
+      if (unlocked && await unlocked === false) { savedLaunching = false; fail(new Error("Audio playback could not be started.")); return false; }
+      if (!enabled || latestChoice.mode !== "old" || token !== savedToken || run !== epoch) return false;
+      if (current && !immediate && !engine.snapshot().running && await engine.start() === false) {
+        savedLaunching = false; fail(new Error(engine.snapshot().error || "Audio playback could not be started.")); return false;
+      }
+      if (!enabled || latestChoice.mode !== "old" || token !== savedToken || run !== epoch) return false;
+      savedLaunching = false;
+      if (!latestChoice.trackId) { phase = "waiting-track"; emit(); return true; }
+      if (savedBusy || queued?.id === latestChoice.trackId) return true;
+      return loadSaved(immediate);
+    }
     function resume(retryMissing = false) {
+      latestChoice = readChoice(); latestDirection = readDirection();
+      if (latestChoice.mode === "old") return playSaved(false);
+      if (latestChoice.mode === "loop" && current && !(pending?.kind === "original" && !pending.saveOnly && pending.jobId === current.id)) {
+        if (!enabled) begin();
+        restartOriginal = false; error = null;
+        // Loop does not recover by POST, even for a known service-busy rejection.
+        return Promise.resolve(engine.start()).then((started) => {
+          if (started === false) { fail(new Error(engine.snapshot().error || "Audio playback could not be started.")); return false; }
+          if (enabled) { phase = "looping"; emit(); } return true;
+        });
+      }
       if (busy) return Promise.resolve(false);
       if (enabled && engine.snapshot().running && !error) { fill(); return Promise.resolve(true); }
       begin();
@@ -211,6 +462,7 @@ globalThis.HydraMusicMixerGeneration = (() => {
         if (starting && await starting === false) throw new Error(engine.snapshot().error || "Audio playback could not be started.");
         assertActive(run);
         if (pending) {
+          if (pending.kind === "original" && !pending.saveOnly) restartOriginal = true;
           if (pending.stage === "failed") throw new Error("The last generation failed. Retry when ready.");
           await recover(run, retryMissing);
         } else if (!current) throw new Error("Generate a starting track or recall saved music.");
@@ -218,17 +470,21 @@ globalThis.HydraMusicMixerGeneration = (() => {
       }, pending?.kind === "original" && !pending.saveOnly ? "generating-first" : "generating-next");
     }
     function retry() {
+      latestChoice = readChoice(); latestDirection = readDirection();
+      if (latestChoice.mode === "old" || latestChoice.mode === "loop" && current) return resume(true);
       if (busy) return Promise.resolve(false);
       if (pending?.stage === "failed") { pending = null; persist(); }
       if (!current && !pending) return startNew();
       return resume(true);
     }
-    function stop() {
+    function stop(preserveUnlocked = false) {
       enabled = false; ++epoch; controller?.abort(); controller = null; busy = false; queued = null;
-      phase = "idle"; error = null; engine.stop(); emit();
+      queuedIntent = null; ++savedToken; savedBusy = false; savedLaunching = false;
+      clearTimer("prompt"); clearTimer("retry"); editing = false; restartOriginal = false; busyRetries = 0;
+      phase = "idle"; error = null; engine.stop(preserveUnlocked); emit();
     }
-    async function recall(track) {
-      stop();
+    async function recall(track, { preserveUnlocked = false } = {}) {
+      stop(preserveUnlocked);
       if (pending?.kind === "original") { pending.saveOnly = true; persist(); }
       try {
         await engine.setTrack(track);
@@ -238,11 +494,13 @@ globalThis.HydraMusicMixerGeneration = (() => {
     function update(next = engine.snapshot()) {
       current = next.track || null;
       if (queued && current?.id === queued.id) {
-        queued = null; pending = null; persist(); phase = "ready"; emit();
+        if (queuedIntent && pending === queuedIntent) discard(queuedIntent);
+        queued = null; queuedIntent = null;
+        phase = latestChoice.mode === "loop" || latestChoice.mode === "old" && current.id === latestChoice.trackId ? "looping" : "ready"; emit();
       }
       fill();
     }
-    return { startNew, resume, stop, deactivate: stop, retry, recall, update, snapshot };
+    return { startNew, resume, stop, deactivate: stop, retry, recall, update, settingsChanged, snapshot };
   }
   return { create };
 })();

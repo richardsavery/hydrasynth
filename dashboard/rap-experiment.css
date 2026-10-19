@@ -1,0 +1,54 @@
+.rx-workspace { max-width: 1550px; }
+.rx-workspace .rx-direction { padding: 20px; border: 1px solid #495c78; border-radius: 9px; background: linear-gradient(110deg, #253249, #1b222d 75%); }
+.rx-workspace .rx-direction h2 { margin: 0 0 15px; font-size: 17px; font-weight: 600; }
+.rx-workspace .rx-options { display: grid; grid-template-columns: 105px minmax(0, 1fr) minmax(0, 1fr) minmax(135px, .65fr); gap: 15px; margin-top: 16px; align-items: start; }
+.rx-workspace .rx-custom { margin-top: 9px; }
+.rx-workspace [hidden] { display: none !important; }
+.rx-workspace .rx-voice-status { color: var(--muted); font-size: 11px; margin-top: 9px; }
+.rx-workspace .rx-voice-status:empty { display: none; }
+.rx-workspace .rx-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 13px; margin-top: 18px; }
+.rx-workspace .rx-fast { margin-top: 21px; padding: 19px; border: 1px solid #566d90; border-radius: 8px; background: #202e43; }
+.rx-workspace .rx-fast h2 { margin-bottom: 14px; }
+.rx-workspace .rx-robot-controls { display: grid; grid-template-columns: minmax(120px, .8fr) minmax(120px, 1fr) minmax(120px, 1fr); gap: 22px; align-items: center; }
+.rx-workspace .rx-robot-controls output { float: right; color: var(--accent); font: 11px/1.4 var(--mono); }
+.rx-workspace .rx-robot-controls input[type="range"] { margin-top: 12px; width: 100%; }
+.rx-workspace .rx-rhythm-control { display: grid; grid-template-columns: minmax(150px, 240px) minmax(0, 1fr); align-items: end; gap: 16px; margin-top: 16px; }
+.rx-workspace .rx-rhythm-control .rx-robot-help { margin: 0 0 8px; }
+.rx-workspace .rx-tuning-controls { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 22px; margin-top: 16px; }
+.rx-workspace .rx-melody-controls { grid-column: 1 / -1; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 22px; max-width: 400px; }
+.rx-workspace .rx-robot-help { margin: 11px 0 0; color: var(--muted); font-size: 11px; line-height: 1.6; }
+.rx-workspace .rx-status { color: var(--muted); flex: 1 1 270px; font-size: 12px; overflow-wrap: anywhere; }
+.rx-workspace .is-error, .rx-workspace .rx-error { color: var(--rose); }
+.rx-workspace .rx-listen { display: grid; grid-template-columns: minmax(180px, 1fr) auto auto 125px auto; gap: 15px; align-items: end; margin: 24px 0; }
+.rx-workspace .rx-saved-field { min-width: 0; }
+.rx-workspace .rx-saved-row { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: 8px; }
+.rx-workspace .rx-saved-row select { min-width: 0; width: 100%; }
+.rx-workspace .rx-check { display: flex; align-items: center; gap: 7px; min-height: 36px; }
+.rx-workspace .rx-check input { margin: 0; }
+.rx-workspace .rx-volume { padding-bottom: 8px; }
+.rx-workspace .rx-comparison-heading { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; margin: 26px 0 14px; }
+.rx-workspace .rx-comparison-heading h2 { min-width: 0; overflow-wrap: anywhere; font-size: 16px; font-weight: 500; margin: 0; }
+.rx-workspace [data-rx-now] { font: 11px/1.5 var(--mono); color: var(--accent); }
+.rx-workspace .rx-cards { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 15px; }
+.rx-workspace .rx-cards.rx-cards-fast { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.rx-workspace .rx-card { min-width: 0; display: flex; flex-direction: column; align-items: stretch; padding: 19px; border: 1px solid var(--line); border-radius: 9px; background: var(--panel); }
+.rx-workspace .rx-card.is-playing { border-color: var(--accent); background: #243247; }
+.rx-workspace .rx-card-top { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.rx-workspace .rx-number { color: var(--accent); font: 12px/1.5 var(--mono); }
+.rx-workspace .rx-state { color: var(--muted); font: 10px/1.5 var(--mono); text-align: right; }
+.rx-workspace .rx-card h3 { margin: 12px 0 8px; font-size: 18px; font-weight: 550; letter-spacing: -.02em; }
+.rx-workspace .rx-description { color: var(--muted); min-height: 54px; line-height: 1.6; }
+.rx-workspace .rx-meta { min-height: 15px; color: var(--accent); font: 10px/1.5 var(--mono); margin-top: 12px; overflow-wrap: anywhere; }
+.rx-workspace .rx-timing { color: var(--muted); font: 10px/1.6 var(--mono); margin: 8px 0 0; overflow-wrap: anywhere; }
+.rx-workspace .rx-timing:empty { display: none; }
+.rx-workspace .rx-error, .rx-workspace .rx-notes { margin-top: 12px; font-size: 11px; line-height: 1.6; overflow-wrap: anywhere; }
+.rx-workspace .rx-notes { color: var(--muted); }
+.rx-workspace .rx-card-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 9px 11px; margin-top: auto; padding-top: 18px; }
+.rx-workspace .rx-full-mix { margin-top: 0; padding-top: 9px; }
+.rx-workspace .rx-download { font-size: 11px; }
+.rx-workspace .rx-take { display: inline-flex; align-self: flex-start; margin: 15px 0 0; padding: 0; border: 0; background: none; color: var(--accent); text-decoration: underline; text-underline-offset: 3px; font-size: 11px; }
+@media (max-width: 1150px) { .rx-workspace .rx-cards { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (max-width: 760px) { .rx-workspace .rx-options { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); } .rx-workspace .rx-listen { grid-template-columns: minmax(0, 1fr) auto; } .rx-workspace .rx-saved-field { grid-column: 1 / -1; } .rx-workspace .rx-volume { grid-column: 1; grid-row: 3; } .rx-workspace [data-rx-stop] { grid-column: 2; grid-row: 3; } .rx-workspace .rx-comparison-heading { align-items: flex-start; flex-direction: column; } }
+@media (max-width: 500px) { .rx-workspace { padding: 22px 16px; } .rx-workspace .rx-direction, .rx-workspace .rx-fast { padding: 15px; } .rx-workspace .rx-cards, .rx-workspace .rx-cards.rx-cards-fast { grid-template-columns: minmax(0, 1fr); } .rx-workspace .rx-card { padding: 17px; } .rx-workspace .rx-description { min-height: 0; } .rx-workspace .rx-robot-controls { grid-template-columns: minmax(0, 1fr); gap: 16px; } }
+@media (max-width: 500px) { .rx-workspace .rx-tuning-controls { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; } .rx-workspace .rx-melody-select { grid-column: 1 / -1; } }
+@media (max-width: 500px) { .rx-workspace .rx-rhythm-control { grid-template-columns: minmax(0, 1fr); gap: 4px; } .rx-workspace .rx-rhythm-control .rx-robot-help { margin-bottom: 0; } }

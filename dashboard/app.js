@@ -2,6 +2,7 @@
 
 const SERIES_LIMIT = 720;
 const SETTINGS_KEY = "hydra-signal-lab-v1";
+const CONNECTIONS_KEY = "hydra.connections.v1";
 const MIDI_CHANNEL = 0;
 const MAX_MAPPING_SOURCES = 6;
 const COMBINE_OPERATORS = new Set([
@@ -24,6 +25,7 @@ const state = {
   live: null, liveSocket: null, liveGeneration: 0, liveRetry: null, liveWanted: false,
   liveRenderTimer: null, liveNeedsDefaults: false, liveDiscoveryPending: false,
   liveStatus: "Not connected", liveLastDraw: 0,
+  liveDiagnostics: globalThis.HydraLiveMonitorModel?.create(), liveMonitorUI: null, liveRetryAt: null,
   catalogReady: false, catalogSummary: null,
   picker: null, expandedTargets: new Set(),
   midiPacer: Parameters ? new Parameters.Pacer() : null, parameterTimer: null, parameterCarry: 0,
@@ -41,6 +43,7 @@ const state = {
   selectionGeneration: 0,
   seriesRevision: 0,
   rhythmStep: 0,
+  synthBeatClock: null, synthBeatRevision: 0,
   noteTimers: new Set(),
   patchTimers: new Map(),
   currentPatch: null,
@@ -54,22 +57,33 @@ const state = {
   openInputRanges: new WeakSet(),
   focusedMappingId: null,
   playing: false,
+  playbackError: null,
   playTimer: null,
   cursor: 0,
   maxSteps: SERIES_LIMIT,
   output: "audio",
   workspaceView: null,
+  playbackWorkspace: null,
   synthOutput: "audio",
   drumSources: [], drumMuted: [], drumSeries: new Map(), drumMotion: null,
   drumActivity: 0, drumEngine: null, drumOrigin: 0, drumDuration: 1, drumRevision: 0,
   audio: null,
   midiAccess: null,
   midiOutput: null,
+  midiConnecting: null, midiConnectionError: "",
+  connectionPreferences: loadConnectionPreferences(), connectionsReady: false,
   midiNoteTimers: new Map(),
+  midiSustainOutputs: new Set(),
   activityPending: false,
   activityQueued: null,
   saved: loadSavedSettings()
 };
+
+// Remember whether a route was chosen before startup loads recordings and saves
+// their default controls. A first connection may choose Hydrasynth; a saved
+// browser-audio route or a choice made during the permission prompt wins.
+state.midiAutoRoute = !["audio", "midi"].includes(state.connectionPreferences.synthOutput
+  ?? state.saved.connections?.synthOutput ?? state.saved.controls?.output);
 
 const dom = {};
 
@@ -87,10 +101,11 @@ document.addEventListener("DOMContentLoaded", () => {
   renderRhythm();
   updateClock();
   window.setInterval(updateClock, 1000);
-  loadParameterCatalog().then(() => loadRecordings(false)).catch((error) => {
+  loadParameterCatalog().then(() => loadRecordings(false)).then(() => restoreConnectionPreferences({ autoConnectMidi: true })).catch((error) => {
     setEngineState("error", "Catalog unavailable", error.message);
     dom["catalog-status"].textContent = `${error.message} Use Refresh to retry.`;
-  });
+    return restoreConnectionPreferences({ autoConnectMidi: true });
+  }).finally(() => { state.connectionsReady = true; });
 });
 
 function bindSonificationWorkspaces() {
@@ -109,33 +124,122 @@ function bindSonificationWorkspaces() {
   globalThis.HydraMusicMixer?.init({
     container: document.getElementById("music-mixer-workspace"), sourceBridge: mixerBridge
   });
+  globalThis.HydraRapExperiment?.init({ container: document.getElementById("rap-experiment-workspace") });
+  const quietForRapResponse = ({ output_mode } = {}) => {
+    // An isolated rap uses the current backing transport, including while
+    // recording the listener's message. Only standalone mixes take it over.
+    if (output_mode === "vocals") return;
+    stopPlayback();
+    globalThis.HydraSynthMixer?.deactivate();
+    globalThis.HydraMusicMixer?.deactivate();
+    globalThis.HydraRapExperiment?.deactivate();
+    globalThis.HydraElevenLabs?.deactivate();
+  };
+  globalThis.HydraRapResponse?.init({ container: document.getElementById("rap-response-workspace"),
+    onBeforeListen: quietForRapResponse, onBeforePlay: quietForRapResponse,
+    getBackingClock: () => {
+      const music = globalThis.HydraMusicMixer?.transportClock?.();
+      if (music?.playing) return { ...music, label: "Music mixer" };
+      const synth = synthRapClock();
+      if (synth?.playing) return { ...synth, label: "Synth mixer" };
+      return music || synth;
+    },
+    unlockBacking: async () => {
+      const music = globalThis.HydraMusicMixer?.transportClock?.();
+      if (music?.playing) await music.context?.resume();
+      else if (synthRapClock().playing) await ensureAudioEngine();
+    } });
+  globalThis.HydraRobotControl?.init({ container: document.getElementById("robot-setup-workspace") });
+  globalThis.HydraRobotLive?.init({ container: document.getElementById("robot-control-workspace"),
+    hardware: globalThis.HydraRobotControl, clock: source => globalThis.HydraBeatClock.snapshot(source) });
+  const synthInput = globalThis.HydraElevenSource?.create({
+    getState: () => state, loadSeries: loadSourceSeries
+  });
+  globalThis.HydraSynthMixer?.init({
+    container: document.getElementById("synth-mixer-workspace"),
+    sourceBridge: synthInput && { ...synthInput, describe: () => ({ ...synthInput.describe(),
+      revision: `${state.sourceMode}|${state.recording?.id}|${state.selectionGeneration}|${state.liveGeneration}` }) },
+    getDestinations: () => Music.DESTINATIONS,
+    transport: {
+      selectPatch: (bank, number) => {
+        if (state.synthOutput !== "midi") throw new Error("Select MIDI output in Connections first.");
+        return selectMidiPatch({ bank, number }, "synth-mixer");
+      },
+      start: () => state.workspaceView === "synth-mixer" ? togglePlayback() : Promise.resolve(),
+      stop: () => { if (state.playbackWorkspace === "synth-mixer") { state.playbackError = null; stopPlayback(); } },
+      status: () => ({ playing: state.playbackWorkspace === "synth-mixer" && state.playing,
+        preparing: state.playbackWorkspace === "synth-mixer" && state.preparing,
+        patchChanging: state.patchChanging,
+        output: state.synthOutput, midiReady: Boolean(state.midiOutput), currentPatch: state.currentPatch, error: state.playbackError,
+        ...readMidiConnectionControls(),
+        readyReason: state.workspaceView === "synth-mixer" ? playbackUnavailableReason() : "" })
+    }
+  });
   globalThis.HydraWorkspace?.init({
     onNavigate: selectSonificationWorkspace,
     onOutputChange: selectConnectionOutput,
     onTestAudio: testConnectionAudio
   });
+  globalThis.HydraSessions?.init({
+    container: document.getElementById("session-library"),
+    beforeCapture: captureSessionState,
+    beforeRestore: stopSessionPlayback,
+    getRoute: () => `#${state.workspaceView || "connections"}`
+  });
   updateConnectionSummary();
+}
+
+function captureSessionState() {
+  if (!state.connectionsReady) throw new Error("Wait for the saved settings to finish loading, then save the session.");
+  if (!saveSettings()) throw new Error("Could not save the current controls. Free browser storage and try again.");
+  saveConnectionPreferences();
+  globalThis.HydraSynthMixer?.flush();
+  globalThis.HydraMusicMixer?.flush();
+  globalThis.HydraRapExperiment?.flush();
+  globalThis.HydraRapResponse?.flush();
+}
+
+function stopSessionPlayback() {
+  if (!state.connectionsReady) throw new Error("Wait for the saved settings to finish loading, then load the session.");
+  stopPlayback();
+  globalThis.HydraSynthMixer?.deactivate();
+  globalThis.HydraMusicMixer?.deactivate();
+  globalThis.HydraRapExperiment?.deactivate();
+  globalThis.HydraRapResponse?.deactivate();
+  globalThis.HydraRobotLive?.stop();
+  const drumsStopped = globalThis.HydraRobotDrums?.stop();
+  const hardwareStopped = globalThis.HydraRobotControl?.deactivate();
+  globalThis.HydraElevenLabs?.deactivate();
+  disconnectLive();
+  return Promise.all([drumsStopped, hardwareStopped]);
 }
 
 function selectSonificationWorkspace(view, previous) {
   if (view === state.workspaceView) return;
-  stopPlayback();
-  if (previous === "elevenlabs") globalThis.HydraElevenLabs?.deactivate();
-  if (previous === "mixer") globalThis.HydraMusicMixer?.deactivate();
+  // Microphone capture and automatic replies only belong to the visible tab.
+  if (previous === "rap-response") globalThis.HydraRapResponse?.deactivate();
+  // Navigation only changes visibility. The transport keeps its original
+  // controls, output and pending preparation until explicitly stopped.
   state.workspaceView = view;
-  state.selectionGeneration += 1;
-  state.output = view === "drums" ? "drums" : view === "mixer" ? "audio" : state.synthOutput;
-  state.midiPacer?.reset();
+  if (!state.playing && !state.preparing) {
+    state.output = view === "drums" ? "drums" : ["mixer", "rap-experiment", "rap-response"].includes(view) ? "audio" : state.synthOutput;
+  }
   renderSoundControls();
   renderOutputMode();
   if (view === "elevenlabs") globalThis.HydraElevenLabs?.activate();
   if (view === "mixer") globalThis.HydraMusicMixer?.activate();
-  if ((view === "synth" || view === "drums") && state.recording) loadFocusedSeries();
+  if (view === "synth-mixer") globalThis.HydraSynthMixer?.activate();
+  if (view === "rap-experiment") globalThis.HydraRapExperiment?.activate();
+  if (view === "rap-response") globalThis.HydraRapResponse?.activate();
+  if (view === "robot-setup" || view === "robot-control") globalThis.HydraRobotControl?.activate();
+  if (view === "robot-control") globalThis.HydraRobotLive?.activate();
+  if ((view === "synth-legacy" || view === "drums") && state.recording && !state.playing && !state.preparing) loadFocusedSeries();
   updateConnectionSummary();
 }
 
 function selectConnectionOutput(output) {
   if (!["audio", "midi"].includes(output)) return;
+  state.midiAutoRoute = false;
   setOutput(output);
 }
 
@@ -144,7 +248,7 @@ function updateConnectionSummary() {
   const live = state.sourceMode === "live";
   const connected = state.liveSocket?.readyState === 1;
   const fresh = connected && Number.isFinite(state.live?.lastAt) && performance.now() - state.live.lastAt <= 3000;
-  const browserOnly = ["drums", "elevenlabs", "mixer"].includes(state.workspaceView);
+  const browserOnly = ["drums", "elevenlabs", "mixer", "rap-experiment", "rap-response"].includes(state.workspaceView);
   globalThis.HydraWorkspace.updateConnections({
     inputMode: state.sourceMode,
     inputLabel: live ? "Live RAPP stream" : state.recording?.name || "Choose an input",
@@ -179,7 +283,8 @@ async function testConnectionAudio() {
 
 function handlePlaybackShortcut(event) {
   if (event.defaultPrevented || document.body.classList.contains("observer-overlay-open")) return;
-  if (state.workspaceView && !["synth", "drums"].includes(state.workspaceView)) return;
+  if (document.querySelector("dialog[open]")) return;
+  if (state.workspaceView && !["synth-legacy", "synth-mixer", "drums"].includes(state.workspaceView)) return;
   if (event.key === "Escape" && (state.playing || state.preparing)) stopPlayback();
   if (event.code === "Space" && !event.repeat && !isEditable(event.target)) {
     event.preventDefault();
@@ -308,7 +413,14 @@ function bindInterface() {
     }
   });
   document.addEventListener("keydown", handlePlaybackShortcut);
-  window.addEventListener("beforeunload", () => { disconnectLive(); stopPlayback(); panicMidi(); });
+  window.addEventListener("beforeunload", () => {
+    disconnectLive(); stopPlayback(); panicMidi();
+    globalThis.HydraSynthMixer?.deactivate(); globalThis.HydraMusicMixer?.deactivate();
+    globalThis.HydraRapExperiment?.deactivate(); globalThis.HydraElevenLabs?.deactivate();
+    globalThis.HydraRapResponse?.deactivate();
+    globalThis.HydraRobotLive?.stop();
+    Promise.resolve(globalThis.HydraRobotControl?.deactivate()).catch(() => {});
+  });
 }
 
 async function loadRecordings(refresh) {
@@ -378,6 +490,7 @@ async function selectRecording(recordingId) {
   saveSettings();
   if (state.sourceMode === "live") disconnectLive();
   state.sourceMode = "recording";
+  updateLiveStatus();
   state.selectionGeneration += 1;
   const recording = state.library?.recordings.find((item) => item.id === recordingId);
   if (!recording) return;
@@ -421,15 +534,32 @@ function readMusicalControls() {
     ...readDrumControls(), output: state.output });
 }
 
+function activeSynthMixer() {
+  const workspace = state.playing || state.preparing ? state.playbackWorkspace : state.workspaceView;
+  return workspace === "synth-mixer" ? globalThis.HydraSynthMixer : null;
+}
+
+function readMidiConnectionControls() {
+  const controls = Music.controls({ midiFormat: dom["midi-format"]?.value, midiRate: dom["midi-rate"]?.value });
+  return { midiFormat: controls.midiFormat, midiRate: controls.midiRate };
+}
+
+// Playback can use the experimental workspace without changing the original
+// Synth's controls, mappings, or the snapshots persisted by saveSettings().
+function readPlaybackControls() {
+  const mixer = activeSynthMixer();
+  return mixer ? Music.controls({ ...mixer.getControls(), ...readMidiConnectionControls(), output: state.output }) : readMusicalControls();
+}
+
 function applyMusicalControls(raw) {
   state.currentPreviewVoice = null;
-  const controls = Music.controls(raw);
+  const controls = Music.controls(state.connectionsReady ? { ...raw, ...readMidiConnectionControls() } : raw);
   Object.entries(CONTROL_IDS).forEach(([key, id]) => {
     if (key === "loop") dom[id].checked = controls[key];
     else dom[id].value = String(controls[key]);
   });
   applyDrumControls(controls);
-  state.output = state.workspaceView ? state.workspaceView === "drums" ? "drums" : state.workspaceView === "mixer" ? "audio" : state.synthOutput : controls.output;
+  if (!state.playing && !state.preparing) state.output = state.workspaceView ? state.workspaceView === "drums" ? "drums" : state.workspaceView === "mixer" ? "audio" : state.synthOutput : controls.output;
   renderOutputMode();
   updateControlReadouts();
   renderScale();
@@ -729,7 +859,7 @@ function renderMappings() {
   renderSoundControls();
   dom["mapping-rows"].replaceChildren();
   if (!state.mappings.length) {
-    if (state.output !== "drums" && (state.playing || state.preparing)) stopPlayback();
+    if (!activeSynthMixer() && state.output !== "drums" && (state.playing || state.preparing)) stopPlayback();
     const placeholder = document.createElement("div");
     placeholder.className = "mapping-placeholder";
     placeholder.textContent = "Add a mapping to turn a signal into sound.";
@@ -1179,7 +1309,12 @@ function updateSourceSummary() {
 }
 
 function playbackUnavailableReason() {
-  if (state.workspaceView === "synth" && state.synthOutput === "midi" && !state.midiOutput) return "Connect a MIDI device in Connections before playing.";
+  const mixer = activeSynthMixer();
+  if (mixer) {
+    if (state.synthOutput === "midi" && !state.midiOutput) return "Connect a MIDI device in Connections before playing.";
+    return mixer.readyReason() || "";
+  }
+  if (state.workspaceView === "synth-legacy" && state.synthOutput === "midi" && !state.midiOutput) return "Connect a MIDI device in Connections before playing.";
   if (!state.recording) return "Choose a recording or connect live movement data to enable Preview.";
   if (state.sourceMode === "live") {
     if (state.liveSocket?.readyState !== 1) return "Live input is disconnected. Connect live or return to a recording to enable Preview.";
@@ -1216,15 +1351,19 @@ function renderPlaybackAvailability() {
 }
 
 async function togglePlayback() {
-  if (state.workspaceView && !["synth", "drums"].includes(state.workspaceView)) return;
+  if (state.workspaceView && !["synth-legacy", "synth-mixer", "drums"].includes(state.workspaceView)) return;
   if (state.playing || state.preparing) { stopPlayback(); return; }
   const unavailable = playbackUnavailableReason();
   if (unavailable) {
+    state.playbackError = unavailable;
     renderPlaybackAvailability();
     showToast(unavailable);
     return;
   }
   const generation = ++state.playbackGeneration;
+  const mixer = activeSynthMixer();
+  state.playbackWorkspace = state.workspaceView;
+  state.playbackError = null;
   state.preparing = true;
   renderPlaybackAvailability();
   dom["preview-button"].innerHTML = "<span>■</span> Cancel";
@@ -1235,12 +1374,13 @@ async function togglePlayback() {
     else if (!state.midiOutput) await connectMidi();
     if (generation !== state.playbackGeneration) return;
     if (state.output === "midi" && !state.midiOutput) throw new Error("Choose a MIDI destination before playing");
-    const settings = readMusicalControls();
+    const settings = readPlaybackControls();
     if (state.output === "midi" && settings.soundMode !== "off") Music.patchPool(settings);
-    if (state.sourceMode === "live" && state.liveSocket?.readyState !== 1) throw new Error("Connect a live stream before playing");
-    const loaded = state.sourceMode === "live" ? [] : state.output === "drums"
+    if (!mixer && state.sourceMode === "live" && state.liveSocket?.readyState !== 1) throw new Error("Connect a live stream before playing");
+    const loaded = mixer || state.sourceMode === "live" ? [] : state.output === "drums"
       ? await loadDrumSeries() : await loadMappingSet(state.mappings);
     if (generation !== state.playbackGeneration) return;
+    mixer?.reset();
     if (state.output === "drums") {
       if (state.sourceMode !== "live") acceptDrumSeries(loaded);
       state.drumPlayingKeys = [...drumSourceKeys()];
@@ -1269,11 +1409,13 @@ async function togglePlayback() {
   } catch (error) {
     if (generation !== state.playbackGeneration) return;
     stopPlayback();
-    showToast(error instanceof Error ? error.message : "Could not start playback");
+    state.playbackError = error instanceof Error ? error.message : "Could not start playback";
+    showToast(state.playbackError);
   }
 }
 
 async function refreshPlaybackSeries() {
+  if (activeSynthMixer()) return;
   if (state.sourceMode === "live") return;
   if (state.preparing) { stopPlayback(); return; }
   if (!state.playing) return;
@@ -1314,7 +1456,9 @@ async function runPlaybackTick() {
       state.nextTickAt = performance.now();
     }
     const plan = Music.rhythmStep(controls, state.rhythmStep);
+    rememberSynthBeat(controls);
     const notes = Music.chordNotes(controls.pitch, controls);
+    const notePatch = state.currentPatch;
     renderHarmony(controls, notes);
     if (state.output === "audio") updateAudioEffects(controls.cc, plan.interval);
     publishSignalLabActivity({ progress, ...(state.output === "audio" ? { cc: Array.from(controls.cc, ([number, value]) => ({ number, value })) } : {}) });
@@ -1322,16 +1466,23 @@ async function runPlaybackTick() {
       if (!state.playing || generation !== state.playbackGeneration) return;
       const sound = () => {
         if (!state.playing || generation !== state.playbackGeneration) return;
-        if (state.sourceMode === "live" && !controlsAt(0).valid) { silenceStaleInput(); return; }
+        // Keep the rhythm clock running through manual patch changes, but do
+        // not send notes during loading or revive repeats from the old patch.
+        if (state.output === "midi" && (state.patchChanging || state.currentPatch !== notePatch)) return;
+        if ((activeSynthMixer() || state.sourceMode === "live") && !controlsAt(0).valid) { silenceStaleInput(); return; }
         try {
           notes.forEach((note) => {
             if (state.output === "midi") playMidiNote(note, hit.velocity, hit.duration);
             else playAudioNote(note, hit.velocity, hit.duration, controls.cc, 1 / Math.sqrt(notes.length));
           });
+          const beatClock = globalThis.HydraBeatClock.snapshot("synth");
+          globalThis.HydraRobotDrums?.recordNote({ beat: beatClock.beat, token: beatClock.token,
+            notes, velocity: hit.velocity });
           publishSignalLabActivity({ progress, notes: notes.map((number) => ({ number, velocity: hit.velocity, duration_ms: hit.duration })) });
         } catch (error) {
           stopPlayback();
-          showToast(error.message || "The audio or MIDI output became unavailable");
+          state.playbackError = error.message || "The audio or MIDI output became unavailable";
+          showToast(state.playbackError);
         }
       };
       if (hit.offset === 0) sound();
@@ -1349,12 +1500,19 @@ async function runPlaybackTick() {
   } catch (error) {
     if (generation !== state.playbackGeneration) return;
     stopPlayback();
-    showToast(error.message || "Could not play the next step");
+    state.playbackError = error.message || "Could not play the next step";
+    showToast(state.playbackError);
   }
 }
 
 function effectivePreviewVoice() {
   if (state.currentPreviewVoice) return state.currentPreviewVoice;
+  if (activeSynthMixer()) {
+    const settings = readPlaybackControls();
+    const preset = Music.VOICES.find((voice) => voice.id === settings.previewVoice);
+    return { ...preset, name: preset?.name || "Custom", waveType: settings.waveType,
+      attack: settings.attack, release: settings.release, brightness: settings.brightness };
+  }
   const preset = Music.VOICES.find((voice) => voice.id === dom["preview-voice"].value);
   return { ...preset, name: preset?.name || "Custom", waveType: dom["wave-type"].value,
     attack: Number(dom.attack.value), release: Number(dom.release.value), brightness: Number(dom.brightness.value) };
@@ -1394,6 +1552,7 @@ function renderSoundControls() {
 }
 
 function changeSoundAtBoundary(settings) {
+  if (state.patchChanging) return null;
   if (settings.soundMode === "off" || state.rhythmStep % settings.soundEvery !== 0) return null;
   if (state.output === "audio") {
     const previous = Music.VOICES.findIndex((voice) => voice.id === (state.currentPreviewVoice?.id || settings.previewVoice));
@@ -1421,45 +1580,75 @@ function waitForPatch(milliseconds, generation, output) {
 
 async function sendMidiPatch(patch, generation) {
   const output = state.midiOutput;
-  if (!output || generation !== state.playbackGeneration) return false;
+  if (!output || generation !== state.playbackGeneration || state.patchChanging) return false;
   state.patchChanging = true;
-  state.midiPacer?.reset();
-  stopActiveMidiNotes();
-  state.noteTimers.forEach((timer) => window.clearTimeout(timer));
-  state.noteTimers.clear();
-  // Match the native driver's bank-select sequence, with cancellable gaps.
-  output.send([0xB0 | MIDI_CHANNEL, 0, 0]);
-  if (!await waitForPatch(20, generation, output)) return false;
-  output.send([0xB0 | MIDI_CHANNEL, 32, "ABCDEFGH".indexOf(patch.bank)]);
-  if (!await waitForPatch(20, generation, output)) return false;
-  output.send([0xC0 | MIDI_CHANNEL, patch.number - 1]);
-  state.currentPatch = { ...patch };
-  state.lastSoundChange = performance.now();
-  renderSoundControls();
-  publishSignalLabActivity({ stop: true });
-  const ready = await waitForPatch(100, generation, output);
-  if (generation === state.playbackGeneration) state.patchChanging = false;
-  return ready;
+  if (dom["apply-patch"]) dom["apply-patch"].disabled = true;
+  try {
+    state.midiPacer?.reset();
+    stopActiveMidiNotes();
+    if (state.output === "midi") {
+      state.noteTimers.forEach((timer) => window.clearTimeout(timer));
+      state.noteTimers.clear();
+    }
+    // Match the native driver's bank-select sequence, with cancellable gaps.
+    output.send([0xB0 | MIDI_CHANNEL, 0, 0]);
+    if (!await waitForPatch(20, generation, output)) return false;
+    output.send([0xB0 | MIDI_CHANNEL, 32, "ABCDEFGH".indexOf(patch.bank)]);
+    if (!await waitForPatch(20, generation, output)) return false;
+    output.send([0xC0 | MIDI_CHANNEL, patch.number - 1]);
+    state.currentPatch = { ...patch };
+    state.lastSoundChange = performance.now();
+    renderSoundControls();
+    if (state.output === "midi") publishSignalLabActivity({ stop: true });
+    return await waitForPatch(100, generation, output);
+  } finally {
+    if (generation === state.playbackGeneration) {
+      state.patchChanging = false;
+      if (dom["apply-patch"]) dom["apply-patch"].disabled = false;
+    }
+  }
+}
+
+async function selectMidiPatch(patch, workspace = state.workspaceView) {
+  if (!patch || ![..."ABCDEFGH"].includes(patch.bank) || !Number.isInteger(patch.number) || patch.number < 1 || patch.number > 128) {
+    throw new Error("Choose a bank A–H and a patch from 1–128.");
+  }
+  if (!state.midiOutput) throw new Error("Connect and select a MIDI output first.");
+  if (state.patchChanging) throw new Error("Wait for the current patch change to finish.");
+  const keepPlaying = state.playing;
+  if (!keepPlaying) {
+    stopPlayback();
+    state.playbackWorkspace = workspace;
+    state.preparing = true;
+    dom["preview-button"].innerHTML = "<span>■</span> Cancel";
+  }
+  const generation = state.playbackGeneration;
+  const sessionStatus = dom["session-state"].textContent;
+  dom["session-state"].textContent = "SELECTING PATCH";
+  try {
+    const sent = await sendMidiPatch(patch, generation);
+    if (sent) {
+      showToast(`Sent patch ${patchLabel(state.currentPatch)}`);
+    }
+    return sent;
+  } catch (error) {
+    if (keepPlaying && state.output === "midi" && generation === state.playbackGeneration) {
+      stopPlayback();
+      state.playbackError = error.message || "Could not select the MIDI patch";
+    }
+    throw error;
+  } finally {
+    if (generation === state.playbackGeneration) {
+      if (!keepPlaying) stopPlayback();
+      else if (dom["session-state"].textContent === "SELECTING PATCH") dom["session-state"].textContent = sessionStatus;
+    }
+  }
 }
 
 async function applyMidiPatch() {
-  stopPlayback();
-  if (!state.midiOutput) { showToast("Connect and select a MIDI output first."); return; }
-  const generation = state.playbackGeneration;
   const settings = readMusicalControls();
-  state.preparing = true;
-  dom["apply-patch"].disabled = true;
-  dom["preview-button"].innerHTML = "<span>■</span> Cancel";
-  dom["session-state"].textContent = "SELECTING PATCH";
-  try {
-    if (await sendMidiPatch({ bank: settings.patchBank, number: Math.round(settings.patchNumber) }, generation)) {
-      showToast(`Sent patch ${patchLabel(state.currentPatch)}`);
-    }
-  } catch (error) {
-    if (generation === state.playbackGeneration) showToast(error.message || "Could not select the MIDI patch");
-  } finally {
-    if (generation === state.playbackGeneration) stopPlayback();
-  }
+  try { await selectMidiPatch({ bank: settings.patchBank, number: Math.round(settings.patchNumber) }); }
+  catch (error) { showToast(error.message || "Could not select the MIDI patch"); }
 }
 
 function scheduleNextTick(interval) {
@@ -1468,7 +1657,8 @@ function scheduleNextTick(interval) {
   const now = performance.now();
   state.nextTickAt = Math.max(state.nextTickAt + interval, now);
   state.playTimer = window.setTimeout(() => {
-    if (state.sourceMode !== "live" && state.cursor >= state.maxSteps) {
+    if (activeSynthMixer()) state.cursor %= state.maxSteps;
+    else if (state.sourceMode !== "live" && state.cursor >= state.maxSteps) {
       state.cursor = 0;
       if (!dom.loop.checked) { stopPlayback(); return; }
     }
@@ -1477,9 +1667,23 @@ function scheduleNextTick(interval) {
 }
 
 function controlsAt(progress) {
-  const controls = { ...readMusicalControls(), pitch: 60, velocity: 96, gate: 66, chance: 100, sound: 0, cc: new Map(), valid: true };
+  const controls = { ...readPlaybackControls(), pitch: 60, velocity: 96, gate: 66, chance: 100, sound: 0, cc: new Map(), valid: true };
   const parameters = new Map();
-  state.mappings.forEach((mapping) => {
+  const assign = (destination, value) => {
+    if (!destination || destination.unavailable || !Number.isFinite(value)) return;
+    if (activeSynthMixer() && state.output !== "midi" && destination.hardware) return;
+    const output = clamp(value, destination.min, destination.max);
+    if (destination.cc !== undefined) controls.cc.set(destination.cc, clamp(Math.round(output), 0, 127));
+    else if (!destination.hardware) controls[destination.id] = output;
+    const command = Parameters?.command(destination, output, controls.midiFormat);
+    if (command) parameters.set(command.key, command);
+  };
+  const mixer = activeSynthMixer();
+  if (mixer) {
+    const evaluated = mixer.evaluate(state.output, { midiFormat: controls.midiFormat });
+    controls.valid = evaluated.valid !== false;
+    for (const value of evaluated.values) assign(destinationFor(value.destination), value.value);
+  } else state.mappings.forEach((mapping) => {
     if (!Music.mappingTargets(mapping).some((target) => target.enabled !== false)) return;
     let normalized;
     if (state.sourceMode === "live") {
@@ -1497,10 +1701,7 @@ function controlsAt(progress) {
       if (target.enabled === false || !destination || destination.unavailable) continue;
       const curved = applyCurve(clamp(normalized, 0, 1), target.curve);
       const output = target.minimum + curved * (target.maximum - target.minimum);
-      if (destination.cc !== undefined) controls.cc.set(destination.cc, clamp(Math.round(output), 0, 127));
-      else if (!destination.hardware) controls[destination.id] = output;
-      const command = Parameters?.command(destination, output, controls.midiFormat);
-      if (command) parameters.set(command.key, command);
+      assign(destination, output);
     }
   });
   controls.parameters = [...parameters.values()];
@@ -1514,6 +1715,7 @@ function silenceStaleInput() {
   state.currentParameterCommands = [];
   state.midiPacer?.reset();
   if (!state.liveSilenced) {
+    state.synthBeatRevision += 1;
     state.liveSilenced = true;
     state.noteTimers.forEach((timer) => window.clearTimeout(timer));
     state.noteTimers.clear();
@@ -1536,22 +1738,32 @@ function startParameterPump() {
   const pump = () => {
     if (!state.playing || generation !== state.playbackGeneration) return;
     try {
-      const controls = state.sourceMode === "live" ? controlsAt(0) : null;
+      const controls = activeSynthMixer() || state.sourceMode === "live" ? controlsAt(0) : null;
       if (controls && !controls.valid) silenceStaleInput();
       else if (state.output === "midi" && state.midiOutput && !state.patchChanging) {
-        const settings = controls || readMusicalControls();
+        const settings = controls || readPlaybackControls();
         state.midiPacer.update(controls ? controls.parameters : state.currentParameterCommands);
         state.parameterCarry += settings.midiRate / 50;
         const limit = Math.floor(state.parameterCarry);
         state.parameterCarry -= limit;
         const emitted = state.midiPacer.flush((bytes) => state.midiOutput.send(bytes), limit);
+        for (const command of emitted) if (command.kind === "cc" && command.number === 64) {
+          if (command.value > 0) state.midiSustainOutputs.add(state.midiOutput);
+          else state.midiSustainOutputs.delete(state.midiOutput);
+        }
         if (emitted.length) publishSignalLabActivity({
           cc: emitted.filter((item) => item.kind === "cc"), nrpn: emitted.filter((item) => item.kind === "nrpn")
         });
         if (dom["midi-parameter-status"]) dom["midi-parameter-status"].textContent =
           `${settings.midiFormat.toUpperCase()} · ${state.midiPacer.pending.size} waiting · up to ${settings.midiRate} parameter changes/sec`;
+      } else if (activeSynthMixer() && controls && state.output === "audio" && !state.liveSilenced) {
+        updateAudioEffects(controls.cc, 60000 / controls.tempo / controls.stepsPerBeat);
+        state.activeVoices.forEach((voice) => voice.updateControls?.(controls.cc));
       }
-    } catch (error) { stopPlayback(); showToast(error.message || "MIDI output disconnected"); return; }
+    } catch (error) {
+      stopPlayback(); state.playbackError = error.message || "Audio or MIDI output disconnected";
+      showToast(state.playbackError); return;
+    }
     state.parameterTimer = window.setTimeout(pump, 20);
   };
   state.parameterTimer = window.setTimeout(pump, 20);
@@ -1610,7 +1822,10 @@ function stopPlayback() {
   const wasPlaying = state.playing || state.preparing;
   state.playing = false;
   state.preparing = false;
+  state.playbackWorkspace = null;
   state.playbackGeneration += 1;
+  state.synthBeatClock = null;
+  state.synthBeatRevision += 1;
   window.clearTimeout(state.playTimer);
   state.playTimer = null;
   window.clearTimeout(state.parameterTimer);
@@ -1640,6 +1855,46 @@ function stopPlayback() {
   if (wasPlaying) publishSignalLabActivity({ stop: true });
 }
 
+function rememberSynthBeat(controls) {
+  const bpm = clamp(Number(controls.tempo), 20, 240);
+  const subdivision = clamp(Number(controls.stepsPerBeat), 1, 8);
+  const swing = clamp(Number(controls.swing) || 0, 0, 65) / 100;
+  const signature = `${bpm}:${subdivision}:${swing}`;
+  if (state.synthBeatClock?.signature !== signature) state.synthBeatRevision += 1;
+  // Swing shifts odd subdivisions later; retain an unswung quarter-note grid
+  // so the next four-beat bar agrees with the actual synth scheduler.
+  state.synthBeatClock = { at: performance.now() / 1000, bpm, signature,
+    beat: (state.rhythmStep + (state.rhythmStep % 2 ? swing : 0)) / subdivision };
+}
+
+function synthRapClock() {
+  const context = state.audio?.context || null, anchor = state.synthBeatClock;
+  const playing = state.playbackWorkspace === "synth-mixer" && state.playing;
+  // Standalone Synth rap also uses this clock while its sequencer is stopped.
+  // Its tempo belongs to the Synth mixer even when another tab is visible.
+  const bpm = anchor?.bpm || Number(globalThis.HydraSynthMixer?.getControls?.()?.tempo) || Number(readMusicalControls().tempo) || 96;
+  return { context, destination: context?.destination || null,
+    playing, valid: !state.liveSilenced && (!playing || Boolean(anchor)), bpm, baseBpm: bpm, rate: 1,
+    beat: anchor ? anchor.beat + Math.max(0, performance.now() / 1000 - anchor.at) * bpm / 60 : 0,
+    at: context?.currentTime || 0, token: `${state.playbackGeneration}:${state.synthBeatRevision}`, estimated: false };
+}
+
+globalThis.HydraSynthRapTransport = { unlock: () => ensureAudioEngine(), clock: synthRapClock };
+globalThis.HydraBeatClock = {
+  snapshot(source = "synth") {
+    const mixer = source === "mixer";
+    const clock = mixer ? globalThis.HydraMusicMixer?.transportClock?.() : synthRapClock();
+    const running = mixer ? Boolean(clock?.playing && clock.valid !== false)
+      : Boolean(state.playing && state.output !== "drums" && !state.liveSilenced && state.synthBeatClock);
+    return { running, bpm: Number(clock?.bpm) || 96,
+      beat: Number.isFinite(clock?.beat) ? clock.beat : 0,
+      at: performance.now(),
+      token: mixer ? clock?.token ?? null : `${state.playbackGeneration}:${state.synthBeatClock?.signature?.split(":").slice(1).join(":") || "stopped"}`,
+      estimated: clock?.estimated === true, rateChanging: clock?.rateChanging === true,
+      source: mixer ? "mixer" : "synth", label: mixer ? "Music mixer" : "Synth" };
+  }
+};
+
 async function ensureAudioEngine() {
   const AudioContext = window.AudioContext || window.webkitAudioContext;
   if (!AudioContext) throw new Error("This browser does not support audio preview");
@@ -1654,10 +1909,10 @@ async function ensureAudioEngine() {
     const reverbInput = context.createGain();
     const reverb = context.createConvolver();
     const reverbReturn = context.createGain();
-    const impulse = context.createBuffer(2, Math.round(context.sampleRate * 1.8), context.sampleRate);
+    const impulse = context.createBuffer(2, Math.round(context.sampleRate * 3.0), context.sampleRate);
     for (let channel = 0; channel < 2; channel += 1) {
       const samples = impulse.getChannelData(channel);
-      for (let i = 0; i < samples.length; i += 1) samples[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / samples.length, 2.5);
+      for (let i = 0; i < samples.length; i += 1) samples[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / samples.length, 1.8);
     }
     reverb.buffer = impulse;
     master.gain.value = 0.5;
@@ -1669,8 +1924,8 @@ async function ensureAudioEngine() {
     delayInput.gain.value = 0;
     reverbInput.gain.value = 0;
     delay.delayTime.value = 0.25;
-    feedback.gain.value = 0.36;
-    delayReturn.gain.value = 0.7;
+    feedback.gain.value = 0.48;
+    delayReturn.gain.value = 0.85;
     delayInput.connect(delay);
     delay.connect(feedback);
     feedback.connect(delay);
@@ -1685,7 +1940,7 @@ async function ensureAudioEngine() {
   }
   const { context, master } = state.audio;
   // A newly selected drum kit should not bring back the melodic engine's effect tails.
-  state.audio.delayReturn.gain.setValueAtTime(state.output === "drums" ? 0 : .7, context.currentTime);
+  state.audio.delayReturn.gain.setValueAtTime(state.output === "drums" ? 0 : .85, context.currentTime);
   state.audio.reverbReturn.gain.setValueAtTime(state.output === "drums" ? 0 : 1, context.currentTime);
   master.gain.cancelScheduledValues(context.currentTime);
   master.gain.setTargetAtTime(0.5, context.currentTime, 0.015);
@@ -1697,8 +1952,8 @@ function updateAudioEffects(cc, interval) {
   const { context, delay, delayInput, reverbInput } = state.audio;
   const echo = Math.max((cc.get(92) ?? 0) / 127, (cc.get(22) ?? 0) / 127);
   const space = Math.max((cc.get(91) ?? 16) / 127, (cc.get(23) ?? 0) / 127);
-  delayInput.gain.setTargetAtTime(echo * 0.8, context.currentTime, 0.02);
-  reverbInput.gain.setTargetAtTime(space * 0.9, context.currentTime, 0.02);
+  delayInput.gain.setTargetAtTime(echo, context.currentTime, 0.02);
+  reverbInput.gain.setTargetAtTime(space, context.currentTime, 0.02);
   delay.delayTime.setTargetAtTime(clamp(interval / 1000 * 1.5, 0.06, 1.5), context.currentTime, 0.1);
 }
 
@@ -1769,7 +2024,15 @@ function playAudioNote(note, velocity, durationMs, cc, level = 1) {
   gain.connect(reverbInput);
   const nodes = [oscillator, harmonic, harmonicGain, drive, filter, gain];
   let stopped = false;
-  const voice = { stop() {
+  const voice = { updateControls(next) {
+    if (stopped) return;
+    const brightness = next.get(74) ?? Math.round(effectivePreviewVoice().brightness * 1.27);
+    const multiplier = next.has(16) ? Math.pow(2, (next.get(16) / 127 - 0.5) * 5) : 1;
+    filter.frequency.setTargetAtTime(clamp(55 * Math.pow(260, brightness / 127) * multiplier,
+      40, Math.min(18000, context.sampleRate * 0.45)), context.currentTime, 0.02);
+    filter.Q.setTargetAtTime(0.4 + (next.get(71) ?? 12) / 127 * 12 + (next.get(17) ?? 0) / 127 * 10,
+      context.currentTime, 0.02);
+  }, stop() {
     if (stopped) return;
     stopped = true;
     state.activeVoices.delete(voice);
@@ -1789,50 +2052,100 @@ function playAudioNote(note, velocity, durationMs, cc, level = 1) {
   }, { once: true });
 }
 
-async function connectMidi() {
+function connectMidi(options = {}) {
+  const automatic = options.automatic === true;
+  if (state.midiConnecting) return state.midiConnecting;
   if (!navigator.requestMIDIAccess) {
-    showToast("Web MIDI is not available in this browser. Browser preview still works.");
-    return;
+    state.midiConnectionError = "Web MIDI is not available in this browser. Browser preview still works.";
+    updateMidiStatus();
+    if (!automatic) showToast(state.midiConnectionError);
+    return Promise.resolve(null);
   }
-  try {
-    state.midiAccess = state.midiAccess || await navigator.requestMIDIAccess({ sysex: false });
+  state.midiConnectionError = "";
+  let accessRequest;
+  try { accessRequest = state.midiAccess || navigator.requestMIDIAccess({ sysex: false }); }
+  catch (error) { accessRequest = Promise.reject(error); }
+  state.midiConnecting = Promise.resolve(accessRequest).then(access => {
+    state.midiAccess = access;
     state.midiAccess.onstatechange = renderMidiOutputs;
     renderMidiOutputs();
-    if (!state.workspaceView) {
+    if (!automatic && !state.workspaceView) {
       dom["midi-panel"].hidden = false;
       dom["panic-button"].hidden = false;
       if (state.midiOutput && state.output !== "midi") setOutput("midi");
     }
     updateConnectionSummary();
-  } catch (error) {
-    showToast(error instanceof Error ? error.message : "MIDI permission was not granted");
-  }
+    return state.midiOutput;
+  }).catch(error => {
+    state.midiConnectionError = "MIDI access was not granted. Use Connect MIDI device to try again.";
+    updateMidiStatus();
+    if (!automatic) showToast(error?.message || state.midiConnectionError);
+    return null;
+  }).finally(() => { state.midiConnecting = null; });
+  return state.midiConnecting;
+}
+
+function midiDeviceIdentity(output) {
+  return { midiDeviceId: output?.id || "", midiDeviceName: output?.name || "",
+    midiDeviceManufacturer: output?.manufacturer || "" };
+}
+
+function isHydrasynthOutput(output) {
+  return /hydra\s*synth/i.test(output?.name || "");
 }
 
 function renderMidiOutputs() {
-  const outputs = state.midiAccess ? Array.from(state.midiAccess.outputs.values()) : [];
-  const previousId = state.midiOutput?.id || dom["midi-output"].value;
+  const outputs = state.midiAccess ? Array.from(state.midiAccess.outputs.values()).filter(output => output.state !== "disconnected") : [];
+  const preferences = state.connectionPreferences;
+  const previous = state.midiOutput ? midiDeviceIdentity(state.midiOutput) : preferences;
+  const previousId = previous.midiDeviceId || dom["midi-output"].value;
+  const normalize = value => String(value || "").trim().toLowerCase();
+  const identityMatches = previous.midiDeviceName ? outputs.filter(output => normalize(output.name) === normalize(previous.midiDeviceName)
+    && (!previous.midiDeviceManufacturer || normalize(output.manufacturer) === normalize(previous.midiDeviceManufacturer))) : [];
+  const hydrasynths = outputs.filter(isHydrasynthOutput);
+  const hasPreference = previousId || previous.midiDeviceName || preferences.midiDeviceExplicit;
+  const selected = outputs.find(output => output.id === previousId)
+    || (identityMatches.length === 1 ? identityMatches[0] : null)
+    || (!hasPreference && hydrasynths.length === 1 ? hydrasynths[0] : null);
   dom["midi-output"].replaceChildren(new Option("No device selected", ""));
   outputs.forEach((output) => dom["midi-output"].add(new Option(output.name || "MIDI output", output.id)));
-  const hydra = outputs.find((output) => /hydra/i.test(output.name || ""));
-  const selected = outputs.find((output) => output.id === previousId) || hydra || null;
   dom["midi-output"].value = selected?.id || "";
   if (state.midiOutput?.id !== selected?.id) {
     if (state.midiOutput) {
+      Object.assign(preferences, midiDeviceIdentity(state.midiOutput));
       if (state.output === "midi") stopPlayback();
       else stopActiveMidiNotes();
     }
     state.currentPatch = null;
   }
   state.midiOutput = selected;
+  if (selected) {
+    Object.assign(preferences, midiDeviceIdentity(selected));
+    if (state.midiAutoRoute && isHydrasynthOutput(selected) && !state.playing && !state.preparing) {
+      state.midiAutoRoute = false;
+      state.synthOutput = "midi";
+      if (!["drums", "elevenlabs", "mixer", "rap-experiment", "rap-response"].includes(state.workspaceView)) state.output = "midi";
+      state.midiPacer?.reset();
+      renderOutputMode();
+    }
+    if (state.connectionsReady) {
+      try { saveConnectionPreferences(); } catch (_) { /* The selected route still works without storage. */ }
+    }
+  }
   updateMidiStatus();
+  updateConnectionSummary();
 }
 
 function selectMidiOutput() {
   stopPlayback();
+  state.midiAutoRoute = false;
   state.currentPatch = null;
-  state.midiOutput = state.midiAccess?.outputs.get(dom["midi-output"].value) || null;
+  const selected = state.midiAccess?.outputs.get(dom["midi-output"].value);
+  state.midiOutput = selected?.state !== "disconnected" ? selected || null : null;
+  Object.assign(state.connectionPreferences, midiDeviceIdentity(state.midiOutput), { midiDeviceExplicit: true });
+  saveSettings();
   updateMidiStatus();
+  updateConnectionSummary();
 }
 
 function updateMidiStatus() {
@@ -1842,7 +2155,7 @@ function updateMidiStatus() {
     dom["midi-choice-detail"].textContent = state.midiOutput.name;
     dom["connect-midi"].innerHTML = `MIDI connected <span>✓</span>`;
   } else {
-    dom["midi-status"].textContent = "Connect the Hydrasynth, then choose it here.";
+    dom["midi-status"].textContent = state.midiConnectionError || "Waiting for the saved MIDI device or a single Hydrasynth. Choose a device if several are connected.";
     dom["midi-choice-detail"].textContent = "No output selected";
     dom["connect-midi"].innerHTML = `Connect MIDI device <span>→</span>`;
     if (state.output === "midi") {
@@ -1873,9 +2186,20 @@ function playMidiNote(note, velocity, durationMs) {
 function sendMidiCc(ccValues) {
   if (!state.midiOutput) return;
   ccValues.forEach((value, cc) => state.midiOutput.send([0xB0 | MIDI_CHANNEL, cc, value]));
+  if (ccValues.has(64)) {
+    if (ccValues.get(64) > 0) state.midiSustainOutputs.add(state.midiOutput);
+    else state.midiSustainOutputs.delete(state.midiOutput);
+  }
 }
 
 function stopActiveMidiNotes() {
+  const outputs = new Set([...state.midiNoteTimers.values()].map((item) => item.output));
+  for (const output of state.midiSustainOutputs) outputs.add(output);
+  for (const output of outputs) {
+    try { output.send([0xB0 | MIDI_CHANNEL, 64, 0]); }
+    catch (_error) { /* Disconnected outputs cannot sustain new notes. */ }
+  }
+  state.midiSustainOutputs.clear();
   state.midiNoteTimers.forEach(({ timer, output }, note) => {
     window.clearTimeout(timer);
     try { output.send([0x80 | MIDI_CHANNEL, note, 0]); }
@@ -1886,8 +2210,8 @@ function stopActiveMidiNotes() {
 
 function panicMidi() {
   stopActiveMidiNotes();
+  state.midiOutput?.send([0xB0 | MIDI_CHANNEL, 64, 0]);
   state.midiOutput?.send([0xB0 | MIDI_CHANNEL, 123, 0]);
-  state.midiOutput?.send([0xB0 | MIDI_CHANNEL, 120, 0]);
 }
 
 function setOutput(output) {
@@ -1991,11 +2315,59 @@ function saveSettings() {
   }
   try {
     localStorage.setItem(SETTINGS_KEY, JSON.stringify(state.saved));
+    if (state.connectionsReady) saveConnectionPreferences();
     return true;
   } catch (_error) {
     dom["workspace-status"].textContent = "Browser storage is unavailable or full. This session still works; export presets before closing it.";
     return false;
   }
+}
+
+function loadConnectionPreferences() {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(CONNECTIONS_KEY) || "{}");
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+  } catch (_) { return {}; }
+}
+
+function saveConnectionPreferences() {
+  const preferences = {
+    inputMode: state.sourceMode, recordingId: state.sourceMode === "live" ? state.saved.lastRecording : state.recording?.id,
+    liveUrl: dom["live-url"]?.value || "ws://localhost:8765", reconnect: dom["live-reconnect"]?.checked !== false,
+    synthOutput: state.synthOutput, ...readMidiConnectionControls(),
+    ...(state.midiOutput ? midiDeviceIdentity(state.midiOutput) : {
+      midiDeviceId: state.connectionPreferences.midiDeviceId || "",
+      midiDeviceName: state.connectionPreferences.midiDeviceName || "",
+      midiDeviceManufacturer: state.connectionPreferences.midiDeviceManufacturer || ""
+    }),
+    midiDeviceExplicit: state.connectionPreferences.midiDeviceExplicit === true
+  };
+  localStorage.setItem(CONNECTIONS_KEY, JSON.stringify(preferences));
+  state.connectionPreferences = preferences;
+}
+
+async function restoreConnectionPreferences({ autoConnectMidi = false } = {}) {
+  const preferences = state.connectionPreferences;
+  if (preferences.recordingId && state.sourceMode !== "live" && state.recording?.id !== preferences.recordingId
+      && state.library?.recordings.some((recording) => recording.id === preferences.recordingId)) {
+    await selectRecording(preferences.recordingId);
+  }
+  if (typeof preferences.liveUrl === "string") dom["live-url"].value = preferences.liveUrl;
+  if (typeof preferences.reconnect === "boolean") dom["live-reconnect"].checked = preferences.reconnect;
+  if (preferences.inputMode === "live") {
+    try { selectLiveInput(liveInputUrl(), false); } catch (error) { showToast(error.message); }
+  }
+  if (preferences.midiFormat) dom["midi-format"].value = Music.controls(preferences).midiFormat;
+  if (preferences.midiRate) dom["midi-rate"].value = String(Music.controls(preferences).midiRate);
+  if (["audio", "midi"].includes(preferences.synthOutput)) {
+    state.midiAutoRoute = false;
+    setOutput(preferences.synthOutput);
+  }
+  state.connectionsReady = true;
+  updateConnectionSummary();
+  // Permission can wait for the user while the rest of the dashboard remains
+  // ready. Connecting only selects a port; playback and patch changes stay idle.
+  if (autoConnectMidi) void connectMidi({ automatic: true });
 }
 
 function appendGroupedOptions(select, items, groupKey, valueKey, labelKey) {
@@ -2286,10 +2658,38 @@ function generateEngineMappings(count, style) {
 function bindLiveInput() {
   dom["live-url"].value = state.saved.live?.url || "ws://localhost:8765";
   dom["live-reconnect"].checked = state.saved.live?.reconnect !== false;
+  dom["live-url"].addEventListener("change", saveSettings);
+  dom["live-reconnect"].addEventListener("change", updateLiveReconnect);
   dom["live-connect"].addEventListener("click", connectLive);
   dom["live-disconnect"].addEventListener("click", () => { disconnectLive(); updateLiveStatus(); });
   dom["return-to-recording"].addEventListener("click", returnToRecording);
   dom["live-reset-ranges"].addEventListener("click", () => { state.live?.resetRanges(); state.livePlot?.clear(); state.drumMotion?.reset(); showToast("Live input ranges reset"); });
+  state.liveMonitorUI = globalThis.HydraLiveMonitor?.init({
+    container: document.getElementById("live-monitor"),
+    getSnapshot: () => state.liveDiagnostics?.snapshot(state.live, performance.now(), {
+      sourceMode: state.sourceMode, wanted: state.liveWanted, status: state.liveStatus,
+      retryAt: state.liveRetryAt, url: state.liveUrl || dom["live-url"].value
+    }),
+    getInspection: (key) => state.liveDiagnostics?.inspect(state.live, key, performance.now()),
+    onReconnect: connectLive,
+    onClear: () => { state.liveDiagnostics?.clearHistory(performance.now()); updateLiveStatus(); }
+  });
+  state.liveMonitorUI?.render();
+}
+
+function updateLiveReconnect() {
+  saveSettings();
+  if (!dom["live-reconnect"].checked) {
+    window.clearTimeout(state.liveRetry);
+    state.liveRetry = null;
+    state.liveRetryAt = null;
+    if (state.sourceMode === "live" && state.liveWanted && !state.liveSocket)
+      state.liveStatus = "Disconnected · automatic reconnect off";
+  } else if (state.sourceMode === "live" && state.liveWanted && !state.liveSocket && state.liveRetry === null) {
+    openLiveSocket(state.liveGeneration);
+    return;
+  }
+  updateLiveStatus();
 }
 
 async function returnToRecording() {
@@ -2305,24 +2705,38 @@ function disconnectLive() {
   state.liveGeneration++;
   window.clearTimeout(state.liveRetry); window.clearTimeout(state.liveRenderTimer);
   state.liveRetry = state.liveRenderTimer = null;
+  state.liveRetryAt = null;
   const socket = state.liveSocket; state.liveSocket = null;
   if (socket) { socket.onclose = socket.onmessage = socket.onerror = socket.onopen = null; socket.close(); }
+  if (state.live) {
+    for (const channel of state.live.channels.values()) channel.at = -Infinity;
+    state.live.lastAt = null;
+  }
   if (state.sourceMode === "live") stopPlayback();
   state.liveStatus = "Disconnected";
+  state.liveDiagnostics?.connection({ state: "disconnected", now: performance.now() });
   if (dom["live-disconnect"]) dom["live-disconnect"].disabled = true;
   updateLiveStatus();
 }
 
+function liveInputUrl() {
+  const url = new URL(dom["live-url"].value.trim());
+  if (!["ws:", "wss:"].includes(url.protocol) || url.username || url.password || url.hash) throw new Error("Use a ws:// or wss:// stream address.");
+  if (window.location.protocol === "https:" && url.protocol === "ws:") throw new Error("An HTTPS page needs a wss:// stream, or open this dashboard over local HTTP.");
+  return url;
+}
+
 function connectLive() {
-  let url;
-  try {
-    url = new URL(dom["live-url"].value.trim());
-    if (!["ws:", "wss:"].includes(url.protocol) || url.username || url.password || url.hash) throw new Error("Use a ws:// or wss:// stream address.");
-    if (window.location.protocol === "https:" && url.protocol === "ws:") throw new Error("An HTTPS page needs a wss:// stream, or open this dashboard over local HTTP.");
-  } catch (error) { showToast(error.message || "Enter a valid WebSocket address"); return; }
+  try { selectLiveInput(liveInputUrl(), true); }
+  catch (error) { showToast(error.message || "Enter a valid WebSocket address"); }
+}
+
+function selectLiveInput(url, connect) {
   stopPlayback(); saveSettings(); disconnectLive();
-  state.sourceMode = "live"; state.live = new Live.Stream(); state.livePlot = new Map(); state.liveWanted = true;
+  state.sourceMode = "live"; state.live = new Live.Stream(); state.livePlot = new Map(); state.liveWanted = connect;
   state.liveUrl = url.href; state.liveAttempts = 0; state.fields = []; state.fieldIndex = new Map();
+  state.liveDiagnostics?.reset({ url: url.href, now: performance.now() });
+  state.liveMonitorUI?.reset();
   state.selectionGeneration++; state.seriesCache.clear();
   state.recording = { id: `live:${url.href}`, name: "Live RAPP", channels: [], frames: 0, size_bytes: 0 };
   state.liveNeedsDefaults = !state.saved.workspaces?.[state.recording.id];
@@ -2334,8 +2748,13 @@ function connectLive() {
   dom["recording-detail"].textContent = url.href;
   state.saved.live = { url: url.href, reconnect: dom["live-reconnect"].checked };
   renderRecordingsForLive(); renderWorkspaces(); renderMappings(); saveSettings();
-  openLiveSocket(state.liveGeneration);
-  state.liveRenderTimer = window.setTimeout(refreshLiveView, 250);
+  if (connect) {
+    openLiveSocket(state.liveGeneration);
+    state.liveRenderTimer = window.setTimeout(refreshLiveView, 250);
+  } else {
+    state.liveStatus = "Saved live input · press Connect live to reconnect";
+    updateLiveStatus();
+  }
 }
 
 function renderRecordingsForLive() {
@@ -2344,10 +2763,16 @@ function renderRecordingsForLive() {
 
 function openLiveSocket(generation) {
   if (!state.liveWanted || generation !== state.liveGeneration) return;
+  state.liveRetry = null; state.liveRetryAt = null;
+  state.liveDiagnostics?.connection({ state: "connecting", now: performance.now() });
   state.liveStatus = state.liveAttempts ? "Reconnecting…" : "Connecting…"; updateLiveStatus();
   let socket;
   try { socket = new WebSocket(state.liveUrl); }
-  catch (error) { state.liveStatus = error.message; state.liveWanted = false; updateLiveStatus(); return; }
+  catch (error) {
+    state.liveStatus = error.message; state.liveWanted = false;
+    state.liveDiagnostics?.connection({ state: "error", now: performance.now(), reason: error.message });
+    updateLiveStatus(); return;
+  }
   state.liveSocket = socket;
   dom["live-disconnect"].disabled = false;
   const current = () => generation === state.liveGeneration && socket === state.liveSocket;
@@ -2355,6 +2780,7 @@ function openLiveSocket(generation) {
   state.liveConnectTimer = window.setTimeout(() => {
     if (current() && socket.readyState === WebSocket.CONNECTING) {
       state.liveStatus = "Connection timed out · check address and browser permissions";
+      state.liveDiagnostics?.connection({ state: "timeout", now: performance.now() });
       socket.close(); updateLiveStatus();
     }
   }, 10000);
@@ -2362,35 +2788,51 @@ function openLiveSocket(generation) {
     if (!current()) return;
     window.clearTimeout(state.liveConnectTimer);
     state.liveAttempts = 0; state.liveStatus = "Connected · waiting for data";
+    state.liveDiagnostics?.connection({ state: "open", now: performance.now() });
     dom["live-disconnect"].disabled = false; updateLiveStatus();
   };
   socket.onmessage = (event) => {
     if (!current()) return;
+    if (state.liveDiagnostics) {
+      state.liveDiscoveryPending = state.liveDiagnostics.message(event.data, performance.now(), state.live) || state.liveDiscoveryPending;
+      return;
+    }
     if (typeof event.data !== "string" || event.data.length > 8 * 1024 * 1024) { state.live.invalid++; return; }
     try {
       const frame = JSON.parse(event.data);
       state.liveDiscoveryPending = state.live.ingest(frame, performance.now()) || state.liveDiscoveryPending;
     } catch (_error) { state.live.invalid++; }
   };
-  socket.onerror = () => { if (current()) { state.liveStatus = "Connection error · check address and network"; updateLiveStatus(); } };
-  socket.onclose = () => {
+  socket.onerror = () => {
+    if (!current()) return;
+    state.liveStatus = "Connection error · check address and network";
+    state.liveDiagnostics?.connection({ state: "error", now: performance.now() });
+    updateLiveStatus();
+  };
+  socket.onclose = (event) => {
     if (!current()) return;
     window.clearTimeout(state.liveConnectTimer);
     state.liveSocket = null; stopPlayback();
     // Old values cannot look fresh after a reconnect, even if it is immediate.
     for (const channel of state.live.channels.values()) channel.at = -Infinity;
     state.live.lastAt = null;
+    state.liveRetryAt = null;
     if (state.liveWanted && dom["live-reconnect"].checked) {
       const delay = Math.min(10000, 1000 * 2 ** Math.min(state.liveAttempts++, 4));
+      state.liveRetryAt = performance.now() + delay;
       state.liveStatus = `Disconnected · retrying in ${delay / 1000}s`;
       state.liveRetry = window.setTimeout(() => openLiveSocket(generation), delay);
     } else state.liveStatus = "Disconnected";
+    state.liveDiagnostics?.connection({ state: "closed", now: performance.now(), code: event?.code,
+      reason: event?.reason, retryAt: state.liveRetryAt });
     updateLiveStatus();
   };
 }
 
 function updateLiveStatus() {
   renderPlaybackAvailability();
+  updateConnectionSummary();
+  state.liveMonitorUI?.render();
   if (!dom["live-status"]) return;
   let label = state.liveStatus;
   if (state.liveSocket?.readyState === 1 && state.live?.lastAt !== null) {

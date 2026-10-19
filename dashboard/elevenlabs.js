@@ -414,7 +414,7 @@ globalThis.HydraElevenLabs = (() => {
   }
   async function activate() {
     init();
-    if (!state.initialized) return;
+    if (!state.initialized || state.active) return;
     state.active = true;
     globalThis.HydraElevenRealtime?.activate();
     try {
