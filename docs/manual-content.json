@@ -1682,7 +1682,7 @@
       },
       {
         "type": "p",
-        "text": "The client talks to the live dashboard’s private local Unix socket and reads its generated token automatically. Demo mode has no native command broker. Each request carries an ID so the response can be matched. Scheduled play supplies its own note-offs; direct note_on clients must provide note_off. The service also supports overlapping scheduled notes and linear CC ramps, state/status queries, job cancellation and user takeover protection. A physical control movement normally blocks competing non-forced writes to that parameter for three seconds. The README documents the full NDJSON protocol."
+        "text": "The client talks to the live dashboard’s private local Unix socket and reads its generated token automatically. Demo mode has no native command broker. Each request carries an ID so the response can be matched. Scheduled play supplies its own note-offs; direct note_on clients must provide note_off. The service also supports overlapping scheduled notes and linear CC ramps, state/status queries, job cancellation and user takeover protection. A physical control movement normally blocks competing non-forced writes to that parameter for three seconds. The technical reference in docs/reference.md documents the full NDJSON protocol."
       },
       {
         "type": "note",
@@ -1745,11 +1745,11 @@
       },
       {
         "type": "code",
-        "text": "git status --short\ngit pull --ff-only\nbash tools/setup_linux.sh\nmake dashboard-sonify"
+        "text": "git status --short\ngit pull --ff-only && bash tools/setup_linux.sh\nmake dashboard-sonify"
       },
       {
         "type": "p",
-        "text": "Stop the running dashboard before updating. Review git status first: local source edits need to be preserved or reconciled, not discarded. The fast-forward pull refuses an unexpected history merge rather than guessing how to combine it. Rerun setup after pulling to install changed dependencies and rebuild native tools. It preserves the existing usable environment, model, key and local data. A failure during an update is a reason to resolve the reported problem before beginning a participant session."
+        "text": "Stop the running dashboard before updating. Review git status first: local source edits need to be preserved or reconciled, not discarded. The fast-forward pull refuses an unexpected history merge rather than guessing how to combine it. Rerun setup after pulling to update Python dependencies within the supported versions and rebuild native tools. Whisper is installed automatically if missing. It preserves the existing usable environment, model, key and local data. A failure during an update is a reason to resolve the reported problem before beginning a participant session."
       },
       {
         "type": "p",
@@ -2161,7 +2161,7 @@
       },
       {
         "type": "p",
-        "text": "Supporting repository documents: README.md; docs/linux.md; docs/robot_control.md; docs/hardware_acceptance.md; docs/live_streaming.md; docs/movement_drums.md. Provider key permissions and quotas can change; check the current official documentation at https://elevenlabs.io/docs/overview/administration/workspaces/api-keys."
+        "text": "Supporting repository documents: README.md; docs/reference.md; docs/linux.md; docs/robot_control.md; docs/hardware_acceptance.md; docs/live_streaming.md; docs/movement_drums.md. Provider key permissions and quotas can change; check the current official documentation at https://elevenlabs.io/docs/overview/administration/workspaces/api-keys."
       }
     ]
   }

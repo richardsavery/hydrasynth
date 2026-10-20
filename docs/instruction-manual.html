@@ -410,7 +410,7 @@ make dashboard</code></pre>
   &quot;v&quot;:1, &quot;id&quot;:&quot;short-note&quot;, &quot;op&quot;:&quot;play&quot;,
   &quot;notes&quot;:[60], &quot;velocity&quot;:72, &quot;duration_ms&quot;:500
 }&#x27;</code></pre>
-<p>The client talks to the live dashboard’s private local Unix socket and reads its generated token automatically. Demo mode has no native command broker. Each request carries an ID so the response can be matched. Scheduled play supplies its own note-offs; direct note_on clients must provide note_off. The service also supports overlapping scheduled notes and linear CC ramps, state/status queries, job cancellation and user takeover protection. A physical control movement normally blocks competing non-forced writes to that parameter for three seconds. The README documents the full NDJSON protocol.</p>
+<p>The client talks to the live dashboard’s private local Unix socket and reads its generated token automatically. Demo mode has no native command broker. Each request carries an ID so the response can be matched. Scheduled play supplies its own note-offs; direct note_on clients must provide note_off. The service also supports overlapping scheduled notes and linear CC ramps, state/status queries, job cancellation and user takeover protection. A physical control movement normally blocks competing non-forced writes to that parameter for three seconds. The technical reference in docs/reference.md documents the full NDJSON protocol.</p>
 <div class="note">Current native cleanup caveat: hydractl panic sends CC64, CC123 and CC120. The persistent service’s panic, shutdown and failed-note-off cleanup also send CC120, with service-wide panic covering all 16 channels. The repository’s Hydrasynth mapping assigns CC120 to ARP Octave, so do not treat native panic as a transparent routine reset that preserves the patch’s arpeggiator settings. Browser All notes off uses sustain-off and All Notes Off without CC120. This existing native/documentation discrepancy needs hardware validation; retain the synth state when investigating it. MIDI cleanup is separate from Keirzo Emergency stop.</div>
 <h3>Audio capture and level checks on Linux</h3>
 <pre><code>./build/hydra-audio list --json
@@ -429,10 +429,9 @@ make dashboard</code></pre>
 <ol><li>Start the server from the correct checkout using the same study-directory override, if any, that you used previously. Read the startup lines showing its study and backup locations.</li><li>Open the usual local browser address. Check the desired input and output in Connections before playback. Reconnecting a device and selecting a saved session do not by themselves resume playback.</li><li>Before participant work, open the researcher view and confirm storage health, the intended laptop ID and participant session. Keep the machine on reliable power and check available storage.</li><li>At the end, stop audio and robot activities, let pending study records reach Saved locally, and then stop the foreground server with Ctrl+C. Collect the completed backups as described below.</li></ol>
 <h3>Update an existing laptop</h3>
 <pre><code>git status --short
-git pull --ff-only
-bash tools/setup_linux.sh
+git pull --ff-only &amp;&amp; bash tools/setup_linux.sh
 make dashboard-sonify</code></pre>
-<p>Stop the running dashboard before updating. Review git status first: local source edits need to be preserved or reconciled, not discarded. The fast-forward pull refuses an unexpected history merge rather than guessing how to combine it. Rerun setup after pulling to install changed dependencies and rebuild native tools. It preserves the existing usable environment, model, key and local data. A failure during an update is a reason to resolve the reported problem before beginning a participant session.</p>
+<p>Stop the running dashboard before updating. Review git status first: local source edits need to be preserved or reconciled, not discarded. The fast-forward pull refuses an unexpected history merge rather than guessing how to combine it. Rerun setup after pulling to update Python dependencies within the supported versions and rebuild native tools. Whisper is installed automatically if missing. It preserves the existing usable environment, model, key and local data. A failure during an update is a reason to resolve the reported problem before beginning a participant session.</p>
 <p>All six laptops should use the same application revision during a study. A clone or pull receives only committed, pushed files. It does not carry an uncommitted local fix, .env, .venv, generated media or the normal study folder. Record the revision with git rev-parse HEAD when checking a prepared machine.</p>
 <h3>Know what is saved where</h3>
 <table><thead><tr><th scope="col">Material</th><th scope="col">Location and transfer rule</th></tr></thead><tbody>
@@ -539,6 +538,6 @@ make test</code></pre>
 # Optional PDF authoring dependencies and complete rebuild:
 .venv/bin/python -m pip install -r requirements-manual.txt
 .venv/bin/python tools/build_manual.py</code></pre>
-<p>Supporting repository documents: README.md; docs/linux.md; docs/robot_control.md; docs/hardware_acceptance.md; docs/live_streaming.md; docs/movement_drums.md. Provider key permissions and quotas can change; check the current official documentation at https://elevenlabs.io/docs/overview/administration/workspaces/api-keys.</p>
+<p>Supporting repository documents: README.md; docs/reference.md; docs/linux.md; docs/robot_control.md; docs/hardware_acceptance.md; docs/live_streaming.md; docs/movement_drums.md. Provider key permissions and quotas can change; check the current official documentation at https://elevenlabs.io/docs/overview/administration/workspaces/api-keys.</p>
 <p class="back"><a href="#top">Back to contents</a></p></section>
 </main></body></html>

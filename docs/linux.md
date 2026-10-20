@@ -26,11 +26,18 @@ Use your normal GitHub authentication if the repository is private. Open
 to stop. Setup does not start a background or login service.
 
 Setup installs missing system packages (asking for your sudo password when
-needed), creates `.venv`, installs both Python requirements files, builds and
-self-tests the native tools, prepares the Whisper model, and offers a hidden
-API-key prompt. Press Enter to skip the key. Existing keys and local data are
-preserved when rerunning setup. The key is never passed as a shell argument.
+needed), creates or reuses `.venv`, installs or updates the Python runtime
+dependencies, builds and self-tests the native tools, automatically downloads
+Whisper Small if missing, checks that it loads locally, and offers a hidden
+API-key prompt when no key is already configured. Press Enter to skip the key.
+Existing keys and local data are preserved when rerunning setup. The key is never passed as a shell argument.
 No physical MIDI, audio capture or robot commands are used during setup.
+
+Whisper and its Python dependencies are included by default. No separate model
+installation is needed. Existing complete model files are reused. Python packages
+are upgraded within the versions allowed by the requirements files; indirect
+dependencies are upgraded only when required. Setup does not perform a general
+operating-system upgrade.
 
 Useful options:
 
@@ -118,10 +125,42 @@ explicit `var/study-data` directory. Transfer robot calibration only for the
 same physical robot. Browser microphone/MIDI permission is still a first-use
 step on each laptop.
 
-For updates, stop the dashboard, run `git pull`, rerun
-`bash tools/setup_linux.sh`, then start it again. The key, model and study data
-are retained. Repository changes must be committed and pushed before another
-computer can receive them via clone/pull.
+Follow [Update an existing installation](#update-an-existing-installation) on
+each laptop to receive new versions. Repository changes must be committed and
+pushed before another computer can receive them via clone/pull.
+
+## Update an existing installation
+
+Stop playback, let pending study records finish saving, and stop the dashboard
+with **Ctrl+C** in its terminal. Open a terminal in the existing project folder:
+
+```sh
+git pull --ff-only && bash tools/setup_linux.sh
+```
+
+The setup script installs any newly required system packages, updates the Python
+runtime packages and rebuilds the native tools. It reuses `.venv` and the existing
+Whisper model, verifies the model can load, and keeps the saved API key. Recordings,
+generated audio, robot calibration, browser settings and study data are retained.
+There is no need to clone again, delete `.venv`, or download Whisper again. If an
+older installation has no model, setup downloads it automatically.
+
+The `&&` runs setup only if the pull succeeds. If Git reports local source changes
+or divergent history, preserve those changes and resolve the reported problem
+before retrying; do not force-reset the laptop. If setup fails, correct the reported
+problem and rerun it. Do not restart for a session until setup succeeds.
+
+Start the dashboard again, using the same launch options as before, and refresh
+the browser. For the usual browser-audio setup:
+
+```sh
+make dashboard-sonify
+```
+
+If you normally use `make dashboard` for a connected synth or pass a custom
+`--study-dir`, recordings directory or port, retain those settings when restarting.
+Updates require internet access. The script leaves running dashboards alone,
+so stopping the server before updating is a manual step.
 
 ## Run without hardware
 
@@ -134,7 +173,8 @@ recordings, simulated signals and bundled voice demos do not require a synth,
 robot or provider key. Stop an existing dashboard before starting another
 against the same storage directories. Ctrl+C stops a foreground dashboard.
 
-For microphone transcription, download the local model once:
+Setup already prepares microphone transcription. If you deliberately used
+`--skip-model`, download the deferred model with:
 
 ```sh
 .venv/bin/python tools/prepare_rap_transcription.py

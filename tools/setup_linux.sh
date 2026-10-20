@@ -6,9 +6,11 @@ usage() {
     cat <<'EOF'
 Usage: ./tools/setup_linux.sh [options]
 
-Prepare an Ubuntu/Debian laptop for Hydrasynth. Run as your normal user from
-any directory. Internet access is needed for missing packages and the initial
-Whisper small download. Existing .venv, model files, .env and data are retained.
+Install or update Hydrasynth on an Ubuntu/Debian laptop. Run as your normal
+user from any directory. The default installs system and Python dependencies,
+builds native MIDI/audio tools, and downloads and checks Whisper small.
+Internet access is needed to install or update dependencies and for the initial
+model download. Existing .venv, model files, .env and data are retained.
 
 Options:
   --skip-system  Do not run apt or sudo; use already installed build/audio tools.
@@ -20,7 +22,12 @@ PYTHON=/path/to/python3 chooses the Python used to create a new .venv.
 The default is /usr/bin/python3 (Python 3.10 or newer), bypassing asdf shims.
 An existing .venv keeps its own Python. Node.js is not needed to run the app.
 
-For another laptop with system dependencies already installed:
+To update an existing installation, stop the dashboard, then run from its checkout:
+  git pull --ff-only
+  ./tools/setup_linux.sh
+Restart the dashboard when setup completes.
+
+With system dependencies already installed:
   ./tools/setup_linux.sh --skip-system
 For a quick install without local transcription or generation credentials:
   ./tools/setup_linux.sh --skip-model --no-key
@@ -93,8 +100,9 @@ else
     "$setup_python" -m venv .venv
 fi
 
-printf 'Installing Python dependencies.\n'
-"$venv_python" -m pip install -r requirements-robot.txt -r requirements-rap-response.txt
+printf 'Installing or updating Python dependencies.\n'
+"$venv_python" -m pip install --upgrade --upgrade-strategy only-if-needed \
+    -r requirements-robot.txt -r requirements-rap-response.txt
 
 printf 'Building native Linux MIDI and audio tools.\n'
 make all PYTHON="$venv_python"
@@ -127,7 +135,7 @@ if "$configure_key"; then
     "$venv_python" tools/configure_api_key.py
 fi
 
-printf '\nSetup complete. From this checkout, start without connected hardware:\n'
+printf '\nSetup complete. From this checkout, start or restart without connected hardware:\n'
 printf '  .venv/bin/python tools/hydra_dashboard.py --demo\n'
 printf 'Open http://127.0.0.1:8790/#synth-mixer\n'
 printf '\nWhen the synth is connected, start without --demo. Robot serial access,\n'

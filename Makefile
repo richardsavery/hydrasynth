@@ -102,6 +102,7 @@ dashboard-test:
 	$(PYTHON) -B tools/test_elevenlabs_analysis.py
 	$(PYTHON) -B tools/test_elevenlabs_service.py
 	$(PYTHON) -B tools/test_configure_api_key.py
+	$(PYTHON) -B tools/test_setup_linux.py
 	$(PYTHON) -B tools/test_elevenlabs_realtime.py
 	$(PYTHON) -B tools/test_elevenlabs_http.py
 	$(PYTHON) -B tools/test_rap_render.py

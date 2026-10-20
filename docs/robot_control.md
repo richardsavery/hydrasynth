@@ -292,7 +292,7 @@ is discovered by its MIDI name and manufacturer rather than its serial port.
 Browser sessions and presets also remain in the original browser; use their
 **Export** and **Import** controls to transfer them. Music generation requires
 the new machine's own local `.env` configuration, and recorded rap input needs
-the [Whisper setup](../README.md#rap-response).
+the [Whisper setup](reference.md#rap-response).
 
 To inspect attached USB serial identities and the robot's role matches without
 opening them:
