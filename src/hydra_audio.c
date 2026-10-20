@@ -1,6 +1,16 @@
+#define _POSIX_C_SOURCE 200809L
+
+#if defined(__APPLE__)
 #include <AudioToolbox/AudioToolbox.h>
 #include <CoreAudio/CoreAudio.h>
 #include <CoreFoundation/CoreFoundation.h>
+#define AUDIO_BACKEND_NAME "Core Audio"
+#elif defined(__linux__)
+#include <alsa/asoundlib.h>
+#define AUDIO_BACKEND_NAME "ALSA"
+#else
+#error "hydra-audio supports macOS and Linux"
+#endif
 
 #include <ctype.h>
 #include <errno.h>
@@ -26,11 +36,13 @@
 #define DEVICE_UID_CAPACITY 1024
 
 typedef struct {
+#if defined(__APPLE__)
     AudioDeviceID id;
+#endif
     char name[DEVICE_NAME_CAPACITY];
     char uid[DEVICE_UID_CAPACITY];
-    UInt32 input_channels;
-    Float64 nominal_sample_rate;
+    uint32_t input_channels;
+    double nominal_sample_rate;
 } AudioDeviceInfo;
 
 typedef struct {
@@ -43,19 +55,21 @@ typedef struct {
     double peak;
 } MeterStats;
 
+#if defined(__APPLE__)
 typedef struct {
     AudioStreamBasicDescription format;
-    UInt32 selected_channel;
+    uint32_t selected_channel;
     MeterStats stats;
     atomic_bool stop_requested;
     atomic_bool callback_failed;
     _Atomic(OSStatus) callback_status;
 } MeterContext;
+#endif
 
 typedef struct {
     const char *device_query;
     const char *uid;
-    UInt32 channel;
+    uint32_t channel;
     double duration;
     bool json;
 } MeterOptions;
@@ -76,8 +90,13 @@ static void usage(FILE *stream) {
             "an input sample whose absolute value is at least 1.0 (0 dBFS).\n",
             MIN_DURATION_SECONDS,
             MAX_DURATION_SECONDS);
+#if defined(__linux__)
+    fputs("On Linux, --uid also accepts an ALSA capture PCM name such as\n"
+          "hw:CARD=USB,DEV=0, default, or a configured PipeWire/PulseAudio PCM.\n", stream);
+#endif
 }
 
+#if defined(__APPLE__)
 static void format_osstatus(OSStatus status, char *buffer, size_t capacity) {
     uint32_t code = (uint32_t)status;
     char fourcc[5];
@@ -119,7 +138,7 @@ static bool cf_string_property(AudioObjectID object,
         .mElement = kAudioObjectPropertyElementMain,
     };
     CFStringRef value = NULL;
-    UInt32 size = (UInt32)sizeof(value);
+    uint32_t size = (uint32_t)sizeof(value);
     OSStatus status =
         AudioObjectGetPropertyData(object, &address, 0, NULL, &size, &value);
     if (status != noErr || value == NULL) {
@@ -132,13 +151,13 @@ static bool cf_string_property(AudioObjectID object,
     return copied;
 }
 
-static OSStatus input_channel_count(AudioDeviceID device, UInt32 *count_out) {
+static OSStatus input_channel_count(AudioDeviceID device, uint32_t *count_out) {
     AudioObjectPropertyAddress address = {
         .mSelector = kAudioDevicePropertyStreamConfiguration,
         .mScope = kAudioDevicePropertyScopeInput,
         .mElement = kAudioObjectPropertyElementMain,
     };
-    UInt32 size = 0;
+    uint32_t size = 0;
     OSStatus status =
         AudioObjectGetPropertyDataSize(device, &address, 0, NULL, &size);
     if (status != noErr) {
@@ -157,13 +176,13 @@ static OSStatus input_channel_count(AudioDeviceID device, UInt32 *count_out) {
     status = AudioObjectGetPropertyData(device, &address, 0, NULL, &size, buffers);
     if (status == noErr) {
         uint64_t total = 0;
-        for (UInt32 index = 0; index < buffers->mNumberBuffers; ++index) {
+        for (uint32_t index = 0; index < buffers->mNumberBuffers; ++index) {
             total += buffers->mBuffers[index].mNumberChannels;
         }
         if (total > UINT32_MAX) {
             status = (OSStatus)kAudio_ParamError;
         } else {
-            *count_out = (UInt32)total;
+            *count_out = (uint32_t)total;
         }
     }
 
@@ -171,15 +190,17 @@ static OSStatus input_channel_count(AudioDeviceID device, UInt32 *count_out) {
     return status;
 }
 
-static OSStatus nominal_sample_rate(AudioDeviceID device, Float64 *rate_out) {
+static OSStatus nominal_sample_rate(AudioDeviceID device, double *rate_out) {
     AudioObjectPropertyAddress address = {
         .mSelector = kAudioDevicePropertyNominalSampleRate,
         .mScope = kAudioObjectPropertyScopeGlobal,
         .mElement = kAudioObjectPropertyElementMain,
     };
-    UInt32 size = (UInt32)sizeof(*rate_out);
+    uint32_t size = (uint32_t)sizeof(*rate_out);
     return AudioObjectGetPropertyData(device, &address, 0, NULL, &size, rate_out);
 }
+
+#endif
 
 static int compare_devices(const void *left_value, const void *right_value) {
     const AudioDeviceInfo *left = left_value;
@@ -191,13 +212,14 @@ static int compare_devices(const void *left_value, const void *right_value) {
     return strcmp(left->uid, right->uid);
 }
 
+#if defined(__APPLE__)
 static int load_input_devices(AudioDeviceInfo **devices_out, size_t *count_out) {
     AudioObjectPropertyAddress address = {
         .mSelector = kAudioHardwarePropertyDevices,
         .mScope = kAudioObjectPropertyScopeGlobal,
         .mElement = kAudioObjectPropertyElementMain,
     };
-    UInt32 size = 0;
+    uint32_t size = 0;
     OSStatus status = AudioObjectGetPropertyDataSize(
         kAudioObjectSystemObject, &address, 0, NULL, &size);
     if (status != noErr) {
@@ -236,7 +258,7 @@ static int load_input_devices(AudioDeviceInfo **devices_out, size_t *count_out) 
 
     size_t input_count = 0;
     for (size_t index = 0; index < raw_count; ++index) {
-        UInt32 channels = 0;
+        uint32_t channels = 0;
         status = input_channel_count(ids[index], &channels);
         if (status != noErr || channels == 0) {
             continue;
@@ -273,6 +295,10 @@ static int load_input_devices(AudioDeviceInfo **devices_out, size_t *count_out) 
     *count_out = input_count;
     return 0;
 }
+
+#else
+static int load_input_devices(AudioDeviceInfo **devices_out, size_t *count_out);
+#endif
 
 static void write_json_string(FILE *stream, const char *value) {
     fputc('"', stream);
@@ -337,9 +363,9 @@ static int run_list(bool json) {
         }
         fputs("]}\n", stdout);
     } else if (count == 0) {
-        puts("No Core Audio input devices found.");
+        puts("No " AUDIO_BACKEND_NAME " input devices found.");
     } else {
-        printf("Core Audio input devices (%zu):\n", count);
+        printf(AUDIO_BACKEND_NAME " input devices (%zu):\n", count);
         for (size_t index = 0; index < count; ++index) {
             printf("%zu. %s\n"
                    "   UID: %s\n"
@@ -449,7 +475,10 @@ static const AudioDeviceInfo *select_device(const AudioDeviceInfo *devices,
     return match;
 }
 
-static bool parse_channel(const char *text, UInt32 *channel_out) {
+static bool parse_channel(const char *text, uint32_t *channel_out) {
+    if (text[0] == '-') {
+        return false;
+    }
     errno = 0;
     char *end = NULL;
     unsigned long value = strtoul(text, &end, 10);
@@ -457,7 +486,7 @@ static bool parse_channel(const char *text, UInt32 *channel_out) {
         value > UINT32_MAX) {
         return false;
     }
-    *channel_out = (UInt32)value;
+    *channel_out = (uint32_t)value;
     return true;
 }
 
@@ -503,6 +532,10 @@ static int parse_meter_options(int argc,
                 return 2;
             }
             options.uid = argv[index];
+            if (options.uid[0] == '\0') {
+                fprintf(stderr, "hydra-audio: --uid cannot be empty\n");
+                return 2;
+            }
         } else if (strcmp(argv[index], "--channel") == 0) {
             if (++index >= argc ||
                 !parse_channel(argv[index], &options.channel)) {
@@ -544,11 +577,11 @@ static void reset_stats(MeterStats *stats) {
 }
 
 static void accumulate_interleaved_float(MeterStats *stats,
-                                         const Float32 *samples,
-                                         UInt32 frame_count,
-                                         UInt32 channel_count,
-                                         UInt32 selected_channel) {
-    for (UInt32 frame = 0; frame < frame_count; ++frame) {
+                                         const float *samples,
+                                         uint32_t frame_count,
+                                         uint32_t channel_count,
+                                         uint32_t selected_channel) {
+    for (uint32_t frame = 0; frame < frame_count; ++frame) {
         double sample = samples[(size_t)frame * channel_count + selected_channel];
         ++stats->frame_count;
         if (!isfinite(sample)) {
@@ -590,18 +623,19 @@ static double amplitude_dbfs(double amplitude) {
     return 20.0 * log10(amplitude);
 }
 
+#if defined(__APPLE__)
 static void audio_input_callback(void *user_data,
                                  AudioQueueRef queue,
                                  AudioQueueBufferRef buffer,
                                  const AudioTimeStamp *start_time,
-                                 UInt32 packet_count,
+                                 uint32_t packet_count,
                                  const AudioStreamPacketDescription *packet_descriptions) {
     (void)start_time;
     (void)packet_count;
     (void)packet_descriptions;
 
     MeterContext *context = user_data;
-    UInt32 bytes_per_frame = context->format.mBytesPerFrame;
+    uint32_t bytes_per_frame = context->format.mBytesPerFrame;
     if (bytes_per_frame == 0 ||
         buffer->mAudioDataByteSize % bytes_per_frame != 0) {
         atomic_store_explicit(&context->callback_status,
@@ -612,9 +646,9 @@ static void audio_input_callback(void *user_data,
         return;
     }
 
-    UInt32 frames = buffer->mAudioDataByteSize / bytes_per_frame;
+    uint32_t frames = buffer->mAudioDataByteSize / bytes_per_frame;
     accumulate_interleaved_float(&context->stats,
-                                 (const Float32 *)buffer->mAudioData,
+                                 (const float *)buffer->mAudioData,
                                  frames,
                                  context->format.mChannelsPerFrame,
                                  context->selected_channel);
@@ -632,6 +666,8 @@ static void audio_input_callback(void *user_data,
         }
     }
 }
+
+#endif
 
 static void signal_handler(int signal_number) {
     STOP_SIGNAL = signal_number;
@@ -670,8 +706,9 @@ static void restore_signal_handlers(const struct sigaction *old_interrupt,
     (void)sigaction(SIGTERM, old_terminate, NULL);
 }
 
+#if defined(__APPLE__)
 static OSStatus configure_input_queue(const AudioDeviceInfo *device,
-                                      UInt32 selected_channel,
+                                      uint32_t selected_channel,
                                       MeterContext *context,
                                       AudioQueueRef *queue_out) {
     AudioStreamBasicDescription format;
@@ -682,9 +719,9 @@ static OSStatus configure_input_queue(const AudioDeviceInfo *device,
     format.mFormatFlags = kAudioFormatFlagsNativeFloatPacked;
     format.mFramesPerPacket = 1;
     format.mChannelsPerFrame = device->input_channels;
-    format.mBitsPerChannel = 8U * (UInt32)sizeof(Float32);
+    format.mBitsPerChannel = 8U * (uint32_t)sizeof(float);
     format.mBytesPerFrame =
-        (UInt32)sizeof(Float32) * format.mChannelsPerFrame;
+        (uint32_t)sizeof(float) * format.mChannelsPerFrame;
     format.mBytesPerPacket = format.mBytesPerFrame;
 
     context->format = format;
@@ -713,7 +750,7 @@ static OSStatus configure_input_queue(const AudioDeviceInfo *device,
         return (OSStatus)kAudio_ParamError;
     }
     status = AudioQueueSetProperty(
-        queue, kAudioQueueProperty_CurrentDevice, &uid, (UInt32)sizeof(uid));
+        queue, kAudioQueueProperty_CurrentDevice, &uid, (uint32_t)sizeof(uid));
     CFRelease(uid);
     if (status != noErr) {
         AudioQueueDispose(queue, true);
@@ -737,7 +774,7 @@ static OSStatus configure_input_queue(const AudioDeviceInfo *device,
 
     for (int index = 0; index < AUDIO_QUEUE_BUFFER_COUNT; ++index) {
         AudioQueueBufferRef buffer = NULL;
-        status = AudioQueueAllocateBuffer(queue, (UInt32)buffer_bytes, &buffer);
+        status = AudioQueueAllocateBuffer(queue, (uint32_t)buffer_bytes, &buffer);
         if (status != noErr) {
             AudioQueueDispose(queue, true);
             return status;
@@ -752,6 +789,8 @@ static OSStatus configure_input_queue(const AudioDeviceInfo *device,
     *queue_out = queue;
     return noErr;
 }
+
+#endif
 
 static void print_dbfs_json_value(double amplitude) {
     double value = amplitude_dbfs(amplitude);
@@ -839,6 +878,7 @@ static void report_meter(const AudioDeviceInfo *device,
     }
 }
 
+#if defined(__APPLE__)
 static int run_meter(const MeterOptions *options) {
     AudioDeviceInfo *devices = NULL;
     size_t count = 0;
@@ -975,8 +1015,17 @@ static int run_meter(const MeterOptions *options) {
                                      : (received_signal == SIGTERM ? 143 : 0);
 }
 
+#else
+#include "hydra_audio_alsa.inc"
+#endif
+
 static int run_self_test(void) {
-    const Float32 samples[] = {
+#if defined(__linux__)
+    if (alsa_format_self_test() != 0) {
+        return 1;
+    }
+#endif
+    const float samples[] = {
         0.0f, -0.25f,
         0.5f, 0.75f,
         -0.5f, -0.75f,

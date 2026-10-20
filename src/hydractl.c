@@ -1,10 +1,14 @@
-#include <CoreFoundation/CoreFoundation.h>
-#include <CoreMIDI/CoreMIDI.h>
+#if defined(__linux__)
+#define _POSIX_C_SOURCE 200809L
+#endif
+#include "hydra_midi.h"
 
 #include <ctype.h>
 #include <errno.h>
 #include <math.h>
 #include <pthread.h>
+#include <poll.h>
+#include <unistd.h>
 #include <signal.h>
 #include <stdarg.h>
 #include <stdatomic.h>
@@ -141,11 +145,9 @@ typedef struct {
 } CanceledJob;
 
 typedef struct {
-    MIDIClientRef client;
-    MIDIPortRef output_port;
-    MIDIPortRef input_port;
-    MIDIEndpointRef destination;
-    MIDIEndpointRef source;
+    HydraMIDI *output_port;
+    HydraMIDIEndpoint destination;
+    HydraMIDIEndpoint source;
     int default_channel;
     double takeover_seconds;
     double started_at;
@@ -190,6 +192,7 @@ typedef struct {
     atomic_uint incoming_dropped;
     atomic_bool input_consumer_running;
     atomic_bool protocol_ready;
+    atomic_bool midi_disconnected;
     pthread_t input_consumer_thread;
 } ServerContext;
 
@@ -258,7 +261,7 @@ static const RandomPatch RANDOM_PATCHES[] = {
 };
 
 static const char *USAGE =
-    "hydractl - control an ASM Hydrasynth over macOS CoreMIDI\n"
+    "hydractl - control an ASM Hydrasynth over native MIDI (Linux ALSA / macOS CoreMIDI)\n"
     "\n"
     "USAGE\n"
     "  hydractl list\n"
@@ -276,7 +279,8 @@ static const char *USAGE =
     "  hydractl program 0...127\n"
     "  hydractl panic\n"
     "\n"
-    "All sending commands accept --device TEXT and --channel 1...16.\n";
+    "All sending commands accept --device TEXT and --channel 1...16.\n"
+    "On Linux, --device also accepts the ALSA client:port from list.\n";
 
 static volatile sig_atomic_t SERVER_STOP_REQUESTED = 0;
 
@@ -376,21 +380,6 @@ static int validate_14bit(const char *label, int value) {
     return 0;
 }
 
-static void destination_name(MIDIEndpointRef endpoint, char *buffer, size_t size) {
-    CFStringRef name = NULL;
-    OSStatus status = MIDIObjectGetStringProperty(
-        endpoint, kMIDIPropertyDisplayName, &name
-    );
-    if (status == noErr && name != NULL) {
-        if (CFStringGetCString(name, buffer, (CFIndex)size, kCFStringEncodingUTF8)) {
-            CFRelease(name);
-            return;
-        }
-        CFRelease(name);
-    }
-    snprintf(buffer, size, "MIDI destination %u", endpoint);
-}
-
 static bool contains_case_insensitive(const char *text, const char *query) {
     size_t query_length = strlen(query);
     if (query_length == 0) {
@@ -413,105 +402,106 @@ static bool contains_case_insensitive(const char *text, const char *query) {
     return false;
 }
 
-static int create_midi_client(MIDIClientRef *client) {
-    *client = 0;
-    OSStatus status = MIDIClientCreate(CFSTR("HydraControl"), NULL, NULL, client);
-    if (status != noErr) {
-        fprintf(
-            stderr, "error: connecting to CoreMIDI failed (status %d)\n", status
-        );
-        return -1;
-    }
-    return 0;
-}
+#define MAX_MIDI_ENDPOINTS 4096
 
 static int list_destinations(void) {
-    MIDIClientRef client;
-    if (create_midi_client(&client) != 0) {
-        return 1;
-    }
-    ItemCount destination_count = MIDIGetNumberOfDestinations();
-    puts("Outputs (commands sent to the synth):");
-    if (destination_count == 0) {
-        puts("  none");
-    }
-    for (ItemCount index = 0; index < destination_count; index++) {
-        char name[MAX_NAME];
-        destination_name(MIDIGetDestination(index), name, sizeof(name));
-        printf("  [%lu] %s\n", (unsigned long)index, name);
-    }
-
-    ItemCount source_count = MIDIGetNumberOfSources();
-    puts("Inputs (keyboard and panel changes from the synth):");
-    if (source_count == 0) {
-        puts("  none");
-    }
-    for (ItemCount index = 0; index < source_count; index++) {
-        char name[MAX_NAME];
-        destination_name(MIDIGetSource(index), name, sizeof(name));
-        printf("  [%lu] %s\n", (unsigned long)index, name);
-    }
-    MIDIClientDispose(client);
-    return 0;
-}
-
-static MIDIEndpointRef find_destination(const char *query) {
-    ItemCount count = MIDIGetNumberOfDestinations();
-    for (ItemCount index = 0; index < count; index++) {
-        MIDIEndpointRef endpoint = MIDIGetDestination(index);
-        char name[MAX_NAME];
-        destination_name(endpoint, name, sizeof(name));
-        if (
-            (query != NULL && contains_case_insensitive(name, query)) ||
-            (query == NULL && contains_case_insensitive(name, "hydra"))
-        ) {
-            return endpoint;
+    HydraMIDI *midi = NULL;
+    if (hydra_midi_open(&midi) != 0) return 1;
+    HydraMIDIEndpointInfo *entries = calloc(MAX_MIDI_ENDPOINTS, sizeof(*entries));
+    if (!entries) { hydra_midi_close(midi); return 1; }
+    int result = 0;
+    for (int input = 0; input < 2; input++) {
+        int count = hydra_midi_enumerate(midi, input != 0, entries, MAX_MIDI_ENDPOINTS);
+        if (count < 0) { result = 1; break; }
+        puts(input ? "Inputs (keyboard and panel changes from the synth):" :
+                     "Outputs (commands sent to the synth):");
+        if (!count) puts("  none");
+        for (int index = 0; index < count; index++) {
+            printf("  [%d] %s", index, entries[index].name);
+            if (entries[index].address[0]) printf(" (%s)", entries[index].address);
+            putchar('\n');
         }
     }
-    return 0;
+    free(entries);
+    hydra_midi_close(midi);
+    return result;
 }
 
-static MIDIEndpointRef find_source(const char *query) {
-    ItemCount count = MIDIGetNumberOfSources();
-    for (ItemCount index = 0; index < count; index++) {
-        MIDIEndpointRef endpoint = MIDIGetSource(index);
-        char name[MAX_NAME];
-        destination_name(endpoint, name, sizeof(name));
-        if (
-            (query != NULL && contains_case_insensitive(name, query)) ||
-            (query == NULL && contains_case_insensitive(name, "hydra"))
-        ) {
-            return endpoint;
+static HydraMIDIEndpoint find_destination(HydraMIDI *midi, const char *query) {
+    HydraMIDIEndpointInfo *entries = calloc(MAX_MIDI_ENDPOINTS, sizeof(*entries));
+    if (!entries) return 0;
+    int count = hydra_midi_enumerate(midi, false, entries, MAX_MIDI_ENDPOINTS);
+    HydraMIDIEndpoint result = 0;
+    /* ALSA addresses are unique. Full names may still be duplicated. */
+    if (query) {
+        int name_matches = 0;
+        for (int i = 0; i < count; i++) {
+            if (entries[i].address[0] && !strcmp(query, entries[i].address)) {
+                result = entries[i].id;
+                goto done;
+            }
+            if (!strcmp(query, entries[i].name)) {
+                result = entries[i].id;
+                name_matches++;
+            }
+        }
+        if (name_matches > 1) {
+            fputs("error: MIDI device name is ambiguous; use the ALSA address\n", stderr);
+            result = 0;
+            goto done;
+        }
+        if (name_matches == 1) goto done;
+    }
+    for (int i = 0; i < count; i++) {
+        if (!contains_case_insensitive(entries[i].name, query ? query : "hydra")) continue;
+        if (result) {
+            fputs("error: MIDI device name is ambiguous; use the full name or ALSA address\n", stderr);
+            result = 0;
+            break;
+        }
+        result = entries[i].id;
+    }
+done:
+    free(entries);
+    return result;
+}
+
+static HydraMIDIEndpoint find_source(HydraMIDI *midi, HydraMIDIEndpoint destination) {
+    HydraMIDIEndpointInfo *entries = calloc(MAX_MIDI_ENDPOINTS, sizeof(*entries));
+    if (!entries) return 0;
+    int count = hydra_midi_enumerate(midi, true, entries, MAX_MIDI_ENDPOINTS);
+    HydraMIDIEndpoint result = 0, matching_name = 0;
+    int device_matches = 0, name_matches = 0;
+    char output_name[MAX_NAME];
+    hydra_midi_endpoint_name(midi, destination, output_name, sizeof(output_name));
+    for (int i = 0; i < count; i++) {
+        /* ALSA duplex ports share the exact endpoint address. */
+        if (entries[i].id == destination) {
+            result = entries[i].id;
+            goto done;
+        }
+        if (!hydra_midi_same_device(entries[i].id, destination)) continue;
+        result = entries[i].id;
+        device_matches++;
+        if (!strcmp(entries[i].name, output_name)) {
+            matching_name = entries[i].id;
+            name_matches++;
         }
     }
-    return 0;
+    if (name_matches == 1) result = matching_name;
+    else if (name_matches > 1 || device_matches != 1) result = 0;
+done:
+    free(entries);
+    return result;
 }
 
 static int send_bytes(
-    MIDIPortRef port,
-    MIDIEndpointRef destination,
+    HydraMIDI *port,
+    HydraMIDIEndpoint destination,
     const uint8_t *message,
     size_t length
 ) {
-    union {
-        MIDIPacketList alignment;
-        uint8_t bytes[1024];
-    } storage;
-    MIDIPacketList *list = (MIDIPacketList *)storage.bytes;
-    MIDIPacket *packet = MIDIPacketListInit(list);
-    packet = MIDIPacketListAdd(
-        list, sizeof(storage.bytes), packet, 0, length, message
-    );
-    if (packet == NULL) {
-        fputs("error: MIDI packet is too large\n", stderr);
-        return -1;
-    }
-    OSStatus status = MIDISend(port, destination, list);
-    if (status != noErr) {
-        fprintf(stderr, "error: sending MIDI failed (status %d)\n", status);
-        return -1;
-    }
-    return 0;
+    return hydra_midi_send(port, destination, message, length);
 }
 
 static int encode_three(
@@ -536,8 +526,8 @@ static int encode_three(
 }
 
 static int send_three(
-    MIDIPortRef port,
-    MIDIEndpointRef destination,
+    HydraMIDI * port,
+    HydraMIDIEndpoint destination,
     int base,
     int data1,
     int data2,
@@ -551,8 +541,8 @@ static int send_three(
 }
 
 static int send_cc(
-    MIDIPortRef port,
-    MIDIEndpointRef destination,
+    HydraMIDI * port,
+    HydraMIDIEndpoint destination,
     int cc,
     int value,
     int channel
@@ -599,8 +589,8 @@ static int encode_nrpn(
 }
 
 static int send_nrpn(
-    MIDIPortRef port,
-    MIDIEndpointRef destination,
+    HydraMIDI * port,
+    HydraMIDIEndpoint destination,
     int parameter,
     int value,
     int channel
@@ -768,8 +758,8 @@ static int encode_program(
 }
 
 static int send_program(
-    MIDIPortRef port,
-    MIDIEndpointRef destination,
+    HydraMIDI * port,
+    HydraMIDIEndpoint destination,
     int program,
     int channel
 ) {
@@ -2016,6 +2006,32 @@ static struct timespec relative_timespec(double seconds) {
     return delay;
 }
 
+static int init_scheduler_condition(pthread_cond_t *condition) {
+#if defined(__linux__)
+    pthread_condattr_t attr;
+    int status = pthread_condattr_init(&attr);
+    if (status) return status;
+    status = pthread_condattr_setclock(&attr, CLOCK_MONOTONIC);
+    if (!status) status = pthread_cond_init(condition, &attr);
+    pthread_condattr_destroy(&attr);
+    return status;
+#else
+    return pthread_cond_init(condition, NULL);
+#endif
+}
+
+static void scheduler_wait_until(ServerContext *context, double deadline) {
+#if defined(__APPLE__)
+    struct timespec timeout = relative_timespec(deadline - monotonic_seconds());
+    (void)pthread_cond_timedwait_relative_np(&context->scheduler_condition,
+                                            &context->scheduler_lock, &timeout);
+#else
+    struct timespec timeout = relative_timespec(deadline);
+    (void)pthread_cond_timedwait(&context->scheduler_condition,
+                                &context->scheduler_lock, &timeout);
+#endif
+}
+
 static void *server_scheduler(void *opaque_context) {
     ServerContext *context = opaque_context;
     while (true) {
@@ -2047,12 +2063,7 @@ static void *server_scheduler(void *opaque_context) {
             }
             double remaining = earliest_time - monotonic_seconds();
             if (remaining > 0) {
-                struct timespec delay = relative_timespec(remaining);
-                (void)pthread_cond_timedwait_relative_np(
-                    &context->scheduler_condition,
-                    &context->scheduler_lock,
-                    &delay
-                );
+                scheduler_wait_until(context, earliest_time);
                 continue;
             }
             event = context->scheduled_events[earliest_index];
@@ -3132,21 +3143,17 @@ static void *server_input_consumer(void *opaque_context) {
     return NULL;
 }
 
-static void server_midi_read(
-    const MIDIPacketList *packet_list,
-    void *read_context,
-    void *source_context
-) {
-    (void)source_context;
+static void server_midi_read(void *read_context, const uint8_t *bytes, size_t length) {
     ServerContext *context = read_context;
-    const MIDIPacket *packet = &packet_list->packet[0];
-    for (UInt32 packet_index = 0; packet_index < packet_list->numPackets;
-         packet_index++) {
-        for (UInt16 byte_index = 0; byte_index < packet->length; byte_index++) {
-            server_receive_byte(context, packet->data[byte_index]);
-        }
-        packet = MIDIPacketNext(packet);
-    }
+    for (size_t i = 0; i < length; i++) server_receive_byte(context, bytes[i]);
+}
+
+static void server_midi_disconnected(void *read_context) {
+    ServerContext *context = read_context;
+    /* This can run inside a send. Do not acquire server locks here. The
+     * transport already rejects subsequent sends; the input loop notices this
+     * flag even if stdin remains open without another request. */
+    atomic_store_explicit(&context->midi_disconnected, true, memory_order_release);
 }
 
 static void server_signal_handler(int signal_number) {
@@ -3257,7 +3264,7 @@ static int server_handle_line(
             "\"notification_dropped\":%llu,\"event_sequence\":%llu,"
             "\"channel\":%d,\"takeover_seconds\":%.3f,"
             "\"incoming_dropped\":%u,\"server_time_ms\":%.3f",
-            context->input_port != 0 && context->source != 0 ? "true" : "false",
+            context->source != 0 ? "true" : "false",
             context->scheduler_available ? "true" : "false",
             (unsigned long)queued_events, (unsigned long)active_jobs,
             event_writer ? "true" : "false",
@@ -3705,15 +3712,63 @@ static int server_handle_line(
     return 0;
 }
 
+typedef struct {
+    char bytes[4096];
+    size_t used;
+    size_t offset;
+    bool eof;
+} ServerLineReader;
+
+/* Returns 1 for a line, 2 for an oversized line, 0 for EOF, -1 for stop,
+ * 3 for an embedded NUL, -2 for an I/O error. Polling keeps unplug/signals responsive with idle stdin
+ * and with a sender that writes only part of a JSON line. */
+static int server_read_line(ServerContext *context, ServerLineReader *reader,
+                            char *line, size_t capacity) {
+    size_t length = 0;
+    bool oversized = false;
+    bool invalid = false;
+    while (!SERVER_STOP_REQUESTED &&
+           !atomic_load_explicit(&context->midi_disconnected, memory_order_acquire)) {
+        if (reader->offset == reader->used) {
+            if (reader->eof) {
+                line[length] = '\0';
+                return oversized || length > MAX_JSON_LINE ? 2 : invalid ? 3 : length ? 1 : 0;
+            }
+            struct pollfd input = { .fd = STDIN_FILENO, .events = POLLIN };
+            int ready = poll(&input, 1, 100);
+            if (ready < 0 && errno == EINTR) continue;
+            if (ready < 0 || (ready > 0 && (input.revents & (POLLERR | POLLNVAL)))) {
+                fputs("error: reading MIDI server input failed\n", stderr);
+                return -2;
+            }
+            if (!ready) continue;
+            ssize_t count = read(STDIN_FILENO, reader->bytes, sizeof(reader->bytes));
+            if (count < 0 && (errno == EINTR || errno == EAGAIN)) continue;
+            if (count < 0) { perror("error: reading MIDI server input"); return -2; }
+            reader->eof = count == 0;
+            reader->used = (size_t)count;
+            reader->offset = 0;
+            continue;
+        }
+        char byte = reader->bytes[reader->offset++];
+        if (byte == '\0') invalid = true;
+        if (length + 1 < capacity && !oversized) line[length++] = byte;
+        else oversized = true;
+        if (byte == '\n') {
+            line[length] = '\0';
+            return oversized ? 2 : invalid ? 3 : 1;
+        }
+    }
+    return -1;
+}
+
 static int run_server(
     const Options *options,
-    MIDIClientRef client,
-    MIDIPortRef output_port,
-    MIDIEndpointRef destination
+    HydraMIDI *output_port,
+    HydraMIDIEndpoint destination
 ) {
     ServerContext context;
     memset(&context, 0, sizeof(context));
-    context.client = client;
     context.output_port = output_port;
     context.destination = destination;
     context.default_channel = options->channel;
@@ -3727,7 +3782,14 @@ static int run_server(
     pthread_mutex_init(&context.state_lock, NULL);
     pthread_mutex_init(&context.midi_lock, NULL);
     pthread_mutex_init(&context.scheduler_lock, NULL);
-    pthread_cond_init(&context.scheduler_condition, NULL);
+    if (init_scheduler_condition(&context.scheduler_condition) != 0) {
+        fputs("error: creating monotonic scheduler condition failed\n", stderr);
+        pthread_mutex_destroy(&context.scheduler_lock);
+        pthread_mutex_destroy(&context.midi_lock);
+        pthread_mutex_destroy(&context.state_lock);
+        pthread_mutex_destroy(&context.output_lock);
+        return 1;
+    }
     pthread_mutex_init(&context.notification_lock, NULL);
     pthread_cond_init(&context.notification_condition, NULL);
     server_reset_nrpn_locked(&context);
@@ -3737,6 +3799,7 @@ static int run_server(
     atomic_init(&context.incoming_dropped, 0);
     atomic_init(&context.input_consumer_running, false);
     atomic_init(&context.protocol_ready, false);
+    atomic_init(&context.midi_disconnected, false);
 
     struct sigaction action;
     struct sigaction old_interrupt;
@@ -3756,67 +3819,31 @@ static int run_server(
 
     char destination_raw[MAX_NAME];
     char destination_json[MAX_NAME * 2];
-    destination_name(destination, destination_raw, sizeof(destination_raw));
+    hydra_midi_endpoint_name(output_port, destination, destination_raw, sizeof(destination_raw));
     json_escape(destination_raw, destination_json, sizeof(destination_json));
 
     bool consumer_started = false;
     if (options->monitor_input) {
-        context.source = find_source(options->device);
-        if (context.source != 0) {
-            OSStatus status = MIDIInputPortCreate(
-                client, CFSTR("HydraControl Input"), server_midi_read,
-                &context, &context.input_port
-            );
-            if (status == noErr) {
-                status = MIDIPortConnectSource(
-                    context.input_port, context.source, NULL
-                );
-            }
-            if (status == noErr) {
-                atomic_store_explicit(
-                    &context.input_consumer_running, true,
-                    memory_order_release
-                );
-                if (
-                    pthread_create(
-                        &context.input_consumer_thread, NULL,
-                        server_input_consumer, &context
-                    ) == 0
-                ) {
-                    consumer_started = true;
-                } else {
-                    status = -1;
-                    atomic_store_explicit(
-                        &context.input_consumer_running, false,
-                        memory_order_release
-                    );
-                }
-            }
-            if (status != noErr) {
-                fprintf(
-                    stderr,
-                    "warning: Hydrasynth input monitoring unavailable "
-                    "(status %d)\n",
-                    status
-                );
-                if (context.input_port != 0 && context.source != 0) {
-                    MIDIPortDisconnectSource(
-                        context.input_port, context.source
-                    );
-                }
-                if (context.input_port != 0) {
-                    MIDIPortDispose(context.input_port);
-                    context.input_port = 0;
-                }
+        context.source = find_source(output_port, destination);
+        if (context.source) {
+            atomic_store_explicit(&context.input_consumer_running, true, memory_order_release);
+            if (pthread_create(&context.input_consumer_thread, NULL,
+                               server_input_consumer, &context) == 0) {
+                consumer_started = true;
+            } else {
+                atomic_store(&context.input_consumer_running, false);
                 context.source = 0;
+                fputs("warning: Hydrasynth input consumer unavailable; continuing output-only\n", stderr);
             }
         } else {
-            fputs(
-                "warning: no matching Hydrasynth MIDI input source; "
-                "continuing output-only\n",
-                stderr
-            );
+            fputs("warning: no matching Hydrasynth MIDI input source; continuing output-only\n", stderr);
         }
+    }
+    /* Destination monitoring is required even when --no-input is selected. */
+    if (hydra_midi_start_monitor(output_port, context.source, server_midi_read,
+                                 server_midi_disconnected, &context) != 0) {
+        fputs("error: native MIDI disconnect monitoring unavailable\n", stderr);
+        atomic_store(&context.midi_disconnected, true);
     }
 
     if (!server_start_notification_writer(&context)) {
@@ -3835,12 +3862,14 @@ static int run_server(
     char source_json[MAX_NAME * 2];
     if (context.source != 0) {
         char source_raw[MAX_NAME];
-        destination_name(context.source, source_raw, sizeof(source_raw));
+        hydra_midi_endpoint_name(output_port, context.source, source_raw, sizeof(source_raw));
         json_escape(source_raw, source_json, sizeof(source_json));
     } else {
         source_json[0] = '\0';
     }
-    if (context.source != 0) {
+    if (atomic_load(&context.midi_disconnected)) {
+        fputs("error: selected MIDI device disconnected during startup\n", stderr);
+    } else if (context.source != 0) {
         server_emit(
             &context,
             "{\"v\":1,\"type\":\"ready\",\"connected\":true,"
@@ -3876,45 +3905,42 @@ static int run_server(
     int result = 0;
     bool shutdown_requested = false;
     char line[MAX_JSON_LINE + 2];
-    while (!SERVER_STOP_REQUESTED && !shutdown_requested) {
-        errno = 0;
-        if (fgets(line, sizeof(line), stdin) == NULL) {
-            if (errno == EINTR) {
-                clearerr(stdin);
-                continue;
-            }
+    ServerLineReader reader = {0};
+    while (!SERVER_STOP_REQUESTED && !shutdown_requested &&
+           !atomic_load_explicit(&context.midi_disconnected, memory_order_acquire)) {
+        int read_status = server_read_line(&context, &reader, line, sizeof(line));
+        if (read_status <= 0) {
+            if (read_status == -2) result = 1;
             break;
         }
+        if (read_status == 2) {
+            server_error(&context, "null", "line_too_long",
+                         "request exceeds the 16384-byte limit");
+            continue;
+        }
+        if (read_status == 3) {
+            server_error(&context, "null", "invalid_json", "request contains a NUL byte");
+            continue;
+        }
         size_t length = strlen(line);
-        bool complete = length > 0 && line[length - 1] == '\n';
-        if (!complete && !feof(stdin)) {
-            int character;
-            while ((character = fgetc(stdin)) != '\n' && character != EOF) {
-            }
-            server_error(
-                &context, "null", "line_too_long",
-                "request exceeds the 16384-byte limit"
-            );
-            continue;
-        }
-        while (
-            length > 0 &&
-            (line[length - 1] == '\n' || line[length - 1] == '\r')
-        ) {
+        while (length > 0 && (line[length - 1] == '\n' || line[length - 1] == '\r'))
             line[--length] = '\0';
-        }
         const char *trimmed = skip_json_space(line);
-        if (*trimmed == '\0') {
-            continue;
-        }
-        (void)server_handle_line(
-            &context, trimmed, &shutdown_requested
-        );
+        if (*trimmed) (void)server_handle_line(&context, trimmed, &shutdown_requested);
+    }
+    bool disconnected = atomic_load_explicit(&context.midi_disconnected, memory_order_acquire);
+    if (disconnected) {
+        result = 1;
+        server_emit(&context,
+            "{\"v\":1,\"type\":\"event\",\"event\":\"disconnected\","
+            "\"reason\":\"midi_disconnected\",\"server_time_ms\":%.3f}",
+            (monotonic_seconds() - context.started_at) * 1000.0);
     }
 
     (void)server_stop_scheduler(&context, true, "shutdown");
 
-    if (server_panic(&context, NULL) != 0) {
+    bool panic_ok = server_panic(&context, NULL) == 0;
+    if (!panic_ok) {
         fputs(
             "warning: one or more shutdown panic messages failed\n",
             stderr
@@ -3923,13 +3949,7 @@ static int run_server(
     }
     sleep_seconds(0.05);
 
-    if (context.input_port != 0 && context.source != 0) {
-        MIDIPortDisconnectSource(context.input_port, context.source);
-    }
-    if (context.input_port != 0) {
-        MIDIPortDispose(context.input_port);
-        context.input_port = 0;
-    }
+    hydra_midi_stop_monitor(output_port);
     if (consumer_started) {
         atomic_store_explicit(
             &context.input_consumer_running, false, memory_order_release
@@ -3941,9 +3961,9 @@ static int run_server(
         &context,
         "{\"v\":1,\"type\":\"event\",\"event\":\"stopping\","
         "\"reason\":\"%s\",\"panic_ok\":%s,\"server_time_ms\":%.3f}",
-        shutdown_requested ? "request" :
+        disconnected ? "midi_disconnected" : shutdown_requested ? "request" :
             (SERVER_STOP_REQUESTED ? "signal" : "eof"),
-        result == 0 ? "true" : "false",
+        panic_ok ? "true" : "false",
         (monotonic_seconds() - context.started_at) * 1000.0
     );
     sigaction(SIGINT, &old_interrupt, NULL);
@@ -4251,8 +4271,8 @@ static int self_test(void) {
 static int run_command(
     const char *command,
     const Options *options,
-    MIDIPortRef port,
-    MIDIEndpointRef destination
+    HydraMIDI * port,
+    HydraMIDIEndpoint destination
 ) {
     if (strcmp(command, "randomize") == 0) {
         if (
@@ -4284,7 +4304,7 @@ static int run_command(
             if (options->randomize_patches && elapsed >= next_patch_at) {
                 size_t patch_index;
                 do {
-                    patch_index = arc4random_uniform((uint32_t)patch_count);
+                    patch_index = hydra_random_uniform((uint32_t)patch_count);
                 } while (patch_count > 1 && patch_index == previous_patch);
                 previous_patch = patch_index;
                 const RandomPatch *patch = &RANDOM_PATCHES[patch_index];
@@ -4316,18 +4336,18 @@ static int run_command(
                 );
                 fflush(stdout);
                 next_patch_at = elapsed + 9.0 +
-                    (double)arc4random_uniform(401) / 100.0;
+                    (double)hydra_random_uniform(401) / 100.0;
             }
 
             size_t index;
             do {
-                index = arc4random_uniform((uint32_t)control_count);
+                index = hydra_random_uniform((uint32_t)control_count);
             } while (control_count > 1 && index == previous);
             previous = index;
 
             const RandomControl *control = &RANDOM_CONTROLS[index];
             uint32_t width = (uint32_t)(control->maximum - control->minimum + 1);
-            int value = control->minimum + (int)arc4random_uniform(width);
+            int value = control->minimum + (int)hydra_random_uniform(width);
             if (
                 send_cc(
                     port, destination, control->cc, value, options->channel
@@ -4342,7 +4362,7 @@ static int run_command(
             fflush(stdout);
 
             double jitter = 0.70 +
-                (double)arc4random_uniform(61) / 100.0;
+                (double)hydra_random_uniform(61) / 100.0;
             double pause = options->step * jitter;
             double remaining =
                 options->duration - (monotonic_seconds() - started);
@@ -4556,19 +4576,7 @@ int main(int argc, char **argv) {
         return list_destinations();
     }
     if (strcmp(argv[1], "rescan") == 0) {
-        MIDIClientRef client;
-        if (create_midi_client(&client) != 0) {
-            return 1;
-        }
-        OSStatus status = MIDIRestart();
-        MIDIClientDispose(client);
-        if (status != noErr) {
-            fprintf(
-                stderr, "error: restarting CoreMIDI failed (status %d)\n", status
-            );
-            return 1;
-        }
-        sleep_seconds(1.0);
+        if (hydra_midi_rescan() != 0) return 1;
         return list_destinations();
     }
     if (
@@ -4588,36 +4596,17 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    MIDIClientRef client = 0;
-    MIDIPortRef port = 0;
-    if (create_midi_client(&client) != 0) {
-        return 1;
-    }
-
-    MIDIEndpointRef destination = find_destination(options.device);
+    HydraMIDI *port = NULL;
+    if (hydra_midi_open(&port) != 0) return 1;
+    HydraMIDIEndpoint destination = find_destination(port, options.device);
     if (destination == 0) {
-        if (options.device != NULL) {
-            fprintf(
-                stderr,
-                "error: no MIDI destination contains '%s'; run 'hydractl list'\n",
-                options.device
-            );
-        } else {
-            fputs(
-                "error: no MIDI destinations found; run 'hydractl list'\n",
-                stderr
-            );
-        }
-        MIDIClientDispose(client);
+        fprintf(stderr, "error: no unambiguous MIDI destination matches '%s'; run 'hydractl list'\n",
+                options.device ? options.device : "hydra");
+        hydra_midi_close(port);
         return 1;
     }
-
-    OSStatus status = MIDIOutputPortCreate(
-        client, CFSTR("HydraControl Output"), &port
-    );
-    if (status != noErr) {
-        fprintf(stderr, "error: creating CoreMIDI output failed (status %d)\n", status);
-        if (client != 0) MIDIClientDispose(client);
+    if (hydra_midi_select_output(port, destination) != 0) {
+        hydra_midi_close(port);
         return 1;
     }
 
@@ -4627,17 +4616,15 @@ int main(int argc, char **argv) {
             fputs("error: serve does not accept positional arguments\n", stderr);
             result = 1;
         } else {
-            result = run_server(&options, client, port, destination);
+            result = run_server(&options, port, destination);
         }
     } else {
         result = run_command(argv[1], &options, port, destination);
     }
     if (result == 0) {
-        // CoreMIDI delivery is asynchronous. Let immediate messages leave the
-        // output port before disposing the client that owns it.
+        // Let asynchronous native delivery finish before closing the port.
         sleep_seconds(0.05);
     }
-    MIDIPortDispose(port);
-    MIDIClientDispose(client);
+    hydra_midi_close(port);
     return result;
 }

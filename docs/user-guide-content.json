@@ -1,0 +1,971 @@
+[
+  {
+    "id": "quick-start",
+    "title": "Your first five minutes",
+    "blocks": [
+      {
+        "type": "p",
+        "text": "Your laptop is ready to use. Start with its speakers or headphones; the robot and physical synthesizer are optional."
+      },
+      {
+        "type": "h2",
+        "text": "Open the dashboard"
+      },
+      {
+        "type": "p",
+        "text": "Use the supplied browser bookmark, or open http://127.0.0.1:8790/#synth-mixer. If the page will not open, follow Open the app and get ready in the next chapter."
+      },
+      {
+        "type": "p",
+        "text": "If the organiser supplied a starting version, open Sessions, select it and press Load. Keep that version and save your own experiments under new names."
+      },
+      {
+        "type": "h2",
+        "text": "Hear movement change the sound"
+      },
+      {
+        "type": "ol",
+        "items": [
+          "Set a comfortable laptop volume. Open Setup > Connections, choose Browser audio under Synth output and press Test sound.",
+          "Open Use > Synth mixer. In Signal mixes, set Signals from to Simulated demo signals. They change on their own without a connected robot.",
+          "In Mix A, choose Movement for Input 1. Find Filter cutoff under Synth parameters and set its Signal mix to Mix A. You need both the input and the destination.",
+          "In Shape your sound, choose Pluck or Warm pad, then press Play. Listen as the brightness changes.",
+          "Try another browser voice or lower Signal strength on Filter cutoff. Change one thing at a time.",
+          "Press Stop in Synth mixer when finished. If playback waits for mapped input, use the troubleshooting chapter."
+        ]
+      },
+      {
+        "type": "note",
+        "text": "Switching workspaces can leave Synth mixer and Music mixer playing. Use their Stop buttons to end playback. Robot controls are separate. Leaving Rap response stops its microphone and voice playback; a submitted generation can still finish."
+      },
+      {
+        "type": "h2",
+        "text": "Try next"
+      },
+      {
+        "type": "p",
+        "text": "For a free voice preview, open Rap response > Voice demos and play a saved example. To keep your sound settings, open Sessions, enter a name and press Save new version. New music and rap generation use account credits; browser synth playback and saved demos do not."
+      }
+    ]
+  },
+  {
+    "id": "opening",
+    "title": "Open the app and get ready",
+    "blocks": [
+      {
+        "type": "h2",
+        "text": "Use the prepared launch method"
+      },
+      {
+        "type": "p",
+        "text": "Use the launcher, browser bookmark or startup instructions provided with your laptop. A browser bookmark opens the page; the application also needs to be running in the background. Keep any terminal window that is running the dashboard open while you work."
+      },
+      {
+        "type": "p",
+        "text": "If the dashboard page opens normally, do not start another copy. Continue in the same browser profile and at the same address each time so your saved preferences and Sessions remain available."
+      },
+      {
+        "type": "h2",
+        "text": "Standard start when no launcher was provided"
+      },
+      {
+        "type": "ol",
+        "items": [
+          "Open the hydrasynth project folder supplied on the laptop in the file manager. Use Open in Terminal from that folder if your desktop provides it. Ask the organiser to show you the folder if you cannot find it.",
+          "Type the command below and press Enter. Leave that terminal window open.",
+          "Open the supplied browser and visit http://127.0.0.1:8790/#synth-mixer. Bookmark the address for next time."
+        ]
+      },
+      {
+        "type": "code",
+        "text": "make dashboard-sonify"
+      },
+      {
+        "type": "p",
+        "text": "This starts the already installed application for everyday browser use. If your organiser has provided a different launch command for this particular rig or study, use that command instead. If the terminal reports an error, keep the message and ask for help; you do not need to reinstall the laptop."
+      },
+      {
+        "type": "h2",
+        "text": "Before you press Play"
+      },
+      {
+        "type": "ul",
+        "items": [
+          "Choose the laptop audio device you intend to hear. Check headphones, system volume and whether the browser tab is muted.",
+          "Use Test sound in Connections. This always tests computer/browser sound, even if the synth output choice is MIDI device.",
+          "Keep the laptop awake and the dashboard page open during playback. Use one dashboard tab for your session.",
+          "An internet connection is needed to create new music or raps. Browser synthesis, bundled movement recordings and saved voice demos work without new generation.",
+          "During an organised study, the app can retain your interactions, entered words and clips you choose to record. Ask the organiser about the session recording before beginning if you need clarification."
+        ]
+      },
+      {
+        "type": "h2",
+        "text": "Find the workspace you need"
+      },
+      {
+        "type": "table",
+        "headers": [
+          "Workspace",
+          "What you do there"
+        ],
+        "rows": [
+          [
+            "Connections",
+            "Choose the movement source and where Synth mixer sound goes."
+          ],
+          [
+            "Synth mixer",
+            "Play computer-generated or external synth sounds and shape them with movement."
+          ],
+          [
+            "Music mixer",
+            "Create instrumental tracks, then mix their separate instrument layers."
+          ],
+          [
+            "Rap response",
+            "Type or record a message, create a reply and listen to voice demonstrations."
+          ],
+          [
+            "Sessions",
+            "Save and reload named collections of settings. Available in the top bar."
+          ],
+          [
+            "Keirzo control",
+            "Operate a prepared robot rig after the organiser has shown you how."
+          ],
+          [
+            "Keirzo setup and Observer",
+            "Setup and diagnostic views. Ask the organiser if you need help here."
+          ]
+        ]
+      }
+    ]
+  },
+  {
+    "id": "connections",
+    "title": "Choose movement and sound",
+    "blocks": [
+      {
+        "type": "p",
+        "text": "Open Setup > Connections. Input chooses the data used to shape music. Output chooses where the Synth mixer sends its sound. A movement recording contains changing numbers, so selecting one does not play a recorded soundtrack."
+      },
+      {
+        "type": "figure",
+        "src": "manual-assets/connections.jpg",
+        "caption": "Choose movement data on the left and Synth output on the right. Test sound checks the laptop’s browser audio."
+      },
+      {
+        "type": "h2",
+        "text": "Use a supplied movement recording"
+      },
+      {
+        "type": "ol",
+        "items": [
+          "Choose Recording under Input, then select a recording from the list. The laptop normally includes three examples. Use Refresh recordings if the organiser has added more.",
+          "Open the mixer you want to use. In Signal mixes, set Signals from to Connections input.",
+          "Choose an input field in your mix and assign that mix to a sound control. The Signal mixes chapter shows this process.",
+          "Press Play in Synth mixer, or play a prepared track in Music mixer. Stop that player when finished."
+        ]
+      },
+      {
+        "type": "p",
+        "text": "Simulated demo signals is chosen inside a mixer and changes on its own. Connections input follows the recording or live input chosen on this page. If the wrong source is selected, changing a recording may seem to have no effect."
+      },
+      {
+        "type": "h2",
+        "text": "Use live movement when it has been prepared"
+      },
+      {
+        "type": "ol",
+        "items": [
+          "Ask the organiser to start the movement feed and provide its Stream address.",
+          "In Connections, choose Live stream, enter the supplied address and press Connect live.",
+          "Check that the live monitor has changing values. A connected message by itself does not prove that movement data is arriving.",
+          "In the mixer, choose Connections input under Signals from. Select the intended live fields and start playback.",
+          "If the feed disconnects, wait for it to return, check the values and press Play again. Reconnecting does not automatically restart Synth playback."
+        ]
+      },
+      {
+        "type": "p",
+        "text": "Pause display only freezes the live monitor’s picture; it does not stop the incoming data or active music. Use the player’s Stop button to stop playback. Use Disconnect to end the live connection. Return to recording selects the recorded-data path again."
+      },
+      {
+        "type": "h2",
+        "text": "Hear the laptop or a prepared Hydrasynth"
+      },
+      {
+        "type": "p",
+        "text": "Choose Browser audio for the laptop speakers or headphones. Music mixer and Rap response always use browser audio. Changing Synth output does not move generated music to an external synthesizer."
+      },
+      {
+        "type": "p",
+        "text": "Use MIDI device only when the organiser has connected and checked the Hydrasynth, its listening output and the matching settings. Select the intended MIDI destination and allow browser MIDI permission if prompted. If you are unsure which device to choose, ask before playing. The external synth needs its own headphones or connected audio output; its USB MIDI connection is not a speaker connection."
+      },
+      {
+        "type": "note",
+        "text": "The laptop remains fully useful with no robot or Hydrasynth attached. Leave Synth output on Browser audio and use recorded or simulated input for the exercises in this guide."
+      }
+    ]
+  },
+  {
+    "id": "signal-mixes",
+    "title": "Use movement to control sound",
+    "blocks": [
+      {
+        "type": "p",
+        "text": "Signal mixes turn movement or another numerical input into a musical control. They do not mix audio. For example, Mix A can follow movement and make a synth sound brighter as that movement increases. Synth mixer and Music mixer use the same approach: choose a source, prepare a signal mix, then connect that mix to something you want to hear change."
+      },
+      {
+        "type": "figure",
+        "src": "manual-assets/synth-signals.jpg",
+        "caption": "A signal mix needs an input and a musical destination. This example has no input selected yet. The meter and history help you see whether your chosen signal is arriving."
+      },
+      {
+        "type": "h2",
+        "text": "Try one simple movement mapping"
+      },
+      {
+        "type": "ol",
+        "items": [
+          "Open Synth mixer and find Signal mixes. Set Signals from to Simulated demo signals. This provides artificial Movement, Energy and Pace signals for practice; it does not play the recording selected in Connections.",
+          "In Mix A, select Movement as the input. You can rename the mix Movement brightness to make its purpose clearer.",
+          "Find the Filter cutoff card under Synth parameters. Set its Signal mix to Mix A, or to the new name you gave that mix. Selecting a source by itself does not connect it to a sound control.",
+          "Press Play and watch the input meter and the parameter's effective value. With browser audio selected, listen for the sound becoming brighter and darker.",
+          "Reduce Signal strength if the change is too large. Try 25–50% first. Press Stop when you finish experimenting."
+        ]
+      },
+      {
+        "type": "h2",
+        "text": "Use a recording or live input"
+      },
+      {
+        "type": "p",
+        "text": "Choose the intended recording or live input in Connections, then return to the mixer and set Signals from to Connections input. Select a field from that source in your mix. The input menu groups available fields by channel; position and velocity are different measurements. Watch the raw reading, normalized percentage and history before assigning a destination. A valid changing input should produce a changing meter."
+      },
+      {
+        "type": "note",
+        "text": "Changing Signals from replaces input selections and detaches shared links. Save your session before changing source modes if you want to keep a carefully prepared mapping. Simulated demo signals are useful for learning, but they do not confirm that a recording, live sender or robot connection works."
+      },
+      {
+        "type": "h2",
+        "text": "Set a useful movement range"
+      },
+      {
+        "type": "ol",
+        "items": [
+          "Expand the input's range controls and begin with Auto learn. Let the recording or performer show a representative range of movement.",
+          "Check that quiet and active movement occupy different parts of the percentage meter. A constant input can sit at the midpoint.",
+          "Press Freeze range when the bounds feel useful. This keeps the same calibration while you continue the session.",
+          "Use Learn again if the movement scale changes. If your organiser supplies known bounds, choose Fixed and enter the supplied Minimum and Maximum."
+        ]
+      },
+      {
+        "type": "p",
+        "text": "Read as controls how an input becomes one number. Use Direct value for a single reading. For a list of values, Average follows the mean, RMS magnitude follows overall size without positive and negative values canceling, and Lowest value or Highest value follows an extreme. One element selects a particular item; its index starts at 0. Leave this choice alone unless you understand the selected field or have been given a recommended setting."
+      },
+      {
+        "type": "h2",
+        "text": "Combine and reuse movement controls"
+      },
+      {
+        "type": "p",
+        "text": "Press + Input to combine several inputs in one mix, or + Signal mix to create another independent control. Average gives inputs equal influence. Weighted blend lets you give some inputs more influence. Highest follows whichever input is most active; Lowest rises only when all inputs rise. Difference compares the first input with the others. Start with one input so that the effect is easy to understand."
+      },
+      {
+        "type": "p",
+        "text": "You can assign one mix to several destinations while keeping a different range and Signal strength for each. For example, movement can open a filter gently and increase rhythm density more strongly. At 0% strength the manual/base setting applies; at 100% the full mapped range applies. If a required input is missing, inspect the source and selected fields rather than adding more mappings."
+      },
+      {
+        "type": "p",
+        "text": "To reuse a definition between mixers, press Share mix. In the other mixer, use the same Signals from mode, select it under Shared signal mixes, and press Add shared mix. Assign that mixer's destinations separately. Shared input-definition edits synchronize when you switch mixers; Make independent creates a separate copy when you want the two versions to diverge."
+      }
+    ]
+  },
+  {
+    "id": "synth-mixer",
+    "title": "Play and shape the synthesizer",
+    "blocks": [
+      {
+        "type": "p",
+        "text": "Synth mixer creates notes and lets you shape their rhythm, pitch and sound. Browser audio plays through the laptop or its selected speakers and works without a connected synth. MIDI output controls the connected instrument. Check the output label beside Shape your sound before you begin. Playing the browser synth does not use generation credits."
+      },
+      {
+        "type": "figure",
+        "src": "manual-assets/synth-mixer.jpg",
+        "caption": "The top of Synth mixer contains the sound choices and Play/Stop transport. Signal mixes and the parameter desk are below. Browser voices are available without a connected instrument."
+      },
+      {
+        "type": "h2",
+        "text": "Play a first sound"
+      },
+      {
+        "type": "ol",
+        "items": [
+          "In Connections, select Browser audio and try Test sound at a comfortable listening level. Open Use → Synth mixer.",
+          "Choose Browser voice = Pluck or Warm pad. Set Tempo · BPM to 96, Root to C and Scale to Minor pentatonic. Choose Chord voices = 1 for a simple line or 3 for chords.",
+          "Leave Automatic sound changes at Off · keep current sound while you learn the controls.",
+          "Press Play. Change one setting at a time and listen. Try a different voice, then a slower tempo or another scale.",
+          "Press Stop when finished. Save a named session if you want to return to these settings."
+        ]
+      },
+      {
+        "type": "p",
+        "text": "If playback is waiting for mapped input, a saved parameter may be expecting movement. Supply its intended input, set that mapping's Signal strength to 0%, or temporarily disable the parameter. A working Test sound confirms the browser can play audio; it does not test an external synth's MIDI or audio connection."
+      },
+      {
+        "type": "h2",
+        "text": "Adjust a parameter or give movement control"
+      },
+      {
+        "type": "figure",
+        "src": "manual-assets/synth-parameters.jpg",
+        "caption": "Each parameter card has a value, a Signal mix choice and Signal strength. Expand Range & response to control how far the movement changes that parameter."
+      },
+      {
+        "type": "ol",
+        "items": [
+          "Use an existing parameter card or press + Parameter. Search for the control you want, such as Filter cutoff, then add it.",
+          "Choose Manual under Signal mix to adjust the value yourself. Move its slider or select one of its named choices.",
+          "To use movement, choose your prepared signal mix. The manual setting becomes Base value, which supplies the starting point for partial Signal strength.",
+          "Expand Range & response and choose From and To. Start with a modest range, then widen it while listening.",
+          "Choose Linear for a straightforward response. Smooth softens changes near the ends; Steps creates distinct levels; Threshold switches between the two ends. Use Reverse when movement should act in the opposite direction.",
+          "Reduce Signal strength to blend the movement with the base setting. Disable a card to keep it saved but inactive, or use × to remove it."
+        ]
+      },
+      {
+        "type": "h2",
+        "text": "Make a clearer rhythm"
+      },
+      {
+        "type": "p",
+        "text": "Try Hits per 16 steps first. Fewer hits leave more space; more hits create a denser pattern. Gate length changes how long a note is held, while Note chance changes how often a possible note plays. Swing changes the rhythmic feel and Note repeats subdivides selected hits. Keep tempo and pitch manual while learning one rhythm control."
+      },
+      {
+        "type": "p",
+        "text": "For a movement example, map Mix A to Hits per 16 steps with From = 4 and To = 12. If Mix A already controls brightness, the sound can become brighter and busier together. Each card still has its own strength and range. This pattern is generated from the control signal; the app is not finding a musical beat inside a movement recording."
+      },
+      {
+        "type": "h2",
+        "text": "Use a connected Hydrasynth"
+      },
+      {
+        "type": "p",
+        "text": "Use the instrument connection prepared for this laptop. Hardware-only controls do not affect browser voices; an unavailable label explains when the current output cannot use a parameter. Ask the organiser to check the connection if the expected MIDI destination or controls are missing."
+      },
+      {
+        "type": "p",
+        "text": "Under Sounds & patches, select Bank A–H and Patch 1–128, then press Select patch. Changing patches replaces unsaved edits in the instrument's current sound, so save any sound you want to keep first. Browser voice names are separate from the instrument's stored patches. Leave Automatic sound changes off until you have checked the sounds you intend to use."
+      },
+      {
+        "type": "note",
+        "text": "Changing dashboard workspaces does not stop Synth mixer. Press its Stop button explicitly. Loading a session or changing connections can stop playback; check the restored source and output before pressing Play again."
+      }
+    ]
+  },
+  {
+    "id": "music-mixer",
+    "title": "Play and mix instrumental music",
+    "blocks": [
+      {
+        "type": "p",
+        "text": "Music mixer plays recorded instrumental music through the browser. Separate instrument layers, called stems, let you adjust parts such as drums and bass independently. Start with music already provided on the laptop. Creating new tracks requires an internet connection and uses account credits; ordinary playback and mixing of prepared saved tracks do not create a new performance."
+      },
+      {
+        "type": "figure",
+        "src": "manual-assets/music-mixer.jpg",
+        "caption": "Music mixer has track creation controls, signal mixes and a mixing desk. The tracks available on your prepared laptop may differ from this example."
+      },
+      {
+        "type": "h2",
+        "text": "Play a saved track"
+      },
+      {
+        "type": "ol",
+        "items": [
+          "Open Use → Music mixer. Set Next track to Loop before starting. This keeps playback on the current track.",
+          "Expand Recent tracks, choose a completed track and press Play saved track. Use Refresh if a recently completed track is not listed.",
+          "Adjust the Master level, then the individual instrument channels. Scroll the desk sideways to reach channels outside the visible area.",
+          "Press Stop to finish. Moving to another workspace leaves Music mixer playing."
+        ]
+      },
+      {
+        "type": "note",
+        "text": "Next track defaults to Generate new. Generate new and Generate similar can keep requesting replacement tracks and using credits while music plays. Choose Loop before playing saved music when you want no new generation. Stop or changing to Loop prevents future requests, but work already submitted may still finish and use credits."
+      },
+      {
+        "type": "h2",
+        "text": "Create a new instrumental"
+      },
+      {
+        "type": "ol",
+        "items": [
+          "Check that the app shows generation is available for your session. If the app reports a setup or account problem, ask for help rather than changing laptop settings.",
+          "Press Stop if music is playing. If a track is already loaded, save any mix settings you want to keep in Sessions, then open Recent tracks and choose the empty Recall a track… option. This clears the current track and channel controls; it does not delete your saved track files.",
+          "Enter a clear Next track prompt, for example: Gentle instrumental electronic groove, spacious chords, clear bass and restrained percussion.",
+          "Choose BPM, Key, Instruments and Track length. Try 96 BPM, C minor, synthesizer, bass and drums, with a 20-second length for a first experiment.",
+          "With no track loaded, set Next track to Loop and press Create starting track. If the button says Play current track, a track is still loaded; clear its selection first to create a new one.",
+          "Wait while the track and its instrument layers are prepared. Follow the status instead of pressing the button again. Listen to the result before adding movement mappings."
+        ]
+      },
+      {
+        "type": "p",
+        "text": "The requested style, key and tempo guide generation; they are not exact measurements of the result. Listen before relying on the beat for a coordinated performance. If a saved track is missing or its instrument layers are unavailable, choose another prepared track or ask the organiser to restore the intended library. A saved settings file alone does not contain the music."
+      },
+      {
+        "type": "table",
+        "headers": [
+          "Next track choice",
+          "What happens"
+        ],
+        "rows": [
+          [
+            "Loop",
+            "The current track repeats without replacement generation."
+          ],
+          [
+            "Generate new",
+            "New interpretations are prepared while music plays. Further replacements can continue using credits."
+          ],
+          [
+            "Generate similar",
+            "Replacement music aims to resemble the current track. Further replacements can continue using credits."
+          ],
+          [
+            "Choose old",
+            "Choose a saved track for the next transition. It then repeats until you choose another."
+          ]
+        ]
+      },
+      {
+        "type": "p",
+        "text": "Up next shows the pending track. A ready replacement fades in near a loop boundary. If it is late or fails, the current track repeats. Editing the prompt or musical settings during automatic generation can update the waiting request. Use Retry next track only after reading the reported failure."
+      },
+      {
+        "type": "h2",
+        "text": "Balance the instrument layers"
+      },
+      {
+        "type": "p",
+        "text": "The volume faders set each channel's level, and Master controls the combined output. Mute silences a channel; Solo lets you hear selected stems on their own. Pan places sound left or right. Low pass removes high frequencies, while High pass removes low frequencies. Delay adds repeats and Reverb adds a lingering room-like sound. Make small changes and return to a simple balance if the track becomes unclear."
+      },
+      {
+        "type": "p",
+        "text": "Pitch shift changes pitch without changing track length. Master and individual stem shifts add together. Master Playback speed, under More effects, changes speed while preserving pitch. Extreme settings can alter sound quality. The vertical meters show volume settings rather than measured loudness, so a high meter does not prove that a channel is audible."
+      },
+      {
+        "type": "h2",
+        "text": "Let movement shape the music"
+      },
+      {
+        "type": "ol",
+        "items": [
+          "Prepare a signal mix as described in Use movement to control sound. Explicitly select its input; choosing a source mode alone is insufficient.",
+          "On a channel, press + Map a signal. Choose your Signal mix and the effect under Controls.",
+          "Open Range & direction. For Pan, try From = −0.5 and To = 0.5. Begin with low Signal strength and raise it while listening.",
+          "Try the same mix on another effect, such as the master's low-pass filter. Keep each range moderate so that the relationship is easy to hear.",
+          "If playback waits for mapped input, check the mix and source. Temporarily set that mapping's strength to 0% to compare with manual playback."
+        ]
+      },
+      {
+        "type": "p",
+        "text": "Mute and Solo take priority over movement mappings. Mapped volume also depends on the fader: a fader at zero stays silent. Stop and reload preserve preferences, but reloading does not start music automatically."
+      }
+    ]
+  },
+  {
+    "id": "rap-response",
+    "title": "Make and play a rap response",
+    "blocks": [
+      {
+        "type": "p",
+        "text": "Rap response can answer a short message in rhyme or perform words you supply. You can hear it with its own generated beat or as an isolated voice over a playing mixer. New responses use account credits and need internet access. The provided voice demos, saved-response playback and local voice-effect adjustments do not request a new rap."
+      },
+      {
+        "type": "figure",
+        "src": "manual-assets/voice-demos.jpg",
+        "caption": "The lower part of Rap response contains voice, style and length choices, Saved responses and Voice demos. Playing a demo does not select that voice for a new response."
+      },
+      {
+        "type": "h2",
+        "text": "Choose a voice and make a typed reply"
+      },
+      {
+        "type": "ol",
+        "items": [
+          "Open Use → Rap response. Expand Voice demos and listen to a named example. Close the demos or press Stop when finished.",
+          "Select the desired Voice for new raps. Playing a demo does not select that voice automatically.",
+          "Set What should the rap say? to Reply to me. Enter a short message in Or type something.",
+          "Choose Beat style and Length. Select With generated beat · full mix under New response for a standalone result, and set Requested BPM between 70 and 140.",
+          "Decide whether to enable Play when my new response is ready. Press Make rap response once and wait through the reported stages.",
+          "When Rap ready appears, read You said and The rap. Choose the desired Play this response mode and play it if it has not started automatically. Use Stop mix or Stop voice to end playback."
+        ]
+      },
+      {
+        "type": "h2",
+        "text": "Speak your message instead"
+      },
+      {
+        "type": "ol",
+        "items": [
+          "Choose Reply to me and set the voice, style, length and output mode first. Use headphones if backing music is playing.",
+          "Press Record a message and allow microphone access if asked. Speak clearly; recording is limited to 30 seconds.",
+          "Press Finish & rap. This starts transcription and response creation immediately. Recording also finishes automatically at the time limit.",
+          "Read the resulting transcript. If it is unsuitable, type the intended message for a new request. Use Cancel to abandon remaining work, understanding that already submitted generation may still finish and use credits."
+        ]
+      },
+      {
+        "type": "p",
+        "text": "Speech is transcribed on the laptop, and the resulting text is used by an online service to create the response. The microphone records when you start recording; it does not continuously capture the room. If microphone access fails, check the browser permission and selected laptop microphone, or use typed input and ask the organiser for help."
+      },
+      {
+        "type": "note",
+        "text": "In study mode, submitted words, transcripts and microphone clips are retained, including canceled recording attempts. Cancel stops the workflow; it does not delete the session record. Avoid including information you do not want recorded, and ask the organiser about study participation or recording questions."
+      },
+      {
+        "type": "h2",
+        "text": "Perform words you have written"
+      },
+      {
+        "type": "p",
+        "text": "Select Rap my words under What should the rap say? Enter your lyrics in Words to rap, keeping useful line breaks. The allowance is 48 words for 4 bars or 96 words for 8 bars; follow the on-screen counter. Choose the voice and playback options, then press Rap my words. This performs your supplied words instead of writing a reply."
+      },
+      {
+        "type": "h2",
+        "text": "Play a voice over your music"
+      },
+      {
+        "type": "p",
+        "text": "First start Music mixer or Synth mixer, then open Rap response; the backing keeps playing. Choose Over main music · isolated voice for the new response. A suitable playing backing supplies the tempo, which must be within 70–140 BPM. When you play the completed voice, it waits for the next bar. Keep the backing stable; stopping or changing it stops the voice, and a generated performance can still drift after its aligned start."
+      },
+      {
+        "type": "p",
+        "text": "With generated beat uses the response's own instrumental. Full-mix microphone recording and completed full-mix playback stop other dashboard audio. New response controls the next request; Play this response controls the completed result. Use Rap volume for balance and Download full mix or Download voice when the corresponding files are available."
+      },
+      {
+        "type": "note",
+        "text": "Leaving Rap response releases the microphone, stops its voice and demo playback, and cancels pending automatic playback. Already submitted work can continue in the background. This differs from Synth mixer and Music mixer, which keep playing when you change workspaces."
+      },
+      {
+        "type": "h2",
+        "text": "Reuse a response and change its voice effects"
+      },
+      {
+        "type": "ol",
+        "items": [
+          "Open Saved responses and choose a completed result. Use Refresh if necessary. Selecting a saved result does not automatically play it.",
+          "Open Customize the voice. Try a modest Pitch shift, or increase Autotune and choose its Key and Scale. Follow the voice keeps correction close to the existing melody; other Melody choices create repeating note patterns.",
+          "Press Apply to this rap when available. This makes another version locally from the retained vocal without generating a new rap.",
+          "Compare the result with the original. Reset effects returns the controls to clean settings for a later application. Different words or a different voice identity require a new generation."
+        ]
+      },
+      {
+        "type": "p",
+        "text": "If a request seems interrupted, use Recover response to check the existing request before submitting again. Cancel cannot undo work already paid for. Read the status, refresh Saved responses, and ask the organiser if recovery does not resolve the problem."
+      }
+    ]
+  },
+  {
+    "id": "sessions",
+    "title": "Save a setup and return to it",
+    "blocks": [
+      {
+        "type": "p",
+        "text": "Sessions saves a named set of your dashboard settings so you can return to a musical idea. It includes the mixers, mappings and other workspace preferences. It is different from the organiser’s participant records and is not an audio recording."
+      },
+      {
+        "type": "figure",
+        "src": "manual-assets/session-library.jpg",
+        "caption": "The Sessions window. Enter a version name to save a new setup, or select an existing version to load or export it."
+      },
+      {
+        "type": "h2",
+        "text": "Save without losing your starting point"
+      },
+      {
+        "type": "ol",
+        "items": [
+          "Arrange the sound, mappings and connections you want to keep.",
+          "Open Sessions in the top bar. Enter a Version name that will mean something later, such as Slow pad with movement filter.",
+          "Press Save new version. Keep the organiser’s original version and save your experiments under new names.",
+          "To keep another variation, change the settings and use Save new version again. Update selected replaces the settings in the version you have selected."
+        ]
+      },
+      {
+        "type": "h2",
+        "text": "Load a saved version"
+      },
+      {
+        "type": "ol",
+        "items": [
+          "Stop any performance you want to finish. Open Sessions and select the required version under Saved versions.",
+          "Press Load. The app stops playback and robot/live activity and reloads the saved settings. Generation jobs already submitted are separate and can still finish.",
+          "Check the input, Synth output and selected track. Reconnect live movement or the intended MIDI device if needed.",
+          "Press Play when you are ready. Loading settings does not start a performance, create new music or establish that physical hardware is ready."
+        ]
+      },
+      {
+        "type": "h2",
+        "text": "Take your settings with you"
+      },
+      {
+        "type": "ol",
+        "items": [
+          "Select a saved version and press Export selected, or use Export all for your saved settings library.",
+          "Keep the downloaded JSON file in a folder you can find. Copy that file if you need the settings on another prepared laptop.",
+          "On the other laptop, open Sessions > Import… and select the file. Choose the imported version, press Load and check the available inputs and tracks."
+        ]
+      },
+      {
+        "type": "note",
+        "text": "A Sessions export carries settings, not the music files themselves. A track created on one laptop may be missing on another. Ask the organiser to help transfer any required audio. A saved setup is also not a backup of participant recordings."
+      },
+      {
+        "type": "p",
+        "text": "Use the same browser profile and bookmarked address. Another browser, a private window or cleared site data can make saved versions unavailable. Export important versions before changing browsers. If saving fails, keep the page open and ask for help; do not clear browser data to make room."
+      }
+    ]
+  },
+  {
+    "id": "using-keirzo",
+    "title": "Performing with Keirzo",
+    "blocks": [
+      {
+        "type": "p",
+        "text": "This chapter is optional. Use it only when the organiser has connected, checked and prepared Keirzo, and has shown you how to operate this rig. If you have only a laptop, skip these controls and use the music workspaces normally. You do not need a robot to make or play music."
+      },
+      {
+        "type": "note",
+        "text": "Start robot can move the arms immediately while preparing them, even when you select only lights or leave every effect disabled. Keep people and objects clear before starting. If the rig is unfamiliar or a connection warning appears, ask the organiser to check it."
+      },
+      {
+        "type": "figure",
+        "src": "manual-assets/robot-control.jpg",
+        "caption": "Keirzo control contains the robot transport, Follow selector and performance effects. This example was captured with the robot disconnected; your prepared rig should show its actual status."
+      },
+      {
+        "type": "h2",
+        "text": "Start a performance"
+      },
+      {
+        "type": "ol",
+        "items": [
+          "Open Use > Keirzo control. Read the current status before pressing a start button.",
+          "Choose Follow > Music mixer or Synth mixer to match the player you will use. The robot follows that player's beat clock. It does not listen for a beat through the microphone.",
+          "Keep the organiser's prepared movement settings. Select only effects you have been shown how to use. Leave head movement disabled unless the organiser has prepared it for this session.",
+          "Check the area is clear, then press Start robot. Wait for preparation to finish and read any message. The arms move into their raised rest positions during preparation. If startup reports a problem, stop and ask the organiser rather than repeatedly trying Start.",
+          "Start playback in the chosen mixer. Beat-synchronised effects follow its clock. If you also want drum hits, use Start drumming separately as described below.",
+          "For a planned pause, press the top Stop in Keirzo control. Stop the music in its own mixer if you also want silence."
+        ]
+      },
+      {
+        "type": "p",
+        "text": "You can move between workspaces while performing: changing pages within the dashboard does not stop the robot or the mixers. Keep the dashboard open. Closing its tab or reloading it is not the normal way to stop a robot session."
+      },
+      {
+        "type": "h2",
+        "text": "Adjust the performance"
+      },
+      {
+        "type": "p",
+        "text": "For LEDs, choose a palette, brightness and the prepared colour or beat effect. Rib breathing moves between the organiser's chosen positions; leave those limits unchanged. If you want different movement, ask the organiser to adjust it for the rig."
+      },
+      {
+        "type": "p",
+        "text": "For an enabled head, Manual Busy-ness changes its activity. Zero still produces gentle ongoing movement: it is not an off setting. Turning Head Enabled off stops new head movements after an already-issued movement finishes. With Beat sync off, head motion can continue while music is stopped. Use the robot's top Stop when you want to pause all its performance effects."
+      },
+      {
+        "type": "h2",
+        "text": "Add automatic drumming"
+      },
+      {
+        "type": "figure",
+        "src": "manual-assets/robot-drums.jpg",
+        "caption": "Automatic drumming has its own Start drumming and Stop controls. Its Follow choice is shared with the main robot controls."
+      },
+      {
+        "type": "ol",
+        "items": [
+          "In Automatic drumming, confirm the Follow source, then select the permitted drum parts and a groove: Straight, Broken beat or Half-time.",
+          "Adjust Density and Fills, and Synth influence when using the Synth mixer. Timing limits can skip hits, especially with busy patterns.",
+          "Press Start drumming. This can also prepare and move the arms if needed. The panel waits while the chosen mixer is stopped; start its playback when ready.",
+          "Use the drum panel's Stop for a drums-only pause. Editing drum settings stops drumming; review the change and press Start drumming again. Changing Follow also cancels queued drum hits and requires Start drumming for the new source."
+        ]
+      },
+      {
+        "type": "h2",
+        "text": "Choose the right stop"
+      },
+      {
+        "type": "table",
+        "headers": [
+          "Control",
+          "Effect and what you should do"
+        ],
+        "rows": [
+          [
+            "Top Stop in Keirzo control",
+            "Stops robot effects and future drum hits. Already-issued head or rib movements can finish; healthy moving arms may complete their return. Motors keep their holding force. Use this for a planned robot pause."
+          ],
+          [
+            "Stop in Automatic drumming",
+            "Stops future drum hits while other robot effects continue. Healthy arms may finish their return and keep holding. Use this to remove percussion only."
+          ],
+          [
+            "Stop in the playing mixer",
+            "Stops that mixer's audio. It is separate from robot Stop. Use both controls when ending music and robot performance."
+          ],
+          [
+            "Emergency stop",
+            "Cancels robot scheduling and requests release of motor holding force on verified connections. It does not stop mixer audio. Use it for unexpected robot behaviour and alert the organiser; follow the rig's demonstrated emergency procedure."
+          ],
+          [
+            "Release or Disconnect in Setup",
+            "These are organiser controls. Release removes holding force and can let parts drop; Disconnect alone does not release it. Ask the organiser to finish the physical shutdown."
+          ]
+        ]
+      },
+      {
+        "type": "note",
+        "text": "Emergency stop is a software command, not a physical power cutoff. It may not reach a disconnected or unavailable motor, and releasing holding force can remove support. Do not assume the robot is physically safe because the screen says stopped. Keep clear and get the organiser. Only restart after the cause has been checked; resetting the emergency stop does not restart performance."
+      },
+      {
+        "type": "p",
+        "text": "At the end, use the robot's top Stop, stop the active mixer and wait for ordinary movements to finish. Tell the organiser about any warning or unusual movement and leave physical shutdown to them. Do not release the head yourself: removing its holding force can let it fall."
+      }
+    ]
+  },
+  {
+    "id": "finishing",
+    "title": "Finish and hand over the laptop",
+    "blocks": [
+      {
+        "type": "h2",
+        "text": "End a normal session"
+      },
+      {
+        "type": "ol",
+        "items": [
+          "In Synth mixer and Music mixer, press Stop for anything still playing. In Rap response, stop any recording, demo, voice or full mix. A submitted generation may continue to finish in the background.",
+          "If you used the robot, follow the robot chapter’s stop procedure. The organiser should handle the physical rig’s release and shutdown.",
+          "Save a named version of any setup you want to keep. Export it if you need a copy outside this browser.",
+          "For a shared session, tell the organiser you are finished and leave the dashboard open for the handover. Give pending recordings time to save; report any storage error.",
+          "If you are closing the application, wait for pending saves to finish first. Report any save or recording error before restarting or shutting down the laptop."
+        ]
+      },
+      {
+        "type": "p",
+        "text": "When using the laptop independently, stop playback and let pending work save, then press Ctrl+C in the terminal you used to start the dashboard. Let shutdown finish before closing the terminal. Use the same launch method next time. During an organised study, leave the app open for the organiser to complete the handover and check recording health."
+      },
+      {
+        "type": "h2",
+        "text": "What is kept"
+      },
+      {
+        "type": "table",
+        "headers": [
+          "What you want to keep",
+          "What to do"
+        ],
+        "rows": [
+          [
+            "Your arrangement of controls",
+            "Save a named version in Sessions. Export the settings file for a portable copy."
+          ],
+          [
+            "A generated rap you want to listen to elsewhere",
+            "Use Download full mix or Download voice when the completed response offers it."
+          ],
+          [
+            "Generated music for later use on this laptop",
+            "Find completed tracks in Recent tracks. Keep the laptop’s saved audio intact."
+          ],
+          [
+            "Study or participant records",
+            "Let the organiser collect and manage these. Closing a session or pressing Cancel does not delete records."
+          ]
+        ]
+      },
+      {
+        "type": "p",
+        "text": "The next person should use the starting version chosen by the organiser. Saving or loading a musical version does not create a new participant record. Ask the organiser to complete the handover before the next participant starts."
+      }
+    ]
+  },
+  {
+    "id": "help",
+    "title": "When something does not work",
+    "blocks": [
+      {
+        "type": "p",
+        "text": "Begin with the status message beside the control you are using. Try the checks below once, then ask the organiser if the problem remains. Keep the page open when a recording or save is pending."
+      },
+      {
+        "type": "table",
+        "headers": [
+          "What you see or hear",
+          "What to try"
+        ],
+        "rows": [
+          [
+            "The page will not open",
+            "Check that the dashboard is running and use the supplied bookmark. See Open the app and get ready. Keep any launch error for the organiser."
+          ],
+          [
+            "Test sound is silent",
+            "Check laptop volume, output device, headphones and browser-tab mute. Press Test sound directly. This tests the laptop output, not the external synth."
+          ],
+          [
+            "Test sound works but Synth mixer is silent",
+            "Check that Synth output is Browser audio for a laptop-only session. Press Play and look for Waiting for mapped input. Check the voice, levels and enabled parameters."
+          ],
+          [
+            "Waiting for mapped input",
+            "Check Signals from, the selected field in each mix and each parameter’s Signal mix. For a standalone test, choose Simulated demo signals and Movement. A saved mapping that still needs another input can keep the player waiting."
+          ],
+          [
+            "The sound does not change with movement",
+            "Selecting a field is only the first step. Assign its mix to the intended sound control and set Signal strength above 0%. Check that the parameter is enabled and the input changes."
+          ],
+          [
+            "Music mixer is silent",
+            "Choose a completed saved track or create one, then check Master volume, mute/solo and any Waiting for mapped input status. A movement recording alone contains no music."
+          ],
+          [
+            "Music continues after changing tabs",
+            "Return to the player and press Stop. Workspace navigation keeps Synth and Music playback running."
+          ],
+          [
+            "A saved track starts more generation",
+            "Set Next track to Loop. Already submitted work may finish; Stop ends playback and prevents future requests."
+          ],
+          [
+            "Generation reports missing setup, access or credits",
+            "Ask the organiser to resolve it. You can still use browser synthesis and saved voice demos. Do not repeatedly press generation buttons to try to clear the error."
+          ],
+          [
+            "Microphone access is blocked",
+            "Allow microphone use for this local dashboard when you want to record, and check the selected laptop input. Use typed words while the organiser helps with capture."
+          ],
+          [
+            "The transcript is wrong",
+            "Use a quieter setting and speak clearly, or submit the intended words as a new typed request. A request already submitted can still finish."
+          ],
+          [
+            "Live input stops",
+            "Check that the movement feed is running and the live values return. Reconnect when needed, then press Play again."
+          ],
+          [
+            "Saved settings seem missing",
+            "Return to the same browser profile and exact bookmarked address. Import an exported Sessions file if available."
+          ],
+          [
+            "A loaded version cannot find its track",
+            "The settings file does not contain that audio. Ask the organiser to provide the track or choose a completed track that exists on this laptop."
+          ],
+          [
+            "A robot status shows an error",
+            "Stop and tell the organiser. Keep clear and do not reset calibration, change motor settings or repeatedly restart the robot."
+          ],
+          [
+            "Saving or recording shows an error",
+            "Keep the tab open and tell the organiser. Do not clear browser data or restart the laptop while unsaved work is being investigated."
+          ]
+        ]
+      },
+      {
+        "type": "h2",
+        "text": "What to tell the organiser"
+      },
+      {
+        "type": "ul",
+        "items": [
+          "Which laptop you are using and which workspace is open.",
+          "The exact status or error message, ideally with a screenshot that contains no private participant content.",
+          "What you pressed just before it happened, and whether Test sound works.",
+          "Whether you are using a recording, simulated signals or live movement, and laptop or external synth sound."
+        ]
+      },
+      {
+        "type": "p",
+        "text": "For unexpected robot movement, use the emergency procedure you were shown and alert the organiser immediately. The robot chapter explains why a software stop alone cannot be assumed to reach a disconnected motor."
+      }
+    ]
+  },
+  {
+    "id": "reference",
+    "title": "Useful words and controls",
+    "blocks": [
+      {
+        "type": "table",
+        "headers": [
+          "Word or control",
+          "What it means"
+        ],
+        "rows": [
+          [
+            "Signal",
+            "A changing number from movement or the built-in simulator. It controls sound; it is not sound itself."
+          ],
+          [
+            "Signal mix",
+            "One named control made from one or more input signals. Assign it to a parameter or effect to hear a change."
+          ],
+          [
+            "Manual or Base value",
+            "The sound setting you choose yourself. At 0% Signal strength, the mapping uses its base setting."
+          ],
+          [
+            "Signal strength",
+            "How much influence the signal has on a mapped control. Start gently and increase it while listening."
+          ],
+          [
+            "Filter cutoff",
+            "A brightness control. It is a useful first destination for a movement mapping."
+          ],
+          [
+            "BPM",
+            "Beats per minute: the requested or selected musical tempo."
+          ],
+          [
+            "Stem",
+            "A separate instrument layer within a prepared music track, such as bass or drums."
+          ],
+          [
+            "Loop",
+            "In Music mixer, repeat the current track without requesting a replacement. Set this before playing saved music when you do not want new generation."
+          ],
+          [
+            "Mute and Solo",
+            "Mute silences a channel. Solo lets you listen to selected stems. Both affect what you hear even when movement mappings are active."
+          ],
+          [
+            "Session version",
+            "A saved collection of musical settings. This is separate from the study’s participant record."
+          ],
+          [
+            "Stop",
+            "A control with a specific scope. Audio players, robot effects and drumming have separate stops."
+          ]
+        ]
+      },
+      {
+        "type": "h2",
+        "text": "Choose your next exercise"
+      },
+      {
+        "type": "ul",
+        "items": [
+          "Start simply: map Movement to Filter cutoff and listen to two browser voices.",
+          "Try a different input: use a bundled recording with Connections input and compare its changing values.",
+          "Mix a saved track: set Next track to Loop, then try one stem’s mute, level and pan.",
+          "Try a reply: listen to the voice demos first, then create one short typed rap if generation is available for your session.",
+          "Keep your favourite: save it as a new Sessions version and return to the organiser’s starting version when you finish."
+        ]
+      },
+      {
+        "type": "p",
+        "text": "The screenshots in this edition were taken from the real application with the robot and Hydrasynth disconnected. Your prepared laptop may have different saved versions or completed tracks. Hardware use should follow the organiser’s checked rig and demonstration. The separate instruction manual contains installation and technical administration details."
+      }
+    ]
+  }
+]

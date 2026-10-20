@@ -336,7 +336,6 @@ globalThis.HydraRobotDrums = (() => {
       <fieldset class="robot-drums-arms"><legend>Drumming arms</legend>${ARMS.map(arm => `<label><input type="checkbox" id="robot-drums-arm-${arm.id}" data-drum-arm="${arm.id}">${arm.name}</label>`).join("")}</fieldset>
       <div class="robot-drums-amounts">${[["density", "Density", "Sparse", "Busy"], ["influence", "Synth influence", "Steady groove", "Follow accents"], ["fills", "Fills", "None", "Every fourth bar"]].map(([id, label, low, high]) => `<div id="robot-drums-${id}-field"><div class="robot-position-label"><label for="robot-drums-${id}">${label}</label><output id="robot-drums-${id}-value" for="robot-drums-${id}"></output></div><input id="robot-drums-${id}" type="range" min="0" max="100" step="1"><div class="robot-range"><span>${low}</span><span>${high}</span></div></div>`).join("")}</div>
       <p id="robot-drums-source-help" class="robot-note"></p>
-      <div class="robot-drums-preview" role="img" aria-label="Four-beat drum pattern; highlighted cells indicate planned hits"><div class="robot-drums-grid-head"><span></span>${Array.from({ length: 16 }, (_, step) => `<span>${step % 4 === 0 ? step / 4 + 1 : "·"}</span>`).join("")}</div>${ARMS.map(arm => `<div class="robot-drums-grid-row"><span>${arm.name}</span>${Array.from({ length: 16 }, (_, step) => `<i id="robot-drums-cell-${arm.id}-${step}" aria-hidden="true"></i>`).join("")}</div>`).join("")}</div>
       <div class="robot-drums-bottom"><span id="robot-drums-clock" class="robot-drums-clock">Waiting for playback</span><div class="robot-actions"><button type="button" id="robot-drums-start" class="robot-button robot-primary">Start drumming</button><button type="button" id="robot-drums-stop" class="robot-button" disabled>Stop</button></div></div>
       <p id="robot-drums-status" class="robot-status" role="status">Press Start drumming when the arms are ready to play.</p>
     </section>`;
@@ -357,14 +356,7 @@ globalThis.HydraRobotDrums = (() => {
     $("influence-field").classList.toggle("is-muted", config.source !== "synth");
     $("source-help").textContent = config.source === "synth" ? "The previous synth bar’s note accents shape the next drum bar. The synth clock keeps both parts in time." : "Tempo and beat position come directly from the Music mixer. Changes to the track or its speed resynchronise the arms.";
     $("clock").textContent = clock?.running ? `${clock.label} · ${Math.round(clock.bpm)} BPM${clock.estimated ? " · estimated grid" : ""}` : `Waiting for ${clock?.label || "music"}`;
-    const hits = new Set(value.pattern.map(hit => `${hit.motor_id}-${hit.step}`));
-    const currentStep = value.running && clock ? Math.floor(clock.beat * 4) % 16 : -1;
-    for (const arm of ARMS) for (let step = 0; step < 16; step++) {
-      const cell = $(`cell-${arm.id}-${step}`);
-      cell.classList.toggle("is-hit", hits.has(`${arm.id}-${step}`));
-      cell.classList.toggle("is-current", step === currentStep);
-    }
-    const status = value.error || value.message || (value.running ? "" : "Press Start drumming when the arms are ready to play. Editing the pattern stops drumming.");
+    const status = value.error || value.message || (value.running ? "" : "Press Start drumming when the arms are ready to play. Changing drum settings stops drumming.");
     $("status").textContent = status; $("status").hidden = !status;
     $("status").classList.toggle("is-error", Boolean(value.error));
   }

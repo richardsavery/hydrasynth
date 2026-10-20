@@ -1,14 +1,129 @@
 # Hydrasynth control
 
-A small, dependency-free macOS command-line controller for an ASM Hydrasynth over
-USB MIDI. It uses Apple's CoreMIDI framework directly.
+A command-line controller for an ASM Hydrasynth over USB MIDI, with native
+macOS CoreMIDI and Linux ALSA backends. The audio input meter uses Core Audio
+on macOS and ALSA PCM on Linux. The browser dashboard runs on either platform.
+
+## Guides
+
+- **Using an already prepared laptop:** start with the illustrated [user guide (PDF)](docs/user-guide.pdf)
+  or [offline HTML user guide](docs/user-guide.html). It covers everyday use,
+  a first-sound walkthrough, saving settings and common problems.
+- **Preparing or maintaining the laptops:** use the full [instruction manual (PDF)](docs/instruction-manual.pdf)
+  or [offline HTML manual](docs/instruction-manual.html), including installation,
+  credentials, hardware calibration and study administration.
+
+Download either HTML file and open it locally; its screenshots are embedded.
+
+## Quick start on Linux
+
+The browser dashboard works without the robot or Hydrasynth connected. It
+includes three movement recordings, simulated signals, browser sound and six
+saved voice demos. These features need no API key. New music and rap generation
+require an ElevenLabs key and use provider credits.
+
+On Ubuntu/Debian, install Git if needed, then clone and set up the project:
+
+```sh
+sudo apt-get install git
+git clone https://github.com/richardsavery/hydrasynth.git
+cd hydrasynth
+bash tools/setup_linux.sh
+make dashboard-sonify
+```
+
+Run setup as your normal user. It requests sudo only for missing system
+packages, creates `.venv`, installs Python dependencies, builds and self-tests
+native Linux MIDI/audio, downloads and checks Whisper Small, and offers a
+**hidden API-key prompt**. Paste the key for this laptop or press Enter to skip.
+Setup preserves existing keys and local data; it sends no physical robot/MIDI
+commands and makes no paid provider request. Node.js is needed for the test
+suite, not to run the dashboard.
+
+Open <http://127.0.0.1:8790/#synth-mixer> and leave the terminal running:
+
+1. Open **Setup → Connections**, choose **Browser audio**, and press **Test sound**.
+2. Open **Use → Synth mixer**, set **Signals from → Simulated demo signals**, then
+   choose **Movement** for Mix A, and assign **Mix A** to **Filter cutoff → Signal mix**.
+   Press **Play** to hear the mapping, then **Stop** to finish.
+3. To use recorded movement, select a bundled recording in Connections and set
+   the mixer's signals source to **Connections input**.
+4. Open **Rap response → Voice demos** to hear saved examples without generating
+   anything. Later, use **Sessions** to save/export your mixer settings.
+
+Stop playback, wait for pending study records to save, then press **Ctrl+C** in
+the server terminal to shut down. On a later day, run `make dashboard-sonify`
+from the same checkout. Installation does not add a background or login service.
+When the synth is connected and you want native MIDI monitoring, use
+`make dashboard`; see the [Linux device checks](docs/linux.md#native-midi).
+
+For a quicker install that defers transcription and credentials:
+
+```sh
+bash tools/setup_linux.sh --skip-model --no-key
+```
+
+Prepare the deferred model or configure/rotate a key later:
+
+```sh
+.venv/bin/python tools/prepare_rap_transcription.py
+.venv/bin/python tools/configure_api_key.py
+.venv/bin/python tools/configure_api_key.py --replace
+```
+
+The helper saves the key in Git-ignored `.env` with owner-only permissions
+(`600`). Restart the dashboard after changing it. A process environment variable
+takes precedence over `.env`. Never commit a real key, even to a private repo.
+
+## Install on six laptops
+
+For laptops you manage, provision a separate restricted key per laptop through
+a password manager or controlled USB file, then paste it at the hidden prompt.
+Name them `hydrasynth-laptop-01` through `hydrasynth-laptop-06` so one can be
+revoked independently. Configure endpoint permissions and credit limits in
+[ElevenLabs key administration](https://elevenlabs.io/docs/overview/administration/workspaces/api-keys).
+All keys still use the workspace quota. Anyone controlling a laptop account can
+read a key stored there; for other people's own machines use their own credentials
+or a central authenticated generation service (not included in this project).
+
+Download Whisper once and copy **only `var/whisper/small/`** into each clone
+before setup to save roughly 464 MiB of downloads per additional laptop. Setup
+checks the copied model. Create `.venv` and native binaries on each machine.
+Do not copy `var/` or study databases wholesale: each laptop needs its own study
+identity. Copy robot calibration only for the same physical robot.
+
+Study recording and incremental backups are automatic. Linux defaults to
+`~/.local/share/keirzo/study-data` (or `$XDG_DATA_HOME/keirzo/study-data`); an explicit `--study-dir`
+overrides it. Open <http://127.0.0.1:8790/?researcher=1> for recording health,
+participant handovers and exports. At collection time retain **every ZIP** in
+each laptop's `backups` tree; the latest incremental ZIP is not a full snapshot.
+Sessions settings exports and study-data exports serve different purposes.
+
+To update: stop the dashboard, review `git status --short`, run
+`git pull --ff-only`, rerun `bash tools/setup_linux.sh`, then start it again.
+The repository owner must commit and push changes before other laptops can
+receive them through clone/pull.
+
+The illustrated instruction manual is available as a [printable PDF](docs/instruction-manual.pdf)
+and a [self-contained HTML file](docs/instruction-manual.html). Download the HTML
+file and open it locally; GitHub displays its source rather than the rendered page.
+Both include a quick start, detailed workspace walkthroughs, screenshots, hardware
+procedures, study collection and troubleshooting. See
+[Linux setup](docs/linux.md) for installation and device details. macOS uses the
+existing manual setup and CoreMIDI/Core Audio backends; the automated installer
+is for Ubuntu/Debian.
+
+To rebuild the prepared-laptop guide from `docs/user-guide-content.json` and
+`docs/manual-assets`, run `.venv/bin/python tools/build_manual.py --audience user`.
+Omit `--audience user` to rebuild the full operator manual. PDF authoring needs
+`requirements-manual.txt` and DejaVu fonts; `--html-only` uses standard Python.
 
 ## Interactive sonification dashboard
 
 The dashboard can turn RAPP newline-delimited JSON into music without requiring
 the Hydrasynth to be connected. Portable gzip-compressed copies of the three
 current recordings are included in [`recordings/`](recordings/), so a fresh
-clone is ready to use on macOS without the RAPP repository beside it. The
+clone is ready to use on macOS or Linux without the RAPP repository beside it. The
 dashboard reads the compressed files directly, discovers their channels and
 numeric fields, and reduces large tensors to a bounded series before they reach
 the browser.
@@ -23,7 +138,7 @@ troubleshooting. The older movement-driven drum
 groove remains available through its [direct link](http://127.0.0.1:8790/#drums)
 and saved sessions; it is no longer in the top navigation.
 
-On a MacBook, clone the repository and run:
+Clone the repository and run:
 
 ```sh
 cd hydrasynth
@@ -42,7 +157,7 @@ The head, ribs, and drum adapters are recognised by their USB identities in
 [`config/robot-devices.json`](config/robot-devices.json), so their default ports
 follow the same devices across USB sockets and computers. Discovery selects
 ports without connecting motors or starting movement. When moving this setup
-to another Mac, also copy `var/robot/head-calibration.json` from the original
+to another computer with the same robot, also copy `var/robot/head-calibration.json` from the original
 machine: saved head ranges are local files and are not included in a Git clone.
 Use a browser with Web MIDI support and grant its MIDI permission for the
 Pimoroni LEDs. See [moving Keirzo to another computer](docs/robot_control.md#move-this-setup-to-another-computer)
@@ -172,7 +287,8 @@ the previous defaults upgrade once; custom ranges remain adjustable.
 
 Playback uses the existing browser synth or the MIDI output selected in
 Connections. Missing data in an enabled mapping pauses sound until fresh values
-return. Stop and tab switching silence notes and stop parameter updates.
+return. **Stop** silences notes and stops parameter updates. Switching dashboard
+workspaces keeps playback running, so use Stop deliberately.
 Settings save separately under `hydra.synth-mixer.v1`; the original Synth's
 mapping sets and sound controls stay independent.
 
@@ -302,8 +418,9 @@ replaces that version. Versions can also be renamed or deleted.
 Sessions save in this browser. **Export selected**, **Export all**, and **Import**
 provide portable JSON copies. Audio files and recordings are referenced by ID,
 so they must still exist on the dashboard server. Loading stops playback and
-does not generate music, request MIDI access, or reconnect live inputs. Press
-Connect live or Connect MIDI device when needed, then Play to resume.
+does not generate music or reconnect live movement input. The page reloads, so
+normal browser MIDI discovery and permission handling may run. Use Connect live
+or Connect MIDI device when needed, then Play to resume.
 Running generation jobs are separate from saved sessions.
 
 ### Academic study recording
@@ -376,7 +493,7 @@ Live study data is outside the source checkout and cloud-sync folders by default
 - macOS: `~/Library/Application Support/Keirzo/study-data`
 - Linux: `$XDG_DATA_HOME/keirzo/study-data`, or `~/.local/share/keirzo/study-data`
 - Windows path selection: `%LOCALAPPDATA%/Keirzo/study-data` (the native hardware
-  tools in this repository still target macOS).
+  tools in this repository support macOS and Linux).
 
 Override with `KEIRZO_STUDY_DIR` or `--study-dir /path/to/local/study-data`.
 `--no-study-recording` is available for development runs; `--no-study-backups`
@@ -491,8 +608,8 @@ vertical meters show effective volume settings, not measured audio loudness.
 An audible mapped channel waits for the input signals of mappings above 0% strength; missing inputs on
 muted or solo-excluded channels do not silence the other channels.
 
-Mixer preferences save separately from the existing interface. Switching tabs
-stops playback and keeps Connections available. Reloading restores the mix
+Mixer preferences save separately from the existing interface. Switching dashboard
+workspaces keeps playback running and keeps Connections available. Reloading restores the mix
 without starting audio or generation. Stop also stops future generation;
 already submitted work can finish and remains in recent tracks. Pending work is
 recovered by checking its saved result when playback resumes.
@@ -575,9 +692,10 @@ The next request starts early using measured generation latency. Only one
 request and one ready segment can be pending; current audio loops while waiting
 and crossfades when the replacement is ready. Every upcoming segment includes
 stem separation; lookahead accounts for its additional processing time.
-Stopping or leaving the tab disarms future requests; work already sent may
-finish its music-and-stems pipeline and incur charges. Automatic generation is
-never armed after reload.
+Press Stop or disable automatic generation to disarm future requests. Switching
+dashboard workspaces can leave generation running; work already sent may finish
+its music-and-stems pipeline and incur charges. Automatic generation is never
+armed after reload.
 
 Rolling segments are saved separately with their observed feature summary and
 provenance. They extrapolate recent activity and are not aligned to the original
@@ -737,7 +855,7 @@ BPM-sync-on variants are excluded from random generation. Routing indices are
 available for deliberate manual mapping. Some parameters only affect sound when
 the patch enables their oscillator mode, modulation route or BPM-sync setting.
 
-Match **Parameter format** to the synth's `PARAM RX`. NRPN mode converts the
+Match **PARAM RX mode** in Connections to the synth's `PARAM RX`. NRPN mode converts the
 small preview palette's CC controls to their catalog NRPN equivalents. CC mode
 sends CC targets and leaves explicit NRPN targets inactive. Browser audio plays
 the musical and preview controls; it does not emulate the full Hydrasynth engine.
@@ -794,7 +912,8 @@ limits.
      events.
    - `PGM CHG RX` to `On` for remote patch selection, and `PGM CHG TX` to
      `On` if the service should observe patch changes made on the synth.
-3. Check that macOS exposes it:
+3. Build and check the native MIDI device list (Linux first needs the
+   [ALSA development package](docs/linux.md)):
 
    ```sh
    make
@@ -802,8 +921,9 @@ limits.
    ./build/hydractl list
    ```
 
-The destination should contain `HYDRASYNTH`. If USB sees the synth but the list
-is empty, open **Audio MIDI Setup**, choose **Window > Show MIDI Studio**, and
+The destination should contain `HYDRASYNTH`. On Linux, compare the list with
+`aconnect -l` and follow the [Linux device checks](docs/linux.md#device-checks).
+On macOS, if USB sees the synth but the list is empty, open **Audio MIDI Setup**, choose **Window > Show MIDI Studio**, and
 click **Rescan MIDI**. Then try, in order:
 
 1. Power-cycle the synth and restart the Mac.
@@ -896,7 +1016,7 @@ Changing patches discards any unsaved changes in the current edit buffer.
 
 ## Persistent NDJSON service
 
-`serve` keeps the CoreMIDI ports open and accepts one protocol-v1 JSON object
+`serve` keeps the native MIDI ports open and accepts one protocol-v1 JSON object
 per line on standard input. It writes only newline-delimited JSON (NDJSON) to
 standard output; diagnostics go to standard error.
 
@@ -1106,6 +1226,12 @@ channels. A channel's tracked state is cleared only after its CC cleanup
 succeeds; otherwise unconfirmed state is retained. A request-time failure
 returns `midi_send_failed`; the final `stopping` event reports `panic_ok`.
 
+**Hydrasynth cleanup caveat:** the repository's MIDI mapping assigns CC 120 to
+ARP Octave. Native panic/shutdown therefore needs hardware validation before it
+can be treated as a reset that preserves arpeggiator settings. The browser's
+All notes off path uses CC 64/123 without CC 120. See the manual's
+[native MIDI chapter](docs/instruction-manual.html#native-midi-audio).
+
 Hardware validation on 31 July 2026 passed the persistent-controller acceptance
 run on A001: a scheduled 3.2-second C/E/G chord played while concurrent
 2.5-second cutoff and resonance ramps completed; all three job-completion events
@@ -1181,9 +1307,11 @@ The same interface can be explored without touching the synth:
 make dashboard-demo
 ```
 
-Native MIDI command traffic is never accepted over TCP or exposed to browser
-JavaScript. The browser can publish Signal Lab observer events and use the
-local ElevenLabs workflow over HTTP `POST`; other mutation routes are rejected.
+The native command broker is not exposed through HTTP or browser JavaScript.
+The dashboard also has HTTP `POST` routes for Signal Lab observer events,
+music and rap generation, robot control, and study recording/export. These
+routes have their own validation and local-access rules; the browser can also
+send MIDI directly through its separate Web MIDI connection.
 HTTP binds only to loopback by default. A non-loopback `--host`
 requires explicit `--allow-remote`, but this is not a secured remote mode: it
 exposes unauthenticated, unencrypted telemetry, including `stderr_tail`, to the
@@ -1198,7 +1326,7 @@ machine-readable definitions: 117 CC mappings and 1,032 expanded logical NRPN
 controls. For example:
 
 ```text
-http://127.0.0.1:8790/?view=catalog&q=filter1
+http://127.0.0.1:8790/observer/?view=catalog&q=filter1
 ```
 
 The catalog in
@@ -1223,8 +1351,8 @@ service process without adding browser-side write controls.
 
 ## Native audio input meter
 
-`hydra-audio` discovers Core Audio input devices and meters one input channel
-without saving audio:
+`hydra-audio` discovers native input devices (Core Audio on macOS, ALSA on Linux)
+and meters one input channel without saving audio:
 
 ```sh
 ./build/hydra-audio list
@@ -1234,7 +1362,8 @@ without saving audio:
 
 The meter defaults to the input device whose name contains `Revolution 2x2`,
 channel 1, for 10 seconds. Selection can instead use a device-name query or the
-exact stable Core Audio UID:
+exact device UID. On Linux, use the ALSA PCM UID printed by `list --json`, such
+as `hw:CARD=USB,DEV=0`; the Apple UID in the second example is macOS-only:
 
 ```sh
 ./build/hydra-audio meter --device 'Revolution 2x2' --channel 1 --duration 2
@@ -1244,7 +1373,7 @@ exact stable Core Audio UID:
 ```
 
 `--uid` and `--device` are alternatives. Durations range from 0.1 to 3,600
-seconds. The tool resolves the selection to its stable UID and explicitly
+seconds. On macOS, the tool resolves the selection to its stable UID and
 assigns that device to a native AudioQueue with three preallocated input
 buffers. Only the selected one-based channel is accumulated; no sample file or
 audio history is retained.
@@ -1255,7 +1384,12 @@ clipping/sample count, non-finite sample count, and whether capture was
 interrupted. Plain output presents the main measurements for a human reader.
 Clipping means an absolute input sample at or above 1.0 (0 dBFS).
 
-The first capture may trigger macOS's Microphone authorization prompt. Grant
+On Linux, capture negotiates the channel count, sample format and rate with
+ALSA. `--uid` can also select an explicitly configured `default`, PipeWire or
+PulseAudio ALSA PCM. See [Linux audio routing](docs/linux.md#audio-routing).
+This tool measures input levels; browser synthesis and playback are separate.
+
+The first capture on macOS may trigger its Microphone authorization prompt. Grant
 the terminal/Codex host access under **System Settings > Privacy & Security >
 Microphone**. In the first hardware run, `AudioQueueStart` waited about 20
 seconds for authorization; the requested metering interval now starts only

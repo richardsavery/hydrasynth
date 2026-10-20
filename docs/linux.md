@@ -1,0 +1,240 @@
+# Linux setup
+
+The dashboard, native MIDI controller and input audio meter support Linux.
+The native tools use ALSA; existing macOS CoreMIDI/Core Audio backends remain
+available. The Python dashboard and command broker use the same CLI and JSON
+protocol on both systems.
+
+For step-by-step operation, see the illustrated [instruction manual (PDF)](instruction-manual.pdf)
+or [offline HTML manual](instruction-manual.html), starting with its quick start.
+
+## Install and build
+
+On a new Ubuntu/Debian computer, install Git if needed, clone the repository,
+then run the setup command as your normal user:
+
+```sh
+sudo apt-get install git
+git clone https://github.com/richardsavery/hydrasynth.git
+cd hydrasynth
+bash tools/setup_linux.sh
+make dashboard-sonify
+```
+
+Use your normal GitHub authentication if the repository is private. Open
+<http://127.0.0.1:8790/#synth-mixer>; leave the terminal open, and use Ctrl+C
+to stop. Setup does not start a background or login service.
+
+Setup installs missing system packages (asking for your sudo password when
+needed), creates `.venv`, installs both Python requirements files, builds and
+self-tests the native tools, prepares the Whisper model, and offers a hidden
+API-key prompt. Press Enter to skip the key. Existing keys and local data are
+preserved when rerunning setup. The key is never passed as a shell argument.
+No physical MIDI, audio capture or robot commands are used during setup.
+
+Useful options:
+
+```sh
+bash tools/setup_linux.sh --skip-model  # defer the model download
+bash tools/setup_linux.sh --skip-system  # system dependencies already provided
+bash tools/setup_linux.sh --no-key  # configure the key separately later
+.venv/bin/python tools/configure_api_key.py  # hidden prompt
+.venv/bin/python tools/configure_api_key.py --replace  # rotate a saved key
+```
+
+The default interpreter is `/usr/bin/python3` (Python 3.10+), avoiding an asdf
+shim that has not been set up on the new computer. Set `PYTHON` to another
+interpreter before running setup if needed. Node.js is only needed for the
+JavaScript regression tests, so the runtime installer does not install it.
+
+The equivalent manual installation is:
+
+```sh
+sudo apt-get install build-essential pkg-config libasound2-dev alsa-utils python3-venv ffmpeg ca-certificates
+/usr/bin/python3 -m venv .venv
+.venv/bin/python -m pip install -r requirements-robot.txt -r requirements-rap-response.txt
+make
+.venv/bin/python tools/prepare_rap_transcription.py
+.venv/bin/python tools/configure_api_key.py
+```
+
+Node.js is needed for the dashboard tests, not for serving the dashboard.
+The checked-in `.tool-versions` selects Python 3.12.9 and Node.js 22.20.0 for
+asdf users. Other installations can use their existing Python 3.10+ and a
+current Node.js; `PYTHON`, `NODE`, and `CC` may be supplied to `make`.
+
+The build uses `pkg-config` for ALSA when available. An unprivileged Ubuntu
+setup can instead download the matching `libasound2-dev` package and extract
+it into `var/native-deps` with `dpkg-deb -x`. If system ALSA development
+metadata is absent, the Makefile detects the extracted
+`var/native-deps/usr/include/alsa/asoundlib.h` and links to the installed
+`libasound.so.2` runtime. Match the headers to the installed ALSA version;
+this fallback does not install or change system packages.
+
+## Installing on six laptops
+
+Provision a separate restricted ElevenLabs key for each laptop you manage,
+named for example `hydrasynth-laptop-01` through `hydrasynth-laptop-06`. This
+lets you revoke one laptop's key without updating the others. Keys can have
+endpoint permissions and credit limits; usage still belongs to the same
+workspace quota. See [ElevenLabs key administration](https://elevenlabs.io/docs/overview/administration/workspaces/api-keys).
+Enable only the features you use: music generation/stem separation,
+text-to-speech, voice changing and voice listing as applicable. Test account
+access after provisioning; setup never makes a paid provider request.
+
+Paste each key at the hidden setup prompt, or provision a `.env` file from
+your password manager or a USB drive you control. For example, a separate
+file `laptop-01.env` contains `ELEVENLABS_API_KEY=the-key-for-that-laptop`:
+
+```sh
+# From the cloned repository, using your actual USB path:
+install -m 600 /media/USB/laptop-01.env .env
+```
+
+The file-copy method replaces `.env`; use the prompt to preserve other
+existing settings. Never commit a real key, including to a private repository.
+`.env` is ignored; `.env.example` is a blank template. Keys load at dashboard
+startup, and a process environment variable takes precedence over `.env`.
+
+A locally stored key is readable by someone who controls that laptop/account;
+file permissions do not hide it from that person. For other people's own
+computers, use their own account/workspace key, or a central authenticated
+generation service if they should not possess the provider key. This project
+currently calls ElevenLabs directly from its local Python backend; it does
+not include that central service.
+
+For faster provisioning, download Whisper once and copy only
+`var/whisper/small/` to the same location in each new clone before setup.
+The current model is approximately 464 MiB. Setup reuses a complete model and
+checks that it loads locally. Recreate `.venv` and native binaries on each
+machine; do not copy them from another laptop. Allow a few GB for dependencies,
+download caches and generated audio.
+
+Each laptop should create its own study directory and identity. Do not copy
+`var/` wholesale or copy another laptop's study database. New installs use
+`~/.local/share/keirzo/study-data` by default (or `$XDG_DATA_HOME`); an explicit
+`--study-dir` overrides this. The current development computer uses the
+explicit `var/study-data` directory. Transfer robot calibration only for the
+same physical robot. Browser microphone/MIDI permission is still a first-use
+step on each laptop.
+
+For updates, stop the dashboard, run `git pull`, rerun
+`bash tools/setup_linux.sh`, then start it again. The key, model and study data
+are retained. Repository changes must be committed and pushed before another
+computer can receive them via clone/pull.
+
+## Run without hardware
+
+```sh
+make dashboard-sonify DASHBOARD_ARGS='--study-dir var/study-data'
+```
+
+Open <http://127.0.0.1:8790/#synth-mixer>. Browser audio, the three bundled
+recordings, simulated signals and bundled voice demos do not require a synth,
+robot or provider key. Stop an existing dashboard before starting another
+against the same storage directories. Ctrl+C stops a foreground dashboard.
+
+For microphone transcription, download the local model once:
+
+```sh
+.venv/bin/python tools/prepare_rap_transcription.py
+```
+
+New music and rap generation additionally need `ELEVENLABS_API_KEY` in the
+local ignored `.env` file, followed by a dashboard restart. Generation consumes
+provider credits. Microphone permission is separate from installing the model.
+
+## Native MIDI
+
+After connecting the Hydrasynth:
+
+```sh
+./build/hydractl list
+make dashboard DASHBOARD_ARGS='--study-dir var/study-data'
+```
+
+This runs the native `hydractl serve` process, input monitoring and the local
+command broker. Use `DASHBOARD_ARGS='--device "unique device name" ...'` when
+the default Hydrasynth selection needs disambiguation. The controller accepts
+a unique name or an explicit ALSA `client:port` address. Numeric ALSA addresses
+can change after reconnecting or rebooting; prefer a unique device name for
+saved launch commands. Ambiguous selections fail rather than silently choosing
+a different instrument.
+
+Keep the synth MIDI RX channel consistent with `--channel` (default 1), set
+`PARAM RX` to NRPN for dashboard catalog mappings, and set `PARAM TX` to the
+format you want to monitor. Named native timbre commands send CC and need
+`PARAM RX=CC`. USB MIDI does not carry the Hydrasynth's audio; connect its
+analogue output to headphones, speakers or an audio interface separately.
+
+The server does not silently switch to another device after a disconnect.
+Stop/restart it after reconnecting the intended synth. Browser Web MIDI has
+its own connection/reconnection behavior and still requires browser permission.
+
+## Audio routing
+
+```sh
+./build/hydra-audio list --json
+./build/hydra-audio meter --device 'Revolution 2x2' --channel 1 --duration 2 --json
+```
+
+Use an exact ALSA UID from the list to disambiguate devices:
+
+```sh
+./build/hydra-audio meter --uid 'hw:CARD=USB,DEV=0' --channel 1 --duration 2 --json
+```
+
+Replace that example UID with the actual interface. Card-name UIDs are more
+stable than numeric card indices. `--uid default` or an explicitly configured
+PipeWire/PulseAudio ALSA PCM can route capture through the desktop sound server.
+Direct `hw:` capture may be busy if another application owns the device; close
+that capture client or select a shared PCM route. No system audio-server change
+is required by this project.
+
+Named desktop/custom PCM routes are listed without opening their backends.
+Their channel count and nominal sample rate are `0` (unknown) until you select
+one for metering; this avoids starting an audio server merely to list devices.
+
+The meter negotiates input format/rate, measures only the requested one-based
+channel, and returns the existing RMS, peak, clipping and timing fields. It
+does not save captured audio or implement native playback/synthesis. The
+dashboard's browser sound engine remains responsible for playback.
+
+## Device checks
+
+`aconnect -l` lists ALSA sequencer clients; `arecord -l` lists audio capture
+hardware. `hydractl list` needs access to `/dev/snd/seq`. Use an ordinary logged-in
+desktop account with device access; an isolated container may need explicit
+sound-device access. A missing sequencer device or permission error is reported
+without pretending an empty list is a successful connection.
+
+Robot serial identification and control use the existing `pyserial` and
+`dynamixel-sdk` dependencies. On Ubuntu, serial devices normally require
+`dialout` membership. If an actual device reports permission denied, check
+group membership and device permissions, then log out/in after any group change.
+Do not run the dashboard as root. This setup's account already belongs to
+`dialout`; no extra permission changes were needed.
+
+Copy the same robot's `var/robot/head-calibration.json` from its previous
+computer or perform manual calibration before powered head movement. See
+[robot setup](robot_control.md). Nothing connects motors or enables torque
+merely by starting the dashboard.
+
+## Tests and physical checks
+
+```sh
+make native-test
+make test
+```
+
+`native-test` runs both C self-tests and, on Linux, the ALSA integration tests.
+Those tests create isolated virtual MIDI peers and synthetic audio; they do
+not select physical instruments or microphones. Tests needing ALSA sequencer
+access report a skip if it is unavailable. `make test` also runs the full
+Python/JavaScript dashboard suite and needs permission to create local sockets.
+
+After connecting hardware, complete the [hardware acceptance checklist](hardware_acceptance.md):
+MIDI send/read-back, CC/NRPN reception, note-off/panic, scheduling and disconnect
+behavior, plus audio channel selection, rates, levels and device recovery.
+Robot calibration, emergency stop and physical stroke limits also require the
+actual rig. A successful virtual test cannot establish these physical results.

@@ -1,1 +1,4 @@
 recordings/*.gz -diff
+
+# Keep generated manuals as binary files across platforms.
+*.pdf binary

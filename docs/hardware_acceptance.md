@@ -11,6 +11,11 @@ Test rig recorded on 31 July 2026:
 - Black Lion Audio Revolution 2x2, analogue input channel 1
 - macOS CoreMIDI and Core Audio
 
+The native tools also support Linux ALSA. Follow [Linux setup](linux.md) first,
+then repeat this checklist on the actual synth and audio interface. Virtual
+MIDI and synthetic audio tests do not replace a physical acceptance run. Record
+the operating system and ALSA/device versions with the result.
+
 Do not run the sound-producing sections through speakers at an unknown level.
 Start with the monitor volume low, then raise it deliberately.
 
@@ -204,22 +209,28 @@ Play while the meter is running. Pass when:
 - `nonfinite_count` is zero;
 - `clip_count` is zero at the intended recording level.
 
-The first run may wait for macOS microphone permission. That authorization
+On Linux, use the ALSA UID from `hydra-audio list --json` when the device name
+is ambiguous. Verify the requested channel and sample rate against the actual
+interface, and check device access or desktop-audio ownership if capture fails.
+
+The first macOS run may wait for microphone permission. That authorization
 delay is not part of the requested two-second metering interval.
 
 ## 9. Disconnect behavior
 
-Automatic hot-plug recovery is not implemented yet. For now, document the
-result rather than treating this as a pass requirement:
+Automatic reconnection is not implemented. The Linux native service detects
+loss of its MIDI connection, stops scheduling output and exits; a restart is
+required after reconnecting the intended device. Verify this behavior:
 
 1. Start the service and verify normal MIDI.
 2. Unplug and reconnect USB.
-3. Request status, state, one quiet note, and panic.
-4. Record send errors, endpoint fields, whether input events resume, and
-   whether a service restart restores both directions.
-
-This becomes a required pass section once reconnect and bounded retry support
-land.
+3. Confirm a disconnect/stopping notification, process exit and a disconnected
+   dashboard state. The program cannot deliver note-off after physical USB
+   removal; check the instrument itself for any held notes.
+4. Restart the service, verify its selected device, then request status, state,
+   one quiet note and panic. Confirm output and input both work again.
+5. Record errors and cleanup behavior. A newly appearing unrelated device must
+   not receive the queued notes from the old connection.
 
 ## Result record
 

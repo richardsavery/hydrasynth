@@ -138,9 +138,9 @@ Tab changes keep drumming active. Settings and named sessions restore passively.
 the synth clock and actual note events, including probability, rests, chords,
 and repeats. The previous bar's note accents shape the next drum bar. A chord
 counts as one onset. Straight, Broken beat and Half-time grooves offer density,
-synth influence, fills every fourth bar, and individual arm selection. The grid
-previews the requested pattern; timing limits may remove fast hits. Editing a
-setting stops drumming so the new pattern can be reviewed before restarting.
+synth influence, fills every fourth bar, and individual arm selection. Timing
+limits may remove fast hits. Editing a setting stops drumming; review the
+settings and press **Start drumming** again when ready.
 Each drum is limited to **one hit per second**, including at maximum density
 or during fills. Different drums may strike simultaneously or close together;
 there is no shared spacing limit between drums. The browser thins the pattern
@@ -260,9 +260,9 @@ attached motor bus is correct or ready for movement.
 
 ### Move this setup to another computer
 
-For another Mac, copy or clone this repository, install Python 3, and run the
+For another Mac or Linux computer, copy or clone this repository, install Python 3, and run the
 serial dependency and dashboard commands above. `make dashboard-sonify` does
-not build the native CoreMIDI controller. Connect the same powered hardware,
+not build the native MIDI controller. Connect the same powered hardware,
 then open `http://127.0.0.1:8790/#robot-setup` in a browser with Web MIDI support,
 such as Chrome.
 
@@ -306,9 +306,11 @@ For the raw pySerial listing, use
 
 [pySerial exposes USB identity fields on macOS, Linux, and Windows](https://pyserial.readthedocs.io/en/latest/tools.html).
 This makes adapter identification independent of platform port names. The
-setup instructions here are for macOS; the repository's native CoreMIDI and
-Core Audio tools remain macOS-specific, and this does not establish full
-Windows or Linux application support.
+native tools support macOS and Linux; see [Linux setup](linux.md) for build,
+MIDI/audio access and serial permissions. On Linux, the same USB identities
+resolve to `/dev/ttyUSB*` or `/dev/ttyACM*` ports. Automated serial tests use
+simulated motors on both platforms; physical robot checks are still required.
+This does not establish native Windows support.
 
 ## Set up and check the rib cage
 

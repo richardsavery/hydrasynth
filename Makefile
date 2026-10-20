@@ -1,38 +1,76 @@
-CC := clang
-CFLAGS := -std=c17 -Wall -Wextra -Wpedantic -O2
+CC ?= cc
+CFLAGS ?= -std=c17 -Wall -Wextra -Wpedantic -O2
 PYTHON ?= $(if $(wildcard .venv/bin/python),.venv/bin/python,python3)
 NODE ?= node
-MIDI_FRAMEWORKS := -framework CoreMIDI -framework CoreFoundation
-AUDIO_FRAMEWORKS := -framework AudioToolbox -framework CoreAudio -framework CoreFoundation
+DASHBOARD_ARGS ?=
+PLATFORM := $(shell uname -s)
+ifeq ($(PLATFORM),Darwin)
+MIDI_LIBS := -framework CoreMIDI -framework CoreFoundation
+AUDIO_LIBS := -framework AudioToolbox -framework CoreAudio -framework CoreFoundation
+else ifeq ($(PLATFORM),Linux)
+ALSA_CFLAGS ?= $(shell pkg-config --cflags alsa 2>/dev/null)
+ALSA_LIBS ?= $(shell pkg-config --libs alsa 2>/dev/null)
+ifeq ($(strip $(ALSA_LIBS)),)
+ifneq ($(wildcard var/native-deps/usr/include/alsa/asoundlib.h),)
+# Optional unprivileged setup: Ubuntu's development headers extracted locally,
+# linked against the distribution's already-installed ALSA runtime library.
+ALSA_CFLAGS := -isystem var/native-deps/usr/include
+ALSA_LIBS := -l:libasound.so.2
+else
+ALSA_LIBS := -lasound
+endif
+endif
+NATIVE_CPPFLAGS := $(ALSA_CFLAGS)
+MIDI_LIBS := $(ALSA_LIBS) -pthread -lm
+AUDIO_LIBS := $(ALSA_LIBS) -pthread -lm
+endif
 MIDI_TARGET := build/hydractl
 AUDIO_TARGET := build/hydra-audio
 TARGETS := $(MIDI_TARGET) $(AUDIO_TARGET)
+MIDI_SOURCES := src/hydractl.c src/hydra_midi.c
 
-.PHONY: all test clean dashboard dashboard-demo dashboard-sonify dashboard-command dashboard-test
+.PHONY: all test native-test native-linux-test clean dashboard dashboard-demo dashboard-sonify dashboard-command dashboard-test
 
 all: $(TARGETS)
 
-$(MIDI_TARGET): src/hydractl.c
+$(MIDI_TARGET): $(MIDI_SOURCES) src/hydra_midi.h
 	mkdir -p build
-	$(CC) $(CFLAGS) $< $(MIDI_FRAMEWORKS) -o $@
+	$(CC) $(CPPFLAGS) $(NATIVE_CPPFLAGS) $(CFLAGS) $(MIDI_SOURCES) $(LDFLAGS) $(MIDI_LIBS) $(LDLIBS) -o $@
 
-$(AUDIO_TARGET): src/hydra_audio.c
+$(AUDIO_TARGET): src/hydra_audio.c src/hydra_audio_alsa.inc
 	mkdir -p build
-	$(CC) $(CFLAGS) $< $(AUDIO_FRAMEWORKS) -o $@
+	$(CC) $(CPPFLAGS) $(NATIVE_CPPFLAGS) $(CFLAGS) $< $(LDFLAGS) $(AUDIO_LIBS) $(LDLIBS) -o $@
 
-test: $(TARGETS)
-	$(MIDI_TARGET) self-test
-	$(AUDIO_TARGET) self-test
+test: native-test
 	$(MAKE) dashboard-test
 
+native-test: $(TARGETS)
+	$(MIDI_TARGET) self-test
+	$(AUDIO_TARGET) self-test
+ifeq ($(PLATFORM),Linux)
+	$(MAKE) native-linux-test
+endif
+
+ifeq ($(PLATFORM),Linux)
+build/test-alsa-peer: tools/alsa_test_peer.c
+	mkdir -p build
+	$(CC) $(CPPFLAGS) $(NATIVE_CPPFLAGS) $(CFLAGS) $< $(LDFLAGS) $(ALSA_LIBS) -pthread $(LDLIBS) -o $@
+
+native-linux-test: $(TARGETS) build/test-alsa-peer
+	$(PYTHON) -B tools/test_native_linux.py
+else
+native-linux-test:
+	@echo "Linux ALSA integration tests require Linux; native self-tests run on this platform."
+endif
+
 dashboard: $(MIDI_TARGET)
-	$(PYTHON) tools/hydra_dashboard.py
+	$(PYTHON) tools/hydra_dashboard.py $(DASHBOARD_ARGS)
 
 dashboard-demo:
-	$(PYTHON) tools/hydra_dashboard.py --demo
+	$(PYTHON) tools/hydra_dashboard.py --demo $(DASHBOARD_ARGS)
 
 dashboard-sonify:
-	$(PYTHON) tools/hydra_dashboard.py --demo $(if $(RECORDINGS_DIR),--recordings-dir "$(RECORDINGS_DIR)",)
+	$(PYTHON) tools/hydra_dashboard.py --demo $(if $(RECORDINGS_DIR),--recordings-dir "$(RECORDINGS_DIR)",) $(DASHBOARD_ARGS)
 
 dashboard-command:
 	$(PYTHON) -B tools/hydra_command.py
@@ -63,6 +101,7 @@ dashboard-test:
 	$(PYTHON) -B tools/test_recording_library.py
 	$(PYTHON) -B tools/test_elevenlabs_analysis.py
 	$(PYTHON) -B tools/test_elevenlabs_service.py
+	$(PYTHON) -B tools/test_configure_api_key.py
 	$(PYTHON) -B tools/test_elevenlabs_realtime.py
 	$(PYTHON) -B tools/test_elevenlabs_http.py
 	$(PYTHON) -B tools/test_rap_render.py
@@ -137,4 +176,4 @@ dashboard-test:
 	$(NODE) tools/test_observer_semantics.js
 
 clean:
-	rm -f $(TARGETS)
+	rm -f $(TARGETS) build/test-alsa-peer build/test-alsa-audio-fault.so
