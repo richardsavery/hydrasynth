@@ -70,10 +70,15 @@ elif name == "brew":
         missing = os.environ.get("SETUP_FIXTURE_MISSING", "").split(",")
         finish(1 if args[2] in missing else 0)
     elif args[0] == "install":
-        assert all(formula in ("ffmpeg", "python@3.12") for formula in args[1:])
+        assert args in (["install", "ffmpeg"],
+                        ["install", "--skip-link", "python@3.12"],
+                        ["install", "python@3.12"])
         if failure == "brew":
             finish(23)
         if "python@3.12" in args:
+            if (os.environ.get("SETUP_FIXTURE_PYTHON_LINK_CONFLICT") == "1" and
+                    "--skip-link" not in args):
+                finish(22)
             link_command(prefix / "opt/python@3.12/bin/python3.12")
         if "ffmpeg" in args:
             for tool in ("ffmpeg", "ffprobe"):
@@ -196,7 +201,8 @@ class SetupMacOSTests(unittest.TestCase):
         result = self.run_setup(SETUP_FIXTURE_MISSING="ffmpeg,python@3.12")
         self.assert_success(result)
         installs = [call["args"] for call in self.calls("brew") if call["args"][0] == "install"]
-        self.assertEqual(installs, [["install", "ffmpeg", "python@3.12"]])
+        self.assertEqual(installs, [["install", "ffmpeg"],
+                                   ["install", "--skip-link", "python@3.12"]])
         self.assertIn(["-m", "venv", ".venv"], self.python_calls())
         self.assertEqual(len(self.calls("python3.12")), 2)
         self.assert_upgrade()
@@ -235,6 +241,21 @@ class SetupMacOSTests(unittest.TestCase):
         for path, content in preserved.items():
             self.assertEqual(path.read_bytes(), content)
         self.assertEqual(key.stat().st_mode & 0o777, 0o600)
+
+    def test_python_install_does_not_replace_another_installations_global_tools(self):
+        existing = self.prefix / "bin/python3.12"
+        existing.write_text("#!/bin/sh\n# Existing python.org installation\nexit 89\n",
+                            encoding="utf-8")
+        existing.chmod(0o755)
+        original = existing.read_bytes()
+        result = self.run_setup("--skip-model", "--no-key",
+                                SETUP_FIXTURE_MISSING="python@3.12",
+                                SETUP_FIXTURE_PYTHON_LINK_CONFLICT="1")
+        self.assert_success(result)
+        self.assertEqual(existing.read_bytes(), original)
+        self.assertIn({"command": "brew", "args": ["install", "--skip-link", "python@3.12"]},
+                      self.calls("brew"))
+        self.assertIn(str(self.prefix / "opt/python@3.12/bin/python3.12"), result.stdout)
 
     def test_default_brew_discovery_for_apple_silicon_and_intel(self):
         (self.root / "bin/brew").unlink()

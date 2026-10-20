@@ -110,22 +110,21 @@ fi
 
 venv_python="$project_directory/.venv/bin/python"
 if ! "$skip_system"; then
-    missing_formulae=()
-    missing_count=0
+    installed_formula=false
     if ! "$brew_command" list --versions ffmpeg >/dev/null 2>&1; then
-        missing_formulae+=("ffmpeg")
-        missing_count=$((missing_count + 1))
+        printf 'Installing missing Homebrew formula: ffmpeg\n'
+        "$brew_command" install ffmpeg
+        installed_formula=true
     fi
     if [[ ! -e .venv && ! -L .venv && -z "${PYTHON:-}" ]] &&
        ! "$brew_command" list --versions python@3.12 >/dev/null 2>&1; then
-        missing_formulae+=("python@3.12")
-        missing_count=$((missing_count + 1))
+        printf 'Installing missing Homebrew formula: python@3.12\n'
+        # Use the formula's own prefix below. Global Python links can belong to
+        # another installation (e.g. python.org); leave those files untouched.
+        "$brew_command" install --skip-link python@3.12
+        installed_formula=true
     fi
-    # Bash 3.2 treats an empty array as unset when nounset is enabled.
-    if (( missing_count )); then
-        printf 'Installing missing Homebrew formulae: %s\n' "${missing_formulae[*]}"
-        "$brew_command" install "${missing_formulae[@]}"
-    else
+    if ! "$installed_formula"; then
         printf 'System dependencies are already installed.\n'
     fi
 fi
