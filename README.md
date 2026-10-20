@@ -3,21 +3,33 @@
 Make music from movement, create rap responses, and control Keirzo and the
 Hydrasynth. You can start with laptop sound and no connected hardware.
 
-## Install on Linux
+## Install
 
-On **Ubuntu or Debian**, open a terminal and run:
+**Ubuntu/Debian:** install Git first:
 
 ```sh
 sudo apt-get update
 sudo apt-get install -y git
-git clone https://github.com/richardsavery/hydrasynth.git
-cd hydrasynth
-bash tools/setup_linux.sh
 ```
 
-**Setup installs everything needed to run the app**, including Python packages,
-FFmpeg, native MIDI/audio tools, and **Whisper Small for microphone transcription**.
-You do not need to install or download Whisper separately.
+**Mac:** if Apple's Command Line Tools are not installed, run the following and
+finish the installation window before continuing:
+
+```sh
+xcode-select --install
+```
+
+**Then, on either Mac or Linux:**
+
+```sh
+git clone https://github.com/richardsavery/hydrasynth.git
+cd hydrasynth
+bash tools/setup.sh
+```
+
+Setup detects your system and installs the required Python packages, FFmpeg,
+native MIDI/audio tools, and **Whisper Small for microphone transcription**.
+On Mac, it also installs Homebrew if needed. Whisper needs no separate setup.
 Keep the internet connected and allow a few GB of free space.
 
 Run setup as your normal user; it asks for your password if needed.
@@ -27,7 +39,7 @@ demos work without one.
 
 ## Start
 
-From the `hydrasynth` folder:
+From the `hydrasynth` folder, on Mac or Linux:
 
 ```sh
 make dashboard-sonify
@@ -43,12 +55,12 @@ Stop playback and press **Ctrl+C** in the server terminal. From the existing
 `hydrasynth` folder, run:
 
 ```sh
-git pull --ff-only && bash tools/setup_linux.sh
+git pull --ff-only && bash tools/setup.sh
 ```
 
-The same setup script updates Python packages and rebuilds the native tools.
-It keeps your API key, downloaded Whisper model, recordings, robot calibration,
-and study data. **You do not need to clone again or reinstall Whisper.**
+Setup updates Python packages and rebuilds the native tools. It keeps your
+API key, downloaded Whisper model, recordings, robot calibration and study data.
+**No new clone or separate Whisper installation is needed.**
 
 Once setup finishes, start again and refresh the browser:
 
@@ -59,8 +71,10 @@ make dashboard-sonify
 ## More help
 
 - **Using the app:** [User guide (PDF)](docs/user-guide.pdf) · [Offline HTML](docs/user-guide.html)
-- **Installation, updates and troubleshooting:** [Linux guide](docs/linux.md)
+- **Setup and troubleshooting:** [Mac](docs/macos.md) · [Linux](docs/linux.md)
 - **Keys for six laptops:** [Laptop setup](docs/linux.md#installing-on-six-laptops)
-- **Connected hardware:** [Hydrasynth MIDI](docs/linux.md#native-midi) · [Keirzo setup](docs/robot_control.md)
+- **Connected hardware:** [Mac MIDI/audio](docs/macos.md#connected-hardware) · [Linux MIDI](docs/linux.md#native-midi) · [Keirzo setup](docs/robot_control.md)
 - **Full instructions:** [Operator manual (PDF)](docs/instruction-manual.pdf) · [Offline HTML](docs/instruction-manual.html)
-- **Advanced features, macOS and development:** [Technical reference](docs/reference.md)
+- **Advanced features and development:** [Technical reference](docs/reference.md)
+
+Mac and Linux are the supported targets. Native Windows is not supported.

@@ -8,6 +8,10 @@ protocol on both systems.
 For step-by-step operation, see the illustrated [instruction manual (PDF)](instruction-manual.pdf)
 or [offline HTML manual](instruction-manual.html), starting with its quick start.
 
+The common `bash tools/setup.sh` command selects the Linux installer here.
+The original `bash tools/setup_linux.sh` command remains available. For Mac,
+see [Mac setup](macos.md).
+
 ## Install and build
 
 On a new Ubuntu/Debian computer, install Git if needed, clone the repository,
@@ -17,7 +21,7 @@ then run the setup command as your normal user:
 sudo apt-get install git
 git clone https://github.com/richardsavery/hydrasynth.git
 cd hydrasynth
-bash tools/setup_linux.sh
+bash tools/setup.sh
 make dashboard-sonify
 ```
 
@@ -42,9 +46,9 @@ operating-system upgrade.
 Useful options:
 
 ```sh
-bash tools/setup_linux.sh --skip-model  # defer the model download
-bash tools/setup_linux.sh --skip-system  # system dependencies already provided
-bash tools/setup_linux.sh --no-key  # configure the key separately later
+bash tools/setup.sh --skip-model  # defer the model download
+bash tools/setup.sh --skip-system  # system dependencies already provided
+bash tools/setup.sh --no-key  # configure the key separately later
 .venv/bin/python tools/configure_api_key.py  # hidden prompt
 .venv/bin/python tools/configure_api_key.py --replace  # rotate a saved key
 ```
@@ -135,7 +139,7 @@ Stop playback, let pending study records finish saving, and stop the dashboard
 with **Ctrl+C** in its terminal. Open a terminal in the existing project folder:
 
 ```sh
-git pull --ff-only && bash tools/setup_linux.sh
+git pull --ff-only && bash tools/setup.sh
 ```
 
 The setup script installs any newly required system packages, updates the Python

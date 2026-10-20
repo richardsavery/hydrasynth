@@ -21,7 +21,7 @@
       },
       {
         "type": "code",
-        "text": "sudo apt-get install git\ngit clone https://github.com/richardsavery/hydrasynth.git\ncd hydrasynth\nbash tools/setup_linux.sh"
+        "text": "sudo apt-get install git\ngit clone https://github.com/richardsavery/hydrasynth.git\ncd hydrasynth\nbash tools/setup.sh"
       },
       {
         "type": "p",
@@ -127,7 +127,7 @@
       },
       {
         "type": "code",
-        "text": "bash tools/setup_linux.sh --skip-model --no-key\nbash tools/setup_linux.sh --skip-system\nPYTHON=/path/to/python3 bash tools/setup_linux.sh\nbash tools/setup_linux.sh --help"
+        "text": "bash tools/setup.sh --skip-model --no-key\nbash tools/setup.sh --skip-system\nPYTHON=/path/to/python3 bash tools/setup.sh\nbash tools/setup.sh --help"
       },
       {
         "type": "p",
@@ -192,7 +192,7 @@
       },
       {
         "type": "p",
-        "text": "The dashboard and native tools also contain macOS support using CoreMIDI and Core Audio. The Linux setup script deliberately refuses to run on macOS. On a Mac, use the manual Python environment and requirements steps, provide the compiler and FFmpeg through your existing Mac setup, then run make for native tools or make dashboard-sonify for the browser workflow. See the repository’s robot and hardware notes for Mac-specific permissions. The native tools support Linux and macOS; the presence of a Windows study-path default does not mean this installer or native hardware support is available on Windows."
+        "text": "On a Mac, finish Apple’s Command Line Tools installation if needed, then run bash tools/setup.sh in the clone. The Mac installer prepares Homebrew, FFmpeg, Python dependencies, native CoreMIDI/Core Audio tools and Whisper Small. It preserves existing keys, model files and local data. Use the same setup command after git pull for updates, then make dashboard-sonify to start. See docs/macos.md for the complete Mac procedure and permissions. Native Windows requires a separate port and is not supported."
       }
     ]
   },
@@ -273,7 +273,7 @@
       },
       {
         "type": "code",
-        "text": "# On each new clone, using the actual USB path:\nmkdir -p var/whisper\ncp -a /media/USB/small var/whisper/\nbash tools/setup_linux.sh"
+        "text": "# On each new clone, using the actual USB path:\nmkdir -p var/whisper\ncp -a /media/USB/small var/whisper/\nbash tools/setup.sh"
       },
       {
         "type": "p",
@@ -1745,7 +1745,7 @@
       },
       {
         "type": "code",
-        "text": "git status --short\ngit pull --ff-only && bash tools/setup_linux.sh\nmake dashboard-sonify"
+        "text": "git status --short\ngit pull --ff-only && bash tools/setup.sh\nmake dashboard-sonify"
       },
       {
         "type": "p",
@@ -2161,7 +2161,7 @@
       },
       {
         "type": "p",
-        "text": "Supporting repository documents: README.md; docs/reference.md; docs/linux.md; docs/robot_control.md; docs/hardware_acceptance.md; docs/live_streaming.md; docs/movement_drums.md. Provider key permissions and quotas can change; check the current official documentation at https://elevenlabs.io/docs/overview/administration/workspaces/api-keys."
+        "text": "Supporting repository documents: README.md; docs/reference.md; docs/linux.md; docs/macos.md; docs/robot_control.md; docs/hardware_acceptance.md; docs/live_streaming.md; docs/movement_drums.md. Provider key permissions and quotas can change; check the current official documentation at https://elevenlabs.io/docs/overview/administration/workspaces/api-keys."
       }
     ]
   }

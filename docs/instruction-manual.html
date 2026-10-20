@@ -23,7 +23,7 @@ figure{margin:26px 0}figure img{max-width:100%;width:auto;display:block;height:a
 <pre><code>sudo apt-get install git
 git clone https://github.com/richardsavery/hydrasynth.git
 cd hydrasynth
-bash tools/setup_linux.sh</code></pre>
+bash tools/setup.sh</code></pre>
 <p>Run the setup command as your ordinary desktop user. It asks for your sudo password only if system packages are missing. At the hidden API key prompt, paste this laptop’s key or press Enter to skip. No characters are displayed while pasting. Once setup finishes, start the application:</p>
 <pre><code>make dashboard-sonify</code></pre>
 <h3>Hear something and try a signal</h3>
@@ -48,10 +48,10 @@ bash tools/setup_linux.sh</code></pre>
 </tbody></table>
 <p>Setup reuses an existing usable .venv, installs the two requirements files, builds hydractl and hydra-audio, runs their self-tests, prepares the model and checks that it loads on this CPU. Existing credentials and local data are retained. Setup does not make a paid provider request, so successful installation alone does not prove that the ElevenLabs account can access every generation feature.</p>
 <h3>Installer options</h3>
-<pre><code>bash tools/setup_linux.sh --skip-model --no-key
-bash tools/setup_linux.sh --skip-system
-PYTHON=/path/to/python3 bash tools/setup_linux.sh
-bash tools/setup_linux.sh --help</code></pre>
+<pre><code>bash tools/setup.sh --skip-model --no-key
+bash tools/setup.sh --skip-system
+PYTHON=/path/to/python3 bash tools/setup.sh
+bash tools/setup.sh --help</code></pre>
 <p>Use --skip-model for a quicker preview installation that does not yet need microphone transcription. Typed rap input remains available, but generation still requires a provider key. Use --no-key to leave credential provisioning until later. Use --skip-system only when an administrator has already installed the required packages, or you have provided equivalent build/audio dependencies. It skips apt and sudo, not the dependency checks, Python installation or build.</p>
 <p>The installer uses /usr/bin/python3 by default when creating a new environment, avoiding an unconfigured asdf shim. PYTHON selects an alternative for a new environment; an existing .venv retains its original interpreter. A broken or too-old environment is left intact with an explanatory error. Move it aside and recreate it with a suitable interpreter rather than copying an environment from another computer. The repository’s .tool-versions selects Python 3.12.9 and Node.js 22.20.0 for asdf users.</p>
 <h3>Equivalent manual installation</h3>
@@ -73,7 +73,7 @@ make all
 </tbody></table>
 <p>The direct equivalent of the normal no-hardware launch is .venv/bin/python tools/hydra_dashboard.py --demo. Extra server options can be appended there or supplied through DASHBOARD_ARGS. Keep the default loopback host, 127.0.0.1, for normal operation. Each laptop runs its own server; opening its address on another laptop will address that other laptop instead. The local audio and study APIs enforce local access, so changing the bind address is not a turnkey shared server deployment.</p>
 <h3>macOS and other platforms</h3>
-<p>The dashboard and native tools also contain macOS support using CoreMIDI and Core Audio. The Linux setup script deliberately refuses to run on macOS. On a Mac, use the manual Python environment and requirements steps, provide the compiler and FFmpeg through your existing Mac setup, then run make for native tools or make dashboard-sonify for the browser workflow. See the repository’s robot and hardware notes for Mac-specific permissions. The native tools support Linux and macOS; the presence of a Windows study-path default does not mean this installer or native hardware support is available on Windows.</p>
+<p>On a Mac, finish Apple’s Command Line Tools installation if needed, then run bash tools/setup.sh in the clone. The Mac installer prepares Homebrew, FFmpeg, Python dependencies, native CoreMIDI/Core Audio tools and Whisper Small. It preserves existing keys, model files and local data. Use the same setup command after git pull for updates, then make dashboard-sonify to start. See docs/macos.md for the complete Mac procedure and permissions. Native Windows requires a separate port and is not supported.</p>
 <p class="back"><a href="#top">Back to contents</a></p></section>
 <section id="six-laptops"><span class="chapter-num">Chapter 03</span><h2>Provisioning six laptops and API credentials</h2>
 <h3>Prepare a reproducible set of machines</h3>
@@ -96,7 +96,7 @@ make all
 <pre><code># On each new clone, using the actual USB path:
 mkdir -p var/whisper
 cp -a /media/USB/small var/whisper/
-bash tools/setup_linux.sh</code></pre>
+bash tools/setup.sh</code></pre>
 <p>Create .venv and build native binaries separately on every laptop. Do not clone another machine’s complete var directory or study database: that can duplicate its installation identity, recordings and private data. Transfer head-calibration.json only for the same physical robot and review the calibration before powered operation. Copying the model, provisioning the key and transferring robot calibration are three separate tasks.</p>
 <p class="back"><a href="#top">Back to contents</a></p></section>
 <section id="connections"><span class="chapter-num">Chapter 04</span><h2>Connections choose input and sound output</h2>
@@ -429,7 +429,7 @@ make dashboard</code></pre>
 <ol><li>Start the server from the correct checkout using the same study-directory override, if any, that you used previously. Read the startup lines showing its study and backup locations.</li><li>Open the usual local browser address. Check the desired input and output in Connections before playback. Reconnecting a device and selecting a saved session do not by themselves resume playback.</li><li>Before participant work, open the researcher view and confirm storage health, the intended laptop ID and participant session. Keep the machine on reliable power and check available storage.</li><li>At the end, stop audio and robot activities, let pending study records reach Saved locally, and then stop the foreground server with Ctrl+C. Collect the completed backups as described below.</li></ol>
 <h3>Update an existing laptop</h3>
 <pre><code>git status --short
-git pull --ff-only &amp;&amp; bash tools/setup_linux.sh
+git pull --ff-only &amp;&amp; bash tools/setup.sh
 make dashboard-sonify</code></pre>
 <p>Stop the running dashboard before updating. Review git status first: local source edits need to be preserved or reconciled, not discarded. The fast-forward pull refuses an unexpected history merge rather than guessing how to combine it. Rerun setup after pulling to update Python dependencies within the supported versions and rebuild native tools. Whisper is installed automatically if missing. It preserves the existing usable environment, model, key and local data. A failure during an update is a reason to resolve the reported problem before beginning a participant session.</p>
 <p>All six laptops should use the same application revision during a study. A clone or pull receives only committed, pushed files. It does not carry an uncommitted local fix, .env, .venv, generated media or the normal study folder. Record the revision with git rev-parse HEAD when checking a prepared machine.</p>
@@ -538,6 +538,6 @@ make test</code></pre>
 # Optional PDF authoring dependencies and complete rebuild:
 .venv/bin/python -m pip install -r requirements-manual.txt
 .venv/bin/python tools/build_manual.py</code></pre>
-<p>Supporting repository documents: README.md; docs/reference.md; docs/linux.md; docs/robot_control.md; docs/hardware_acceptance.md; docs/live_streaming.md; docs/movement_drums.md. Provider key permissions and quotas can change; check the current official documentation at https://elevenlabs.io/docs/overview/administration/workspaces/api-keys.</p>
+<p>Supporting repository documents: README.md; docs/reference.md; docs/linux.md; docs/macos.md; docs/robot_control.md; docs/hardware_acceptance.md; docs/live_streaming.md; docs/movement_drums.md. Provider key permissions and quotas can change; check the current official documentation at https://elevenlabs.io/docs/overview/administration/workspaces/api-keys.</p>
 <p class="back"><a href="#top">Back to contents</a></p></section>
 </main></body></html>
