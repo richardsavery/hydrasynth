@@ -2,6 +2,16 @@ name: Mac and Linux compatibility
 
 on:
   workflow_dispatch:
+    inputs:
+      platform:
+        description: Platform to check
+        type: choice
+        default: all
+        options:
+          - all
+          - ubuntu-24.04
+          - macos-15
+          - macos-15-intel
 
 permissions:
   contents: read
@@ -14,7 +24,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04, macos-15, macos-15-intel]
+        os: ${{ fromJSON(inputs.platform == 'all' && '["ubuntu-24.04","macos-15","macos-15-intel"]' || format('["{0}"]', inputs.platform)) }}
     steps:
       - uses: actions/checkout@v7
         with:

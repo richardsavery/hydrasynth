@@ -831,6 +831,8 @@ class HeadMotionSampleTests(FakeSerialTest):
     def tearDown(self):
         self.assertFalse(self.writes, "Motion telemetry never writes motor registers")
 
+    # Hold the motion countdown fixed when comparing cached control/safety state.
+    @patch.object(robot_serial.time, "monotonic", lambda: 1000.0)
     def test_sample_during_motion_decodes_signed_registers_without_changing_state(self):
         self.positions[7] = 0xFFFFFFF6
         self.registers.update({(7, 128): 0xFFFFFFFB, (7, 140): 0xFFFFFFFC, (7, 136): 0xFFFFFFF9,
