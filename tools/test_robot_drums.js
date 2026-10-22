@@ -40,7 +40,7 @@ function harness(config = {}, clockSettings = {}) {
       const increment = single ? ms : 50;
       for (let remaining = ms; remaining > 0;) {
         const step = Math.min(increment, remaining); remaining -= step; time += step;
-        if (external.running && !external.rateChanging) external.beat += step * external.bpm / 60000;
+        if (external.running) external.beat += step * external.bpm / 60000;
         if (timer) timer(); await flush();
       }
     }
@@ -153,14 +153,80 @@ function uiHarness(saved = {}) {
   transitions.clock({ bpm: 121 }); await transitions.advance(100);
   assert.equal(transitions.starts.length, 1, "small mapped tempo variation does not keep re-preparing the arms");
   transitions.clock({ bpm: 140 }); await transitions.advance(200);
-  assert.equal(transitions.starts.length, 2, "a material tempo change discards queued timing before preparing again");
+  assert.equal(transitions.starts.length, 1, "tempo changes adapt upcoming hits without re-preparing the arms");
   transitions.clock({ beat: transitions.external.beat + 2 }); await transitions.advance(200);
-  assert.equal(transitions.starts.length, 3, "a seek or phase discontinuity cannot retain future hits");
+  assert.equal(transitions.starts.length, 2, "a seek or phase discontinuity cannot retain future hits");
   transitions.clock({ rateChanging: true }); await transitions.advance(200);
-  assert.equal(transitions.starts.length, 3); assert.equal(transitions.engine.snapshot().waiting, true);
+  assert.equal(transitions.starts.length, 2); assert.equal(transitions.engine.snapshot().running, true);
   transitions.clock({ rateChanging: false }); await transitions.advance(200);
-  assert.equal(transitions.starts.length, 4);
+  assert.equal(transitions.starts.length, 2);
+  transitions.clock({ token: "new-track" }); await transitions.advance(200);
+  assert.equal(transitions.starts.length, 3, "a new track still cancels old timing even at the same BPM and beat");
   await transitions.engine.stop();
+
+  const detected = harness({ density: 100 }, { detected: true, bpm: 120, beat: 0, beatContacts: [] });
+  await detected.engine.start(); await detected.advance(1000);
+  assert.equal(detected.schedules.flatMap(batch => batch.events).length, 0, "leading silence sends only keepalives, never extrapolated hits");
+  detected.clock({ bpm: 83, beat: 0, beatContacts: [
+    { key: "deck:0:0:0", beat: 0, at: 1825 },
+    { key: "deck:0:1:0", beat: 1, at: 2460 },
+    { key: "deck:0:2:0", beat: 2, at: 3210 }
+  ] });
+  await detected.advance(1600);
+  const detectedHits = detected.schedules.flatMap(batch => batch.events);
+  assert.ok(detectedHits.some(hit => hit.contactAt === 1825));
+  assert.ok(detectedHits.some(hit => hit.contactAt === 2460));
+  assert.ok(detectedHits.some(hit => hit.contactAt === 3210));
+  assert.ok(detectedHits.every(hit => [1825, 2460, 3210].includes(hit.contactAt)), "the file map supplies contact times even when displayed BPM differs");
+  assert.equal(new Set(detectedHits.map(hit => hit.id)).size, detectedHits.length, "overlapping map windows cannot send a hit twice");
+  detected.clock({ bpm: 190, beat: 200, beatContacts: [] });
+  await detected.advance(1500);
+  assert.equal(detected.schedules.flatMap(batch => batch.events).length, detectedHits.length, "a silent gap does not continue the last tempo");
+  detected.clock({ bpm: 100, beat: 0, beatContacts: [{ key: "deck:1:0:0", beat: 0, at: detected.now + 850 }] });
+  await detected.advance(200);
+  assert.ok(detected.schedules.flatMap(batch => batch.events).length > detectedHits.length, "a fresh loop can schedule beat zero with its own identity");
+  assert.equal(detected.starts.length, 1, "tempo jumps, silent regions, and natural loops preserve the prepared arms");
+  assert.equal(detected.stops.length, 0);
+  await detected.engine.stop();
+  const missingMap = harness({}, { detected: true, running: false, bpm: 120, beatContacts: [],
+    beatTrackingError: "Detected beats are unavailable. Analyse beats before drumming." });
+  await missingMap.engine.start(); await missingMap.advance(500);
+  assert.equal(missingMap.starts.length, 0, "missing selected beat timing cannot prepare or schedule the robot");
+  assert.equal(missingMap.schedules.length, 0);
+  assert.match(missingMap.engine.snapshot().message, /Analyse beats before drumming/);
+  await missingMap.engine.stop();
+
+  for (const source of ["mixer", "synth"]) {
+    const mapped = harness({ source, density: 100, fills: 100, instruments: [0, 1, 2, 3] },
+      { bpm: 80, rateChanging: source === "mixer" });
+    let finishPrepare;
+    mapped.setPrepare(payload => new Promise(resolve => { finishPrepare = () => resolve(mapped.ready(payload.token)); }));
+    const starting = mapped.engine.start();
+    await flush();
+    for (let index = 0; index < 240; index++) {
+      const bpm = source === "synth" ? 80 + (index % 6) * 25 : 135 + 60 * Math.sin(index / 6);
+      mapped.clock({ bpm });
+      if (index === 15) { finishPrepare(); await starting; }
+      await mapped.advance(50);
+      if (index > 15) assert.equal(mapped.engine.snapshot().running, true, `${source}: changing tempo cannot starve preparation or playback`);
+    }
+    assert.equal(mapped.starts.length, 1, `${source}: continuous mapped changes share one hardware session`);
+    assert.equal(mapped.stops.length, 0, `${source}: a tempo update cannot cancel committed contacts`);
+    const hits = mapped.schedules.flatMap(batch => batch.events);
+    assert.ok(hits.length > 20, `${source}: sustained changing input must produce hits, not just heartbeats`);
+    assert.equal(new Set(hits.map(hit => hit.id)).size, hits.length, "tempo changes never duplicate a beat's hit");
+    const previous = new Map();
+    for (const batch of mapped.schedules) for (const hit of batch.events) {
+      assert.ok(hit.contactAt - batch.sentAt >= 649 && hit.contactAt - batch.sentAt <= 951);
+      assert.ok(hit.contactAt - (previous.get(hit.motor_id) ?? -Infinity) >= 1000, "mapped tempo retains motor recovery spacing");
+      previous.set(hit.motor_id, hit.contactAt);
+    }
+    for (let from = 2000; from < 12000; from += 2000) {
+      assert.ok(hits.some(hit => hit.contactAt >= from && hit.contactAt < from + 2000), `${source}: no silent interval during continuous tempo changes`);
+    }
+    assert.ok(mapped.schedules.some(batch => !batch.events.length));
+    await mapped.engine.stop();
+  }
 
   const noteFeed = harness({ source: "synth", density: 100, influence: 100 }, { token: "synth-1" });
   noteFeed.engine.recordNote({ beat: 2.5, notes: [48], velocity: 120, token: "old-synth" });

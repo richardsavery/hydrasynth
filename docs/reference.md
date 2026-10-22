@@ -266,9 +266,11 @@ automatically repeated.
 Recordings and generated versions are stored under `var/rap-response`. Study
 records include input mode, selected voice, effects, supplied text, generated
 lyrics, playback actions and the source relationship for each effects version.
-Automatic study backups collect their audio assets. Browser settings and saved
-sessions retain preferences and job references without embedding microphone
-audio. The API key remains on the backend.
+Automatic study backups collect their audio assets. Browser settings retain
+preferences and job references; saved Sessions also keep the selected completed
+generated audio, which travels with a portable ZIP export. Sessions do not
+include microphone input recordings or participant records. The API key remains
+on the backend.
 
 All participant rap controls now live in **Rap response**; the Voice experiments
 entry has been removed. Historical experiments and their saved audio remain on
@@ -295,19 +297,36 @@ does not wait for its input to arrive.
 
 ### Saved sessions
 
-Open **Sessions** in the header and use **Save new version** to name a snapshot
+Open **Sessions** in the header and use **Save new version** to keep a snapshot
 of both mixers, their mappings and sound controls, shared signal definitions,
 music prompt and selected track, connection preferences, Drums, and previous
-interface settings. **Load** restores the selected version; **Update selected**
-replaces that version. Versions can also be renamed or deleted.
+interface settings. Keep the suggested name or enter your own. **Load** restores
+the selected version; **Update selected** replaces that version. Versions can
+also be renamed or deleted.
 
-Sessions save in this browser. **Export selected**, **Export all**, and **Import**
-provide portable JSON copies. Audio files and recordings are referenced by ID,
-so they must still exist on the dashboard server. Loading stops playback and
-does not generate music or reconnect live movement input. The page reloads, so
-normal browser MIDI discovery and permission handling may run. Use Connect live
-or Connect MIDI device when needed, then Play to resume.
-Running generation jobs are separate from saved sessions.
+Each new version includes copies of the generated audio it references: the
+current and selected next music tracks, completed stems, and selected rap voices
+or responses, including older ElevenLabs and rap workspace references. Wait for
+any selected generation to finish before saving. Missing audio or a browser
+storage failure stops the save so an incomplete version is not reported as
+saved. Settings stay in this browser and audio snapshots stay on the dashboard
+server until exported.
+
+**Export selected** and **Export all** download portable ZIP files containing the
+settings and generated audio. Use **Open file** to import a ZIP on another
+dashboard; a file containing one version loads it immediately, while a file
+containing several adds them to **Saved versions** for selection. Older JSON
+exports remain supported. They contain settings and audio references only;
+exporting such a version as ZIP collects its referenced audio from the current
+server and reports any missing file. Session exports do not include movement
+recordings, microphone input recordings or study participant records.
+
+Loading stops playback and robot/live activity, restores the audio and settings,
+and reloads the page. It does not generate music, start playback or reconnect
+live movement input. Normal browser MIDI discovery and permission handling may
+run. Use Connect live or Connect MIDI device when needed, then Play to resume.
+Running generation requests and pending auto-play are not replayed by saved
+versions; already submitted jobs can finish separately.
 
 ### Academic study recording
 
@@ -434,11 +453,63 @@ movement-to-output relationships.
 The **Music mixer** tab opens the mixer, with **Create instrumental music** at the top.
 The next-track prompt, BPM, key, instruments, and length stay visible.
 **Start music** requests original instrumental music and separates its
-stems. The mixer plays and shows only instrumental stems; the separated vocal
+stems. Generated tracks play and show only instrumental stems; the separated vocal
 stem is excluded from playback and mappings. **Recent tracks** recalls saved music;
 **Play saved track** starts the selected track and follows the **Next track** choice.
 The previous interface remains available through **Previous version**
 or directly at <http://127.0.0.1:8790/#elevenlabs>.
+
+For optional custom audio, expand **Recent tracks → Use your own audio** and
+choose a WAV, MP3, FLAC, OGG, M4A or AAC file up to **128 MiB**, in mono or stereo.
+There is no fixed duration limit. Loading saves the audio locally, selects **Loop**, and does not
+start playback. **Separate with ElevenLabs** explicitly sends that audio to
+ElevenLabs and uses credits. Once complete, the individual stems, including
+vocals, are available in the mixer. **Sessions** includes selected custom audio
+and completed stems in its saved versions and ZIP exports. **Generate new** can
+create fresh music from the prompt; uploaded audio is not a continuation source.
+
+Imported tracks prepare beat timing automatically as soon as they are loaded.
+A small **Aligning beats…** status changes to **Beat sync ready** when the local
+analysis has finished. Press **Play saved track** as usual: if preparation is
+still running, playback waits for it. **Stop** cancels a pending start. Loading,
+analysis and session restoration never start playback or enable the robot.
+Completed analysis is reused when saved audio is loaded again.
+When Keirzo's drums are already armed, playback allows a brief startup delay if
+needed so the first strike can be scheduled before the audio reaches its beat.
+
+Keirzo's **Follow → Music mixer** uses the detected timestamps, including leading
+silence, pauses and tempo changes. The analysis prefers a completed drum stem
+when available and otherwise uses the full mix. It also estimates the four-beat
+groove's accent position. No audio is sent to ElevenLabs and no credits are used.
+Playback-speed changes scale the beat timing with the audio. If a reliable map
+cannot be prepared, playback reports the problem and waits; it does not silently
+fall back to a grid starting at the beginning of the file.
+
+**Recent tracks → Beat timing · Advanced** contains optional corrections and
+**Retry beat analysis** when needed. **Timing adjustment (ms)** shifts the beats,
+with positive values moving them later. **First detected beat in bar** defaults
+to **Automatic**; choosing Beat 1–4 overrides the estimated groove accent. These
+settings do not trim or move the audio and can only change while stopped.
+Detection can be uncertain on weak or ambiguous rhythms. **Analyze again**
+prepares and applies timing automatically, including a drum stem that completed
+since the earlier full-mix analysis. The same input reuses its existing result.
+**Sessions** retains the analysis and per-track settings with the saved audio.
+
+**Track BPM (optional)** in the advanced controls supplies a starting estimate for uploaded audio; it does
+not constrain detected beats to a fixed grid or change the audio. If detection
+chooses half or double the intended pulse, enter a starting estimate and choose
+**Analyze again** in the advanced controls. **Timing mode → Manual BPM** is an
+explicit advanced override that restores a fixed grid from the file's start.
+Leave **Automatic** selected for normal imported-track alignment. The master's
+**Playback speed** changes how fast the audio plays: 120 BPM at 110% plays at
+132 BPM. Pitch shift is a separate control. BPM beside **Next track prompt**
+requests a tempo for newly generated music. Generated tracks retain their
+requested-tempo clock unless **Analyze beats → Use detected beats** is selected
+in the advanced timing controls.
+
+Normal setup installs the local beat-analysis dependencies. To add them to an
+existing installation, run `.venv/bin/python -m pip install -r requirements-beat-tracking.txt`
+and restart the dashboard. No API key or downloaded model is needed.
 
 **Next track** has four choices:
 

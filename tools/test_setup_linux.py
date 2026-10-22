@@ -106,7 +106,7 @@ class SetupLinuxTests(unittest.TestCase):
         (self.root / "tools").mkdir()
         for name in ("setup_linux.sh", "configure_api_key.py"):
             shutil.copy2(TOOLS / name, self.root / "tools" / name)
-        for name in ("requirements-robot.txt", "requirements-rap-response.txt", "Makefile"):
+        for name in ("requirements-robot.txt", "requirements-rap-response.txt", "requirements-beat-tracking.txt", "Makefile"):
             (self.root / name).write_text("# fixture\n", encoding="utf-8")
         binary = self.root / "bin"
         binary.mkdir()
@@ -151,6 +151,7 @@ class SetupLinuxTests(unittest.TestCase):
         self.assertEqual(pip[0][strategy + 1], "only-if-needed")
         self.assertIn("requirements-robot.txt", pip[0])
         self.assertIn("requirements-rap-response.txt", pip[0])
+        self.assertIn("requirements-beat-tracking.txt", pip[0])
 
     def test_default_fresh_install_includes_system_native_and_whisper(self):
         result = self.run_setup(SETUP_FIXTURE_MISSING="ffmpeg,python3-venv")

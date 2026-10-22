@@ -288,13 +288,15 @@ class RobotControlTests(unittest.TestCase):
         self.assertEqual(encode_osc("/motor", ["drum", "torque", 0]),
                          b"/motor\0\0,ssi\0\0\0\0drum\0\0\0\0torque\0\0\0\0\0\0")
 
-    def test_drum_torque_preview_includes_fixed_rest_goals_before_enabling(self):
+    def test_drum_torque_preview_includes_preload_and_powered_rest_move(self):
         code, result = self.post("command", kind="drums_torque", enabled=True, dry_run=True)
         self.assertEqual(code, 200)
         self.assertEqual([command["args"] for command in result["commands"]],
                          [[motor, "profile_ms", 2000, "goal", rest]
                           for motor, rest in enumerate((2200, 1850, 2300, 2600))]
-                         + [[motor, "torque", 1] for motor in range(4)])
+                         + [[motor, "torque", 1] for motor in range(4)]
+                         + [[motor, "profile_ms", 2000, "goal", rest]
+                            for motor, rest in enumerate((2200, 1850, 2300, 2600))])
         self.assertIn("confirms arrival", result["message"])
         self.assert_no_io()
 

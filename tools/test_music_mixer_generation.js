@@ -699,6 +699,77 @@ async function main() {
     original.resolve(job("retired-original")); await started; await settle();
     assert.equal(h.paid().length, 1); assert.equal(h.engine.snapshot().track.id, "chosen"); h.coordinator.stop();
   }
+  {
+    const uploaded = job("custom", { origin: "uploaded" });
+    const h = harness({ choice: { mode: "loop", trackId: "" }, reentrant: true });
+    await h.coordinator.recall(uploaded); await h.coordinator.resume(); await settle();
+    assert.equal(h.engine.snapshot().track.id, uploaded.id);
+    assert.equal(h.engine.snapshot().running, true);
+    assert.equal(h.coordinator.snapshot().phase, "looping");
+    assert.equal(h.calls.filter(call => call.path).length, 0, "recalling and playing custom audio in Loop never submits generation or separation");
+    h.coordinator.stop();
+  }
+  for (const mode of ["new", "similar"]) {
+    const uploaded = job("custom", { origin: "uploaded" });
+    const h = harness({ track: uploaded, choice: { mode: "loop", trackId: "" }, reentrant: true });
+    await h.coordinator.resume();
+    h.choice.mode = mode; h.coordinator.settingsChanged(); h.advance(650); await settle();
+    assert.equal(h.paid().length, 1);
+    assert.equal(h.paid()[0].path, "/generations", "custom audio never becomes a provider continuation anchor");
+    assert.equal(h.paid()[0].body.plan_id, "new-plan");
+    assert.deepEqual(h.calls.find(call => call.path === "/plans").body,
+      { kind: "original", duration_seconds: 60, settings: h.settings.settings }, "upcoming custom-audio generations use only the current musical prompt");
+    assert.equal(h.engine.snapshot().track.id, uploaded.id, "custom audio continues while the new piece is prepared");
+    assert.equal(h.engine.snapshot().queuedTrack.id, "new-1");
+    assert.equal(h.calls.filter(call => call.audio === "set").length, 0, "a prompt-based next track is queued without restarting playback");
+    const pending = JSON.parse([...h.saved.values()][0]);
+    assert.equal(pending.kind, "next"); assert.equal(pending.path, "/generations"); assert.equal(pending.sourceId, uploaded.id);
+    h.promote(); await settle();
+    assert.equal(h.paid().at(-1).path, "/continuations", "generated music resumes its normal continuation flow after promotion");
+    h.coordinator.stop();
+  }
+  {
+    const uploaded = job("custom", { origin: "uploaded" }), inFlight = defer();
+    const original = job("older-original", { plan_id: "new-plan" });
+    let submitted = false;
+    const h = harness({ choice: { mode: "new", trackId: "" }, reentrant: true, request(path, options) {
+      if (path === "/generations" && options.method === "POST" && !submitted) { submitted = true; return inFlight.promise; }
+      if (path === "/generations" && options.method !== "POST") return { jobs: submitted ? [original] : [] };
+    } });
+    const started = h.coordinator.startNew(); await settle();
+    h.choice.mode = "loop"; h.coordinator.settingsChanged(); await h.coordinator.recall(uploaded);
+    inFlight.resolve(original); await started;
+    await h.coordinator.resume(); await settle();
+    assert.equal(h.engine.snapshot().track.id, uploaded.id);
+    assert.equal(h.paid().length, 1, "upload recall never resumes an earlier generation pipeline");
+    assert.equal(JSON.parse([...h.saved.values()][0]).saveOnly, true);
+    h.choice.mode = "new"; h.coordinator.settingsChanged(); h.advance(650); await settle();
+    assert.ok(h.tracks.some(track => track.id === original.id), "earlier accepted work remains recoverable into history");
+    assert.equal(h.engine.snapshot().track.id, uploaded.id, "recovered older originals cannot replace custom audio");
+    assert.ok(!h.calls.some(call => call.audio === "set" && call.id === original.id));
+    assert.equal(h.paid().length, 2); assert.equal(h.paid()[1].path, "/generations");
+    assert.equal(h.engine.snapshot().queuedTrack.id, "new-1"); h.coordinator.stop();
+  }
+  {
+    const uploaded = job("custom", { origin: "uploaded" });
+    const h = harness({ track: uploaded, choice: { mode: "new", trackId: "" }, request(path, options) {
+      if (path === "/generations" && options.method === "POST") throw new Error("Response lost");
+    } });
+    await h.coordinator.resume(); await settle();
+    assert.equal(h.paid().length, 1);
+    await h.coordinator.retry(); await settle();
+    assert.equal(h.paid().length, 1, "even explicit retry cannot repeat an uncertain non-idempotent original request");
+    h.coordinator.stop();
+    const recovered = job("fresh-custom-next", { plan_id: "new-plan" });
+    const restored = harness({ track: uploaded, saved: h.saved, choice: { mode: "new", trackId: "" }, request(path) {
+      if (path === "/generations") return { jobs: [recovered] };
+    } });
+    await settle(); assert.equal(restored.calls.length, 0, "restoring an upload's upcoming track does not resume work");
+    await restored.coordinator.resume(); await settle();
+    assert.equal(restored.paid().length, 0, "an uncertain original request is recovered by GET without another charge");
+    assert.equal(restored.engine.snapshot().track.id, uploaded.id);
+    assert.equal(restored.engine.snapshot().queuedTrack.id, recovered.id); restored.coordinator.stop();
+  }
   console.log("Mixer generation tests passed");
 }
 main().catch((error) => { console.error(error); process.exitCode = 1; });

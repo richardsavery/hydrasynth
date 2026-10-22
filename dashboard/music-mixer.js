@@ -3,6 +3,7 @@
 // Mixer preferences stay separate from the previous music interface.
 globalThis.HydraMusicMixer = (() => {
   const KEY = "hydra.music-mixer.demo.v1";
+  const UPLOAD_KEY = "hydra.music-mixer.upload.v1", MAX_UPLOAD_BYTES = 128 * 1024 * 1024;
   const study = (type, payload) => { try { globalThis.HydraStudy?.emit?.(type, payload); } catch (_) {} };
   let studyTransport = "", studyGeneration = "";
   let mappingTracker, mappingMutationDepth = 0, pendingMappingSnapshot, viewSequence = 0;
@@ -20,10 +21,18 @@ globalThis.HydraMusicMixer = (() => {
   let root, engine, generation, config, snapshot, sourceBridge, signalLibrary, savedRap, initialized = false, active = false;
   let generationState = { phase: "idle", enabled: false }, shownTrackId = null;
   let tracks = [], selectedId = "", nextTrackId = "", fieldsKey = "", fetchRun = 0, controller, lastSave = 0, loadingTrack = false, rendering = false;
+  let custom = null, customBusy = false, customMessage = "", customError = false, customRun = 0, customTimer, customController, selectionRevision = 0, separationReady = null;
+  let beatBusy = false, beatRun = 0, beatTimer, beatController, beatMessage = "", beatError = false, beatAvailable = null, beatSetupError = "";
   const history = new Map();
+  const plans = new Map();
+  const beatAnalyses = new Map();
+  const automaticBeats = (track = snapshot?.track) => track?.origin === "uploaded" && engine?.getConfig().beatTracking?.[track.id]?.mode !== "manual";
   const $ = (id) => root.querySelector(`#mm-${id}`);
   const api = () => globalThis.HydraMusicMixerEngine;
   const fields = () => snapshot?.fields || [];
+  let skeletonDetail = "region";
+  const visibleFields = (available = fields(), selected) => available.filter((field) => !field.skeletonLevel
+    || field.key === selected || field.skeletonLevel === skeletonDetail || (skeletonDetail === "axis" && field.skeletonLevel === "raw"));
   const sourceFor = (key, available = fields()) => {
     const field = available.find((item) => item.key === key);
     return globalThis.HydraElevenRealtime.validateSource({ sourceKey: key || "__unassigned", reducer: field?.default_reducer || field?.reducers?.[0] || "mean", rangeMode: "auto" });
@@ -139,6 +148,7 @@ globalThis.HydraMusicMixer = (() => {
   function fieldLabel(field) {
     if (!field) return "Choose an input";
     const name = field.optionLabel || field.name || field.label || field.fieldId || field.key;
+    if (field.skeletonLevel) return readable(name);
     if (["position", "velocity"].includes(field.kind)) {
       const joint = field.label || name.replace(new RegExp(`\\s+${field.kind}$`, "i"), "");
       return `${readable(joint)} · ${readable(field.kind)}`;
@@ -148,7 +158,7 @@ globalThis.HydraMusicMixer = (() => {
   const channelLabel = (field) => readable(field?.channelName || field?.channelId || (field?.key?.startsWith("demo:") ? "Simulated signal" : ""));
   const combinationLabel = (bus) => bus.sources.length === 1 ? "Single input" : `${bus.sources.length} inputs · ${OPERATORS[bus.operator]}`;
   function sourceOptions(selected) {
-    const items = fields(), groups = new Map();
+    const items = visibleFields(fields(), selected), groups = new Map();
     for (const field of items) {
       const channel = channelLabel(field);
       if (!groups.has(channel)) groups.set(channel, []);
@@ -165,7 +175,7 @@ globalThis.HydraMusicMixer = (() => {
     const reducers = [...new Set([...(field?.reducers || ["value", "mean", "rms", "minimum", "maximum", "index"]), source.reducer])];
     return `<div class="mm-source" data-source="${index}">
       <div class="mm-source-line"><label class="sr-only" for="mm-${escape(bus.id)}-source-${index}">Input ${index + 1} for ${escape(bus.name)}</label><select id="mm-${escape(bus.id)}-source-${index}" data-source-field="sourceKey">${sourceOptions(source.sourceKey)}</select><output data-raw title="Incoming value">—</output><button class="mm-button mm-icon" data-action="remove-source" aria-label="Remove input ${index + 1}" ${bus.sources.length === 1 ? "disabled" : ""}>×</button></div>
-      <p class="mm-source-caption">${escape(field ? [channelLabel(field), source.reducer === "index" ? `Element ${source.index + 1}` : READ_MODES[source.reducer] || readable(source.reducer)].filter(Boolean).join(" · ") : source.sourceKey === "__unassigned" ? "No input selected" : "Input unavailable")}</p>
+      <p class="mm-source-caption"${field?.kind === "motion" ? ' title="Movement speed combines X, Y and Z. Regions average their tracked joints."' : ""}>${escape(field ? [channelLabel(field), field.kind === "motion" ? "Movement speed · m/s" : source.reducer === "index" ? `Element ${source.index + 1}` : READ_MODES[source.reducer] || readable(source.reducer)].filter(Boolean).join(" · ") : source.sourceKey === "__unassigned" ? "No input selected" : "Input unavailable")}</p>
       <meter min="0" max="1" value="0" data-source-meter aria-label="Normalized input ${index + 1}"></meter>
       <details class="mm-source-details"><summary><span data-range-summary>${source.rangeMode === "auto" ? "Auto learn" : "Fixed range"}</span> <span data-bounds></span></summary>
         <div class="mm-pair"><label>Read as<select data-source-field="reducer">${reducers.map((reducer) => `<option value="${escape(reducer)}" ${reducer === source.reducer ? "selected" : ""}>${escape(READ_MODES[reducer] || readable(reducer))}</option>`).join("")}</select></label><label>Range<select data-source-field="rangeMode"><option value="auto" ${source.rangeMode === "auto" ? "selected" : ""}>Auto learn</option><option value="fixed" ${source.rangeMode === "fixed" ? "selected" : ""}>Fixed</option></select></label></div>
@@ -178,6 +188,8 @@ globalThis.HydraMusicMixer = (() => {
   function renderBuses() {
     rendering = true;
     try {
+    $("skeleton-detail-field").hidden = !fields().some((field) => field.skeletonLevel);
+    $("skeleton-detail").value = skeletonDetail;
     $("buses").innerHTML = config.buses.map((bus, i) => `<article class="mm-bus mm-color-${i % 4}" data-bus="${escape(bus.id)}">
       <div class="mm-bus-head"><span class="mm-bus-letter">${String.fromCharCode(65 + i)}</span><input data-bus-name value="${escape(bus.name)}" maxlength="30" aria-label="Signal mix name"><output data-bus-value>—</output><button class="mm-button mm-icon" data-action="remove-bus" aria-label="Remove ${escape(bus.name)}" ${config.buses.length === 1 ? "disabled" : ""}>×</button></div>
       <p class="mm-bus-combination">${escape(combinationLabel(bus))}</p>${libraryRow(bus)}
@@ -239,7 +251,7 @@ globalThis.HydraMusicMixer = (() => {
     $("generate").textContent = first ? "Creating music…" : saved ? "Play selected track"
       : looping ? next.track ? "Play current track" : "Create starting track" : "Start music";
     $("stop").disabled = !next.running && !next.starting && !generationState.enabled && !first;
-    $("play").textContent = next.starting ? "Loading…" : "▶ Play saved track";
+    $("play").textContent = next.starting ? next.beatTiming?.state === "preparing" ? "Aligning beats…" : "Loading…" : "▶ Play saved track";
     $("track").disabled = first;
     $("retry").hidden = generationState.phase !== "error";
     $("current").textContent = next.track ? trackLabel(next.track) : "—";
@@ -258,6 +270,7 @@ globalThis.HydraMusicMixer = (() => {
     const nextLabel = looping ? "" : saved ? choice.trackId ? savedTrack ? trackLabel(savedTrack) : "Selected saved track" : "" : generationState.nextPrompt || "";
     $("up-next").hidden = !next.running || !generationState.enabled || !nextLabel;
     $("next-prompt").textContent = nextLabel;
+    renderCustom();
   }
   function updateGeneration(next) {
     if (globalThis.HydraStudy?.emit) {
@@ -279,10 +292,13 @@ globalThis.HydraMusicMixer = (() => {
   }
   function syncTrack(track) {
     if (!track || track.id === shownTrackId) return;
+    stopBeatChecks(); beatMessage = ""; beatError = false;
+    if (track.beat_analysis) beatAnalyses.set(track.id, track.beat_analysis);
     shownTrackId = track.id; selectedId = track.id;
     rememberTrack(track);
-    const names = ["master", ...[...new Set(api().instrumentalStems(track.stems || track.stem_separation?.stems).map((stem) => stem.name))].filter((name) => name !== "master").slice(0, 6)];
+    const names = ["master", ...[...new Set(api().stemsForTrack(track).map((stem) => stem.name))].filter((name) => name !== "master").slice(0, 6)];
     config = engine.getConfig();
+    config.includeVocals = track.origin === "uploaded";
     config.channels = names.map((name) => config.channels.find((channel) => channel.name === name) || api().defaultChannel(name));
     commit("channels", "track_channels_changed", { track_id: track.id });
   }
@@ -290,6 +306,9 @@ globalThis.HydraMusicMixer = (() => {
     if (!root) return;
     const sequence = ++viewSequence;
     snapshot = next;
+    // Automatic preparation installs metadata in the engine. Prefer that result
+    // to an older manual-analysis response cached by this view.
+    if (automaticBeats(next.track) && next.track?.beat_analysis) beatAnalyses.set(next.track.id, next.track.beat_analysis);
     if (engine && next.track?.id !== shownTrackId) syncTrack(next.track);
     // Promoting a track can synchronously publish a newer snapshot after its
     // channels are normalized. That snapshot supersedes this earlier output.
@@ -308,7 +327,7 @@ globalThis.HydraMusicMixer = (() => {
     $("source-label").textContent = next.sourceLabel || "Choose an input in Connections";
     $("clock").textContent = `${time(next.position)} / ${time(next.duration)}`;
     $("progress").value = next.duration ? next.position / next.duration : 0;
-    $("transport-status").textContent = next.running ? next.sourceValid ? "Playing" : "Waiting for mapped input" : next.starting ? "Loading audio" : "Stopped";
+    $("transport-status").textContent = next.running ? next.sourceValid ? "Playing" : "Waiting for mapped input" : next.starting ? next.beatTiming?.state === "preparing" ? "Aligning beats…" : "Loading audio" : "Stopped";
     const nextKey = JSON.stringify(next.fields || []);
     if (nextKey !== fieldsKey) { fieldsKey = nextKey; if (config) renderBuses(); }
     for (const bus of next.buses || []) {
@@ -342,11 +361,19 @@ globalThis.HydraMusicMixer = (() => {
   }
   async function read(path, signal) {
     const response = await fetch(`/api/elevenlabs${path}`, { cache: "no-store", signal });
-    if (!response.ok) throw new Error(`Could not load saved music (${response.status}).`);
+    if (!response.ok) {
+      const error = new Error(`Could not load saved music (${response.status}).`);
+      error.status = response.status;
+      throw error;
+    }
     return response.json();
   }
   function renderTracks() {
-    $("track").innerHTML = '<option value="">Recall a track…</option>' + tracks.map((track) => `<option value="${escape(track.id)}" ${track.id === selectedId ? "selected" : ""}>${escape(trackLabel(track))}</option>`).join("");
+    const missing = selectedId && !tracks.some((track) => track.id === selectedId);
+    $("track").innerHTML = '<option value="">Recall a track…</option>'
+      + (missing ? `<option value="${escape(selectedId)}">Saved track unavailable · ${escape(selectedId)}</option>` : "")
+      + tracks.map((track) => `<option value="${escape(track.id)}">${escape(trackLabel(track))}</option>`).join("");
+    $("track").value = selectedId;
     renderNextTracks();
   }
   function renderNextTracks() {
@@ -357,51 +384,355 @@ globalThis.HydraMusicMixer = (() => {
     $("next-track").value = nextTrackId;
   }
   function trackLabel(track) {
-    const date = new Date(track.created_at), when = Number.isNaN(date.getTime()) ? "Saved track" : date.toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", second: "2-digit" });
-    const title = track.realtime?.generation_settings?.style || track.generation_settings?.style;
-    return `${when} · ${Math.round(track.audio?.duration_seconds || track.requested_duration_seconds || 0)}s${title ? ` · ${title.slice(0, 45)}` : ""}`;
+    const label = globalThis.HydraElevenLabs.musicLabel(track, plans.get(track.plan_id));
+    return track.origin === "uploaded" ? `${label} · Uploaded` : label;
   }
   function readyTrack(job) {
-    return job.state === "complete" && (job.separate_stems !== true || (job.stem_separation?.state === "complete" && job.stem_separation.stems?.length));
+    return job.state === "complete" && (job.origin === "uploaded" || job.separate_stems !== true || (job.stem_separation?.state === "complete" && job.stem_separation.stems?.length));
+  }
+  function persistCustom() {
+    try {
+      if (custom) localStorage.setItem(UPLOAD_KEY, JSON.stringify({ id: custom.id, name: custom.name,
+        upload_pending: custom.upload_pending === true, separation_intent: custom.separation_intent === true }));
+      else localStorage.removeItem(UPLOAD_KEY);
+    } catch (_) { /* Uploads remain available in Recent tracks. */ }
+  }
+  function renderCustom() {
+    const state = custom?.stem_separation?.state;
+    const pending = ["queued", "generating", "submitting", "separating", "running"].includes(state);
+    $("audio-file").disabled = customBusy || pending;
+    $("separate").disabled = customBusy || !custom || custom.state !== "complete" || separationReady === false
+      || pending || ["complete", "unknown", "failed"].includes(state) || custom.separation_intent === true && !state;
+    $("separate").textContent = pending ? "Separating…" : state === "complete" ? "Stems ready" : "Separate with ElevenLabs";
+    $("custom-load").hidden = !custom || custom.state !== "complete" || (selectedId === custom.id && (!custom.stem_separation?.stems?.length || snapshot?.track?.stems?.length));
+    $("custom-load").disabled = loadingTrack || snapshot?.starting === true;
+    $("custom-check").hidden = !custom || customBusy || (!customError && !pending && !["unknown", "failed"].includes(state) && !custom.upload_pending && custom.state === "complete");
+    $("custom-cost").hidden = !custom;
+    $("custom-cost").textContent = separationReady === false ? "ElevenLabs separation is unavailable. Configure the API key in server settings; local audio playback still works."
+      : "Uploads this audio to ElevenLabs and uses credits.";
+    $("custom-tempo").hidden = custom?.state !== "complete" || snapshot?.track?.id !== custom?.id;
+    if (globalThis.document?.activeElement !== $("track-bpm")) $("track-bpm").value = String(engine?.getConfig().uploadedBpms?.[custom?.id] ?? "");
+    $("custom-status").textContent = customMessage || (custom?.upload_pending ? `${custom.name}: checking local upload…`
+      : pending ? `${custom.name}: separating stems with ElevenLabs…`
+        : state === "unknown" ? `${custom.name}: the separation outcome is uncertain. Check status before submitting anything again.`
+          : state === "failed" ? `${custom.name}: ${custom.stem_separation.error || "Separation failed. The original audio is still available."}`
+            : custom?.state === "complete" ? `${custom.name} · ${state === "complete" ? "Stems ready" : "Saved locally"}${selectedId === custom.id ? " · Loaded" : " · Available in Recent tracks"}`
+              : custom ? `${custom.name}: check status to restore this audio.` : "WAV, MP3, FLAC, OGG, M4A or AAC · Mono or stereo · Up to 128 MB, no fixed duration limit. Saved locally until you choose separation.");
+    $("custom-status").classList.toggle("is-error", customError || ["failed", "unknown"].includes(state));
+    renderBeats();
+  }
+  function renderBeats() {
+    const track = snapshot?.track, analysis = beatAnalyses.get(track?.id) || track?.beat_analysis, state = analysis?.state;
+    const settings = engine?.getConfig().beatTracking?.[track?.id] || {};
+    const automatic = automaticBeats(track), timing = snapshot?.beatTiming?.trackId === track?.id ? snapshot.beatTiming : null;
+    const pending = automatic ? timing?.state === "preparing" : ["queued", "analyzing"].includes(state), complete = Boolean(globalThis.HydraElevenPlayer?.readBeatMap?.(
+      { ...track, beat_analysis: analysis }, { ...settings, enabled: true }));
+    const invalid = state === "complete" && !complete;
+    const installed = settings.enabled && complete && track?.beat_analysis?.analysis_id === analysis.analysis_id &&
+      track?.beat_analysis?.updated_at === analysis.updated_at && Boolean(globalThis.HydraElevenPlayer?.readBeatMap?.(track, settings));
+    const warnings = Array.isArray(analysis?.warnings) ? analysis.warnings.filter(value => typeof value === "string").slice(0, 16) : [];
+    const playing = snapshot?.running || snapshot?.starting || loadingTrack;
+    const failed = automatic && timing?.state === "failed";
+    $("beat-sync").hidden = !automatic;
+    $("beat-sync").textContent = !automatic ? "" : pending ? `Aligning beats…${finite(timing.progress) ? ` ${percent(timing.progress)}` : ""}`
+      : timing?.state === "ready" && installed ? "Beat sync ready" : failed ? "Beat sync unavailable · Retry in Beat timing" : "Beat sync prepares automatically before playback";
+    $("beat-sync").classList.toggle("is-error", failed);
+    $("beats").hidden = !track;
+    $("beat-mode-field").hidden = track?.origin !== "uploaded";
+    $("beat-mode").value = automatic ? "auto" : "manual";
+    $("beat-mode").disabled = playing;
+    $("analyze-beats").disabled = !track || playing || beatBusy || pending || beatAvailable === false;
+    $("analyze-beats").textContent = beatBusy || pending ? "Aligning beats…" : failed || state === "failed" ? "Retry beat analysis" : complete ? "Analyze again" : "Analyze beats";
+    $("beat-check").hidden = automatic || !beatError;
+    $("beat-check").disabled = beatBusy;
+    $("use-beats-field").hidden = automatic;
+    $("use-beats").checked = settings.enabled === true;
+    $("use-beats").disabled = playing || beatBusy || automatic || !complete && settings.enabled !== true;
+    $("beat-adjustments").hidden = !complete;
+    for (const id of ["beat-offset", "beat-bar"]) $(id).disabled = playing || beatBusy || pending || !complete;
+    if (globalThis.document?.activeElement !== $("beat-offset")) $("beat-offset").value = String(Math.round((settings.offsetSeconds || 0) * 1000));
+    if (globalThis.document?.activeElement !== $("beat-bar")) $("beat-bar").value = settings.firstBeatInBar ? String(settings.firstBeatInBar) : "";
+    const summary = complete ? `${analysis.beats_seconds.length} beats · First at ${format(analysis.beats_seconds[0])} s · ${format(analysis.bpm_median)} BPM${finite(analysis.bpm_min) && finite(analysis.bpm_max) && Math.round(analysis.bpm_min) !== Math.round(analysis.bpm_max) ? ` (${Math.round(analysis.bpm_min)}–${Math.round(analysis.bpm_max)})` : ""} · ${analysis.source === "drums" ? "Drum stem" : "Full mix"}.` : "";
+    $("beat-status").textContent = automatic ? pending ? "Finding beats locally and aligning the track automatically. Play waits until alignment is ready. No ElevenLabs credits."
+      : failed ? `${timing.error || "Could not find reliable beat timing."} Retry beat analysis to prepare this track. Playback and synced drums wait for reliable timing.`
+        : installed ? `${summary} Beat sync and groove alignment are applied automatically. ${warnings.join(" ")}${playing ? " Stop playback to change advanced timing." : ""}`
+          : beatAvailable === false ? beatSetupError || "Install the local audio analysis dependencies to prepare beat sync."
+            : "Beat sync is prepared and applied automatically when this track is loaded. No ElevenLabs credits."
+      : beatMessage || (pending ? `Finding beat positions locally${finite(analysis.progress) ? ` · ${percent(analysis.progress)}` : ""}. You can leave this panel and return when it is ready.`
+      : complete ? `${summary} ${warnings.join(" ")}${playing ? " Stop playback to change beat alignment." : installed ? " Detected beats are used for sync."
+        : settings.enabled ? " Switch Use detected beats off and back on while stopped to apply this analysis." : " Enable Use detected beats before playback to align Keirzo."}`
+        : invalid ? "Saved beat timing is invalid or belongs to different audio. Analyze again, or switch off Use detected beats to use Track BPM."
+          : state === "failed" ? `${analysis.error || "Could not find a reliable beat map."}${settings.enabled ? " Switch off Use detected beats to use Track BPM." : " You can enter Track BPM instead."}`
+            : settings.enabled ? "Detected beats are unavailable. Analyze beats, or switch off Use detected beats to use Track BPM."
+          : beatAvailable === false ? beatSetupError || "Local beat analysis needs the optional audio analysis dependencies on this computer."
+            : `Analyze locally before playback to follow tempo changes and leading silence. No ElevenLabs credits. ${track?.origin === "uploaded" ? "Track BPM is an optional starting estimate." : "The requested BPM supplies a starting estimate when available."}`);
+    $("beat-status").classList.toggle("is-error", failed || beatError || state === "failed" || invalid || settings.enabled && !complete && !pending);
+  }
+  function stopBeatChecks() {
+    ++beatRun; clearTimeout(beatTimer); beatTimer = null; beatController?.abort(); beatController = null; beatBusy = false;
+  }
+  function acceptBeatAnalysis(id, analysis, run) {
+    if (!active || run !== beatRun || snapshot?.track?.id !== id) return;
+    beatAnalyses.set(id, analysis); beatMessage = ""; beatError = false;
+    if (custom?.id === id) custom.beat_analysis = analysis;
+    rememberTrack({ ...snapshot.track, beat_analysis: analysis });
+    // Results are metadata only. Applying a new clock is an explicit stopped-player action.
+    if (["queued", "analyzing"].includes(analysis.state)) {
+      clearTimeout(beatTimer); beatTimer = setTimeout(() => checkBeats(), 1500);
+    }
+    renderBeats();
+  }
+  async function checkBeats() {
+    if (!active || !snapshot?.track || beatBusy) return;
+    if (automaticBeats()) return;
+    const id = snapshot.track.id, run = ++beatRun;
+    clearTimeout(beatTimer); beatController?.abort(); beatController = new AbortController();
+    beatBusy = true; beatMessage = "Checking beat analysis…"; renderBeats();
+    try {
+      const analysis = await customRequest(`/generations/${encodeURIComponent(id)}/beats`, { signal: beatController.signal });
+      acceptBeatAnalysis(id, analysis, run);
+    } catch (error) {
+      if (run !== beatRun || error.name === "AbortError") return;
+      beatError = true; beatMessage = `${error.message} Use Check analysis to recover its status.`;
+    } finally { if (run === beatRun) { beatBusy = false; renderBeats(); } }
+  }
+  async function analyzeBeats() {
+    if (!active || !snapshot?.track || $("analyze-beats").disabled) return;
+    if (automaticBeats()) {
+      try { await engine.prepareBeatTiming({ force: true }); save(); }
+      catch (error) { notice(error.message || "Could not align this track.", true); }
+      return;
+    }
+    stopBeatChecks();
+    const track = snapshot.track, id = track.id, run = beatRun;
+    const bpm = track.origin === "uploaded" ? engine.getConfig().uploadedBpms?.[id]
+      : track.generation_settings?.bpm ?? track.realtime?.generation_settings?.bpm ?? plans.get(track.plan_id)?.settings?.bpm;
+    beatBusy = true; beatError = false; beatMessage = "Finding beat positions locally…";
+    // A new analysis must be enabled explicitly before it becomes the clock.
+    // Turn off the previous detected map while stopped, preserving its adjustments.
+    config = engine.getConfig();
+    if (config.beatTracking?.[id]?.enabled) {
+      config.beatTracking[id].enabled = false;
+      commit("none", "beat_tracking_analysis_requested", { track_id: id });
+    }
+    renderBeats();
+    try {
+      const analysis = await customRequest(`/generations/${encodeURIComponent(id)}/beats`, { method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(finite(bpm) && bpm >= 20 && bpm <= 300 ? { bpm_hint: bpm } : {}) });
+      acceptBeatAnalysis(id, analysis, run);
+    } catch (error) {
+      if (run !== beatRun) return;
+      beatError = true; beatMessage = `${error.message} Use Check analysis to recover its status.`;
+    } finally { if (run === beatRun) { beatBusy = false; renderBeats(); } }
+  }
+  function changeBeatSettings(field) {
+    const track = snapshot?.track, analysis = beatAnalyses.get(track?.id) || track?.beat_analysis;
+    if (!track || snapshot?.running || snapshot?.starting || loadingTrack || beatBusy) { renderBeats(); return; }
+    if (field === "mm-use-beats" && automaticBeats(track)) { renderBeats(); return; }
+    if (["mm-beat-offset", "mm-beat-bar"].includes(field) && automaticBeats(track) && snapshot?.beatTiming?.state === "preparing") { renderBeats(); return; }
+    config = engine.getConfig();
+    if (field === "mm-beat-mode") {
+      const automatic = $("beat-mode").value === "auto";
+      config.beatTracking = { ...(config.beatTracking || {}), [track.id]: { ...(config.beatTracking?.[track.id] || {}), mode: automatic ? "auto" : "manual", enabled: automatic } };
+      stopBeatChecks(); beatMessage = ""; beatError = false;
+      commit("none", "beat_tracking_changed", { track_id: track.id, mode: automatic ? "auto" : "manual" });
+      if (automatic) engine.prepareBeatTiming().then(save).catch(error => notice(error.message, true));
+      renderBeats(); return;
+    }
+    if (field === "mm-use-beats" && !$("use-beats").checked) {
+      // Missing or rejected metadata must never trap a saved session in a
+      // detected-clock mode that cannot run. Disabling does not need a map.
+      config.beatTracking = { ...(config.beatTracking || {}), [track.id]: { ...(config.beatTracking?.[track.id] || {}), enabled: false } };
+      commit("none", "beat_tracking_changed", { track_id: track.id, enabled: false });
+      notice(""); renderBeats(); return;
+    }
+    if (!globalThis.HydraElevenPlayer?.readBeatMap?.({ ...track, beat_analysis: analysis }, { ...config.beatTracking?.[track.id], enabled: true })) {
+      renderBeats(); return;
+    }
+    const milliseconds = Number($("beat-offset").value), firstBeatInBar = $("beat-bar").value === "" ? null : Number($("beat-bar").value);
+    if (!Number.isFinite(milliseconds) || Math.abs(milliseconds) > 10000 || firstBeatInBar !== null && (!Number.isInteger(firstBeatInBar) || firstBeatInBar < 1 || firstBeatInBar > 4)) {
+      notice("Use a timing adjustment between −10000 and 10000 ms and a first beat position from 1 to 4.", true); return;
+    }
+    const settings = { ...(config.beatTracking?.[track.id] || {}), enabled: automaticBeats(track) || $("use-beats").checked, offsetSeconds: milliseconds / 1000 };
+    if (firstBeatInBar === null) delete settings.firstBeatInBar; else settings.firstBeatInBar = firstBeatInBar;
+    config.beatTracking = { ...(config.beatTracking || {}), [track.id]: settings };
+    if (engine.updateBeatAnalysis(track.id, analysis) === false) { config = engine.getConfig(); renderBeats(); return; }
+    commit("none", "beat_tracking_changed", { track_id: track.id, ...config.beatTracking[track.id] });
+    notice(""); renderBeats();
+  }
+  async function customRequest(path, options = {}) {
+    const response = await fetch(`/api/elevenlabs${path}`, { cache: "no-store", ...options });
+    let data;
+    try { data = await response.json(); } catch (_) { /* A lost response can be recovered with a GET. */ }
+    if (!response.ok || !data) {
+      const error = new Error(data?.error?.message || data?.error || data?.message || `Could not complete the audio request (${response.status}).`);
+      error.status = response.status; throw error;
+    }
+    return data;
+  }
+  function stopCustomChecks() {
+    ++customRun; clearTimeout(customTimer); customTimer = null; customController?.abort(); customController = null; customBusy = false;
+  }
+  async function loadCustom(id, expectedRevision) {
+    if (!active || expectedRevision !== undefined && (expectedRevision !== selectionRevision || snapshot?.running || snapshot?.starting || generationState.enabled)) return false;
+    const run = ++fetchRun; controller?.abort(); controller = new AbortController();
+    generation.stop();
+    await selectTrack(id, run, controller.signal, true);
+    return run === fetchRun && active;
+  }
+  function scheduleCustomCheck(run) {
+    clearTimeout(customTimer);
+    if (active && run === customRun) customTimer = setTimeout(() => recoverCustom(), 2000);
+  }
+  async function acceptSeparation(separation, run, expectedRevision) {
+    if (run !== customRun || !custom) return;
+    custom.stem_separation = separation;
+    custom.separation_intent = !["complete", "failed", "not_requested"].includes(separation.state);
+    customMessage = ""; customError = false; persistCustom(); rememberTrack(custom);
+    if (separation.state === "complete") {
+      custom.stems = separation.stems || [];
+      const loaded = snapshot?.track?.id === custom.id && JSON.stringify(snapshot.track.stems || []) === JSON.stringify(custom.stems);
+      if (selectedId === custom.id && !loaded) await loadCustom(custom.id, expectedRevision);
+    } else if (["queued", "generating", "submitting", "separating", "running"].includes(separation.state)) scheduleCustomCheck(run);
+    renderCustom();
+  }
+  async function recoverCustom() {
+    if (!active || !custom || customBusy) return;
+    const id = custom.id, run = ++customRun, intent = selectionRevision;
+    clearTimeout(customTimer); customController?.abort(); customController = new AbortController();
+    customBusy = true; renderCustom();
+    try {
+      const job = await customRequest(`/generations/${encodeURIComponent(id)}`, { signal: customController.signal });
+      if (run !== customRun || !active || id !== custom?.id) return;
+      custom = { ...job, separation_intent: custom.separation_intent }; customMessage = ""; customError = false; persistCustom(); rememberTrack(job);
+      const separation = await customRequest(`/generations/${encodeURIComponent(id)}/stems`, { signal: customController.signal });
+      await acceptSeparation(separation, run, intent);
+    } catch (error) {
+      if (run !== customRun || error.name === "AbortError") return;
+      customError = true; customMessage = error.status === 404 && custom.upload_pending
+        ? "The local upload was not found. Choose the file again to upload it; no separation was started."
+        : `Could not check ${custom.name || "custom audio"}: ${error.message} Use Check status to try again.`;
+    } finally { if (run === customRun) { customBusy = false; renderCustom(); } }
+  }
+  async function uploadAudio(file) {
+    if (!file || customBusy || ["queued", "generating", "submitting", "separating", "running"].includes(custom?.stem_separation?.state)) return;
+    if (!/\.(wav|mp3|flac|ogg|m4a|aac)$/i.test(file.name) || !file.size || file.size > MAX_UPLOAD_BYTES) {
+      customMessage = "Choose a mono or stereo WAV, MP3, FLAC, OGG, M4A or AAC file up to 128 MB."; customError = true; renderCustom(); return;
+    }
+    stopCustomChecks();
+    const run = customRun, intent = selectionRevision, previous = custom;
+    const bytes = new Uint8Array(16); globalThis.crypto.getRandomValues(bytes);
+    const id = [...bytes].map((value) => value.toString(16).padStart(2, "0")).join("");
+    custom = { id, name: file.name.replace(/\.[^.]+$/, ""), upload_pending: true };
+    customBusy = true; customMessage = `Saving ${file.name} locally…`; customError = false; persistCustom(); renderCustom();
+    try {
+      const job = await customRequest(`/uploads?filename=${encodeURIComponent(file.name)}&request_id=${id}`, {
+        method: "POST", headers: { "Content-Type": "application/octet-stream" }, body: file
+      });
+      if (run !== customRun) return;
+      custom = job; customMessage = ""; persistCustom(); rememberTrack(job);
+      await loadCustom(job.id, intent);
+    } catch (error) {
+      if (run !== customRun) return;
+      // A successful server upload can outlive its response. Keep its stable ID
+      // for read-only recovery instead of uploading or separating it again.
+      if (error.status >= 400 && error.status < 500) custom = previous;
+      customError = true; customMessage = `${error.message}${custom?.upload_pending ? " Use Check status to recover the local upload." : ""}`; persistCustom();
+    } finally { if (run === customRun) { customBusy = false; $("audio-file").value = ""; renderCustom(); } }
+  }
+  async function separateCustom() {
+    if (customBusy || $("separate").disabled || !custom) return;
+    stopCustomChecks();
+    const id = custom.id, run = customRun, intent = selectionRevision;
+    customBusy = true; customError = false; customMessage = "Checking separation status…"; renderCustom();
+    try {
+      // Check first: another tab, a refresh, or a lost response may have already
+      // submitted this paid request. Only this explicit action may issue a POST.
+      let separation = await customRequest(`/generations/${encodeURIComponent(id)}/stems`);
+      if (run !== customRun) return;
+      if (separation.state === "not_requested") {
+        custom.separation_intent = true; custom.stem_separation = undefined; persistCustom();
+        customMessage = "Submitting audio to ElevenLabs…"; renderCustom();
+        separation = await customRequest(`/generations/${encodeURIComponent(id)}/stems`, {
+          method: "POST", headers: { "Content-Type": "application/json" }, body: "{}"
+        });
+      }
+      await acceptSeparation(separation, run, intent);
+    } catch (error) {
+      if (run !== customRun) return;
+      customError = true; customMessage = `${error.message} Use Check status before retrying separation.`;
+      if (error.status === 503) separationReady = false;
+    } finally { if (run === customRun) { customBusy = false; renderCustom(); } }
   }
   async function selectTrack(id, run, signal, explicitRecall = false) {
     loadingTrack = true; updateView(engine.snapshot());
     try {
-      if (!id) { selectedId = ""; await engine.setTrack(null); config.channels = [api().defaultChannel("master")]; renderTracks(); commit("channels", "track_channels_changed", { track_id: null }); return; }
+      if (!id) { selectedId = ""; await engine.setTrack(null); config.includeVocals = false; config.channels = [api().defaultChannel("master")]; renderTracks(); commit("channels", "track_channels_changed", { track_id: null }); return; }
       const job = await read(`/generations/${encodeURIComponent(id)}`, signal);
       if (run !== fetchRun || !active) return;
       if (!readyTrack(job)) throw new Error("This track's stems are not ready yet.");
-      if (!job.generation_settings && !job.realtime?.generation_settings && job.plan_id) {
-        try { job.generation_settings = (await read(`/plans/${encodeURIComponent(job.plan_id)}`, signal)).settings; }
+      if (job.beat_analysis) beatAnalyses.set(job.id, job.beat_analysis);
+      if (job.origin !== "uploaded" && !job.generation_settings && !job.realtime?.generation_settings && job.plan_id) {
+        try {
+          if (!plans.has(job.plan_id)) plans.set(job.plan_id, await read(`/plans/${encodeURIComponent(job.plan_id)}`, signal));
+          job.generation_settings = plans.get(job.plan_id).settings;
+        }
         catch (error) { if (error.name === "AbortError") throw error; }
         if (run !== fetchRun || !active) return;
       }
       const stems = job.stem_separation?.state === "complete" ? job.stem_separation.stems : [];
-      const names = ["master", ...[...new Set(api().instrumentalStems(stems).map((stem) => stem.name))].filter((name) => name !== "master").slice(0, 6)];
+      const names = ["master", ...[...new Set(api().stemsForTrack({ ...job, stems }).map((stem) => stem.name))].filter((name) => name !== "master").slice(0, 6)];
       config = engine.getConfig();
+      config.includeVocals = job.origin === "uploaded";
       config.channels = names.map((name) => config.channels.find((channel) => channel.name === name) || api().defaultChannel(name));
+      // A newly chosen upload should loop safely, while a session restore or
+      // same-track stem upgrade must retain the user's next-track decision.
+      if (job.origin === "uploaded" && selectedId !== id) $("next-mode").value = "loop";
       selectedId = id;
       commit("channels", "track_channels_changed", { track_id: id });
       const track = { ...job, audio_url: job.audio_url || `/api/elevenlabs/generations/${encodeURIComponent(id)}/audio`, stems };
       if (explicitRecall) await generation.recall(track);
       else await engine.setTrack(track);
+      if (run !== fetchRun || !active) return;
+      if (job.origin === "uploaded" && !customBusy) {
+        stopCustomChecks(); custom = { ...job, stems }; customMessage = ""; customError = false; persistCustom(); renderCustom();
+        if (["queued", "generating", "submitting", "separating", "running"].includes(job.stem_separation?.state)) scheduleCustomCheck(customRun);
+      }
       renderTracks(); save();
       notice("");
-    } catch (error) { if (run === fetchRun) renderTracks(); throw error; }
-    finally { if (run === fetchRun) { loadingTrack = false; updateView(engine.snapshot()); } }
+    } catch (error) {
+      if (run === fetchRun) renderTracks();
+      if (error.status === 404) throw new Error(`Saved track ${id} is unavailable. Restore its session bundle or choose another track. Your saved selection and mixer settings have been kept.`);
+      throw error;
+    }
+    finally { if (run === fetchRun) {
+      loadingTrack = false; updateView(engine.snapshot());
+      if (!beatBusy && ["queued", "analyzing"].includes(beatAnalyses.get(snapshot?.track?.id)?.state)) checkBeats();
+    } }
   }
   async function refresh() {
     const run = ++fetchRun;
     controller?.abort(); controller = new AbortController();
     $("refresh").disabled = true;
     try {
-      const data = await read("/generations", controller.signal);
+      const [data, planData] = await Promise.all([
+        read("/generations", controller.signal),
+        read("/plans", controller.signal).catch((error) => { if (error.name === "AbortError") throw error; return null; })
+      ]);
       if (run !== fetchRun || !active) return;
+      for (const plan of planData?.plans || []) plans.set(plan.id, plan);
       tracks = (data.jobs || []).filter(readyTrack);
       if (snapshot?.track && !tracks.some((job) => job.id === snapshot.track.id)) tracks.unshift(snapshot.track);
-      const id = tracks.some((job) => job.id === selectedId) ? selectedId : tracks[0]?.id || "";
       renderTracks();
-      if (!generationState.enabled && !snapshot?.running && !snapshot?.starting) await selectTrack(id, run, controller.signal);
+      // A refresh must not substitute the newest track or erase saved channels.
+      // Fetch the exact saved ID even if it falls outside the recent list.
+      if (selectedId && snapshot?.track?.id !== selectedId && !generationState.enabled && !snapshot?.running && !snapshot?.starting) {
+        await selectTrack(selectedId, run, controller.signal);
+      }
+      if (run === fetchRun && custom && !customBusy) recoverCustom();
+      // A POST can finish after this workspace was left, before its first
+      // response was accepted. Always recover the loaded track by GET.
+      if (run === fetchRun && !beatBusy && snapshot?.track) checkBeats();
     } catch (error) { if (run === fetchRun && error.name !== "AbortError") notice(error.message, true); }
     finally { if (run === fetchRun) $("refresh").disabled = false; }
   }
@@ -426,14 +757,36 @@ globalThis.HydraMusicMixer = (() => {
   function onChange(event) {
     if (rendering) return;
     const el = event.target;
+    if (el.id === "mm-audio-file") { uploadAudio(el.files?.[0]); return; }
+    if (["mm-use-beats", "mm-beat-offset", "mm-beat-bar", "mm-beat-mode"].includes(el.id)) { changeBeatSettings(el.id); return; }
+    if (el.id === "mm-track-bpm") {
+      if (custom?.state !== "complete") return;
+      const value = el.value.trim(), bpm = Number(value);
+      if (value && (!Number.isFinite(bpm) || bpm < 20 || bpm > 300)) {
+        notice("Enter a track BPM between 20 and 300, or leave it blank when unknown.", true); return;
+      }
+      config = engine.getConfig();
+      const uploadedBpms = { ...(config.uploadedBpms || {}) }; delete uploadedBpms[custom.id];
+      config.uploadedBpms = value ? { [custom.id]: bpm, ...uploadedBpms } : uploadedBpms;
+      commit("none", "uploaded_tempo_changed", { track_id: custom.id, bpm: value ? bpm : null });
+      notice(""); return;
+    }
     if (el.hasAttribute("data-next-field")) {
       if (el.id === "mm-next-track") nextTrackId = el.value;
+      if (el.id === "mm-next-mode" && el.value === "similar" && snapshot?.track?.origin === "uploaded") {
+        el.value = "new"; notice("Custom audio uses your prompt to generate a new track.");
+      }
       save(); renderTransport(); generation?.settingsChanged(); return;
     }
     if (el.hasAttribute("data-prompt-field")) { save(); generation?.settingsChanged(); return; }
     const { bus, channel, source, route } = context(el);
+    if (el.id === "mm-skeleton-detail") {
+      if (!["region", "joint", "axis"].includes(el.value)) return;
+      skeletonDetail = el.value; renderBuses(); return;
+    }
     if (el.id === "mm-shared-mix") { renderLibrary(); return; }
     if (el.id === "mm-track") {
+      ++selectionRevision;
       generation.stop(); const run = ++fetchRun; controller?.abort(); controller = new AbortController();
       selectTrack(el.value, run, controller.signal, true).catch((error) => { if (run === fetchRun && error.name !== "AbortError") notice(error.message, true); });
       return;
@@ -441,7 +794,7 @@ globalThis.HydraMusicMixer = (() => {
     if (el.id === "mm-mode") {
       signalLibrary?.detachAll();
       config.mode = el.value;
-      const available = el.value === "demo" ? api().DEMO_FIELDS : sourceBridge?.describe?.().fields || [];
+      const available = visibleFields(el.value === "demo" ? api().DEMO_FIELDS : sourceBridge?.describe?.().fields || []);
       config.buses.forEach((item, index) => { item.sources = [sourceFor(available[index % Math.max(1, available.length)]?.key, available)]; });
       history.clear(); commit("all", "input_mode_changed");
       notice(""); return;
@@ -489,14 +842,24 @@ globalThis.HydraMusicMixer = (() => {
   }
   function onClick(event) {
     const el = event.target.closest("button"); if (!el) return;
+    if (el.id === "mm-analyze-beats") { analyzeBeats(); return; }
+    if (el.id === "mm-beat-check") { checkBeats(); return; }
+    if (el.id === "mm-separate") { separateCustom(); return; }
+    if (el.id === "mm-custom-check") { recoverCustom(); return; }
+    if (el.id === "mm-custom-load") {
+      if (!custom || loadingTrack) return;
+      ++selectionRevision;
+      loadCustom(custom.id).catch((error) => { if (error.name !== "AbortError") notice(error.message, true); }); return;
+    }
     if (el.id === "mm-refresh") { refresh(); return; }
     if (["mm-play", "mm-generate", "mm-retry"].includes(el.id)) {
       if (loadingTrack) return;
+      ++selectionRevision;
       ++fetchRun; controller?.abort(); $("refresh").disabled = false; notice(""); save();
       const action = el.id === "mm-generate" ? "startNew" : el.id === "mm-retry" ? "retry" : "resume";
       Promise.resolve(generation[action]()).catch((error) => notice(error.message, true)); return;
     }
-    if (el.id === "mm-stop") { generation.stop(); return; }
+    if (el.id === "mm-stop") { ++selectionRevision; generation.stop(); return; }
     const { bus, channel, sourceIndex, routeIndex } = context(el);
     if (el.id === "mm-add-shared") {
       try { signalLibrary?.attach($("shared-mix").value, config, `mix-${Date.now().toString(36)}`); commit("all", "shared_added"); notice(""); }
@@ -511,10 +874,11 @@ globalThis.HydraMusicMixer = (() => {
     if (el.dataset.action === "detach-mix") { signalLibrary?.detach(bus.id); captureMapping("shared_detached", { bus_id: bus.id }); renderBuses(); save(); return; }
     if (el.id === "mm-add-bus") {
       if (config.buses.length >= 4) return;
-      const id = `mix-${Date.now().toString(36)}`; config.buses.push(newBus(id, `Mix ${String.fromCharCode(65 + config.buses.length)}`, fields()[config.buses.length % Math.max(1, fields().length)]?.key)); commit("all", "bus_added", { bus_id: id }); return;
+      const available = visibleFields();
+      const id = `mix-${Date.now().toString(36)}`; config.buses.push(newBus(id, `Mix ${String.fromCharCode(65 + config.buses.length)}`, available[config.buses.length % Math.max(1, available.length)]?.key)); commit("all", "bus_added", { bus_id: id }); return;
     }
     switch (el.dataset.action) {
-      case "add-source": if (bus.sources.length >= 6) return; bus.sources.push(sourceFor(fields().find((field) => !bus.sources.some((source) => source.sourceKey === field.key))?.key || fields()[0]?.key)); commit("buses", "source_added", { bus_id: bus.id }); break;
+      case "add-source": if (bus.sources.length >= 6) return; bus.sources.push(sourceFor(visibleFields().find((field) => !bus.sources.some((source) => source.sourceKey === field.key))?.key || visibleFields()[0]?.key)); commit("buses", "source_added", { bus_id: bus.id }); break;
       case "remove-source": if (bus.sources.length <= 1) return; bus.sources.splice(sourceIndex, 1); commit("buses", "source_removed", { bus_id: bus.id, source_index: sourceIndex }); break;
       case "remove-bus":
         if (config.buses.length === 1) return;
@@ -541,36 +905,45 @@ globalThis.HydraMusicMixer = (() => {
         <div class="mm-prompt-actions"><button id="mm-generate" class="mm-button mm-primary">Start music</button><button id="mm-play" class="mm-button" disabled>▶ Play saved track</button><button id="mm-stop" class="mm-button" disabled>■ Stop</button><button id="mm-retry" class="mm-button" hidden>Retry next track</button></div>
         <div class="mm-now-playing"><span>Now playing</span><b id="mm-current">—</b></div>
         <div id="mm-up-next" class="mm-now-playing mm-up-next" hidden><span>Up next</span><b id="mm-next-prompt"></b></div>
-        <div class="mm-transport-readout"><span id="mm-transport-status">Stopped</span><progress id="mm-progress" value="0" max="1" aria-label="Track progress"></progress><span id="mm-clock">0:00 / 0:00</span></div>
-        <details class="mm-recent"><summary>Recent tracks</summary><div class="mm-recent-row"><label class="sr-only" for="mm-track">Recall a recent track</label><select id="mm-track"><option value="">Recall a track…</option></select><button id="mm-refresh" class="mm-button">Refresh</button></div></details>
+        <div class="mm-transport-readout"><span id="mm-transport-status">Stopped</span><progress id="mm-progress" value="0" max="1" aria-label="Track progress"></progress><span id="mm-clock">0:00 / 0:00</span><span id="mm-beat-sync" class="mm-beat-sync" role="status" hidden></span></div>
+        <details class="mm-recent"><summary>Recent tracks</summary><div class="mm-recent-row"><label class="sr-only" for="mm-track">Recall a recent track</label><select id="mm-track"><option value="">Recall a track…</option></select><button id="mm-refresh" class="mm-button">Refresh</button></div>
+          <details id="mm-custom" class="mm-custom"><summary>Use your own audio</summary><div class="mm-custom-actions"><label class="mm-upload">Choose audio<input id="mm-audio-file" type="file" accept=".wav,.mp3,.flac,.ogg,.m4a,.aac,audio/wav,audio/mpeg,audio/flac,audio/ogg,audio/mp4,audio/aac"></label><button id="mm-separate" class="mm-button" disabled>Separate with ElevenLabs</button><button id="mm-custom-load" class="mm-button" hidden>Load audio</button><button id="mm-custom-check" class="mm-button" hidden>Check status</button></div><p id="mm-custom-status" class="mm-footnote" role="status"></p><p id="mm-custom-cost" class="mm-footnote" hidden>Uploads this audio to ElevenLabs and uses credits.</p></details>
+          <details id="mm-beats" class="mm-beats" hidden><summary>Beat timing · Advanced</summary><label id="mm-beat-mode-field" class="mm-beat-mode" hidden>Timing mode<select id="mm-beat-mode"><option value="auto">Automatic</option><option value="manual">Manual BPM</option></select></label><div class="mm-beat-actions"><button id="mm-analyze-beats" class="mm-button">Analyze beats</button><button id="mm-beat-check" class="mm-button" hidden>Check analysis</button><label id="mm-use-beats-field" class="mm-beat-toggle"><input id="mm-use-beats" type="checkbox" disabled>Use detected beats</label></div><p id="mm-beat-status" class="mm-footnote" role="status"></p><div id="mm-custom-tempo" class="mm-custom-tempo" hidden><label>Track BPM (optional)<input id="mm-track-bpm" type="number" min="20" max="300" step="any" placeholder="Unknown" aria-describedby="mm-tempo-help"></label><p id="mm-tempo-help" class="mm-footnote">Beat timing is detected automatically. An optional BPM can guide analysis when the rhythm is ambiguous. Use Playback speed to change how fast the audio plays.</p></div><div id="mm-beat-adjustments" class="mm-beat-adjustments" hidden><label>Timing adjustment (ms)<input id="mm-beat-offset" type="number" min="-10000" max="10000" step="1" value="0" aria-describedby="mm-beat-help"></label><label>First detected beat in bar<select id="mm-beat-bar" aria-describedby="mm-beat-help"><option value="">Automatic</option><option value="1">Beat 1</option><option value="2">Beat 2</option><option value="3">Beat 3</option><option value="4">Beat 4</option></select></label><p id="mm-beat-help" class="mm-footnote">Automatic estimates the groove accent from the audio. These optional overrides can adjust the estimate: positive timing moves beats later, and bar position sets the accent. Changes apply while stopped and do not move or trim the audio.</p></div></details>
+        </details>
       </section>
       <p id="mm-notice" class="mm-notice" role="status" hidden></p>
-      <section aria-labelledby="mm-input-title"><div class="mm-section-heading"><div><span class="mm-eyebrow">02 / SIGNALS</span><h2 id="mm-input-title">Signal mixes</h2></div><button id="mm-add-bus" class="mm-button">+ Signal mix</button></div><div class="mm-source-toolbar"><label>Signals from<select id="mm-mode"><option value="shared">Connections input</option><option value="demo">Simulated demo signals</option></select></label><span id="mm-source-label">Choose an input in Connections</span><a href="#connections" data-workspace="connections">Connections ↗</a></div><div class="mm-library-toolbar"><label>Shared signal mixes<select id="mm-shared-mix"></select></label><button id="mm-add-shared" class="mm-button">Add shared mix</button></div><div id="mm-buses" class="mm-buses"></div></section>
+      <section aria-labelledby="mm-input-title"><div class="mm-section-heading"><div><span class="mm-eyebrow">02 / SIGNALS</span><h2 id="mm-input-title">Signal mixes</h2></div><button id="mm-add-bus" class="mm-button">+ Signal mix</button></div><div class="mm-source-toolbar"><label>Signals from<select id="mm-mode"><option value="shared">Connections input</option><option value="demo">Simulated demo signals</option></select></label><label id="mm-skeleton-detail-field" hidden>Skeleton detail<select id="mm-skeleton-detail" title="Choose body regions, individual joints, or XYZ axes. Existing mappings stay selected."><option value="region">Body regions</option><option value="joint">Joints · XYZ combined</option><option value="axis">XYZ axes</option></select></label><span id="mm-source-label">Choose an input in Connections</span><a href="#connections" data-workspace="connections">Connections ↗</a></div><div class="mm-library-toolbar"><label>Shared signal mixes<select id="mm-shared-mix"></select></label><button id="mm-add-shared" class="mm-button">Add shared mix</button></div><div id="mm-buses" class="mm-buses"></div></section>
       <div class="mm-flowline" aria-hidden="true"><span>INPUT SIGNALS</span><i>→</i><span>SIGNAL MIXES</span><i>→</i><span>CHANNEL EFFECTS</span></div>
       <section aria-labelledby="mm-mix-title"><div class="mm-section-heading"><div><span class="mm-eyebrow">03 / MIXING DESK</span><h2 id="mm-mix-title">Mixer</h2></div></div><p id="mm-stem-hint" class="mm-footnote"></p><div class="mm-console-scroll" role="region" tabindex="0" aria-label="Music mixer channels; scroll horizontally for more stems"><div id="mm-channels" class="mm-console"></div></div></section>`;
     let saved = {};
     try { saved = JSON.parse(localStorage.getItem(KEY) || "{}"); } catch (_) { /* Fresh mix. */ }
+    try { const previous = JSON.parse(localStorage.getItem(UPLOAD_KEY) || "null"); if (/^[a-f0-9]{32}$/.test(previous?.id)) custom = previous; } catch (_) { /* Recent tracks still retain uploads. */ }
     // Keep earlier voice drafts in saved sessions without mounting another rap player.
     savedRap = saved?.rap;
     signalLibrary = globalThis.HydraSignalLibrary?.create(saved?.signalLinks);
     restorePrompt(saved?.prompt);
     try { mappingTracker = globalThis.HydraStudy?.createMappingTracker?.("music-mixer"); } catch (_) { /* Study recording is optional. */ }
-    engine = api().create({ sourceBridge: options.sourceBridge, onUpdate: onEngineUpdate, onError: (error) => notice(error.message || String(error), true) });
+    engine = api().create({ sourceBridge: options.sourceBridge, requestBeatTiming: customRequest, onUpdate: onEngineUpdate, onError: (error) => notice(error.message || String(error), true) });
     generation = globalThis.HydraMusicMixerGeneration.create({ engine, getSettings: generationSettings, getNextTrack: nextTrackChoice,
       onUpdate: updateGeneration, onTrack: rememberTrack, onError: (error) => notice(error.message || String(error), true) });
     selectedId = typeof saved?.trackId === "string" && /^[a-zA-Z0-9_-]{1,128}$/.test(saved.trackId) ? saved.trackId : "";
     config = api().validateConfig(saved?.config || { mode: "shared", buses: [newBus("mix-a", "Mix A")], channels: [api().defaultChannel("master")] });
     changeMapping(() => engine.setConfig(config), saved?.config ? "restored" : "initial", {}, false); $("mode").value = config.mode;
-    renderBuses(); renderChannels(); renderTransport();
+    renderBuses(); renderChannels(); renderTracks(); renderTransport();
     root.addEventListener("change", onChange); root.addEventListener("input", onInput); root.addEventListener("click", onClick);
   }
   function activate() {
     if (!initialized) return;
     syncSignals();
     if (active) { renderTransport(); return; }
-    active = true; engine.activate(); refresh();
+    active = true; engine.activate();
+    read("/status").then((status) => {
+      separationReady = status.ready !== false; beatAvailable = status.beat_tracking_available !== false;
+      beatSetupError = status.beat_tracking_setup_error || ""; renderCustom();
+    }).catch(() => {});
+    return refresh();
   }
-  function deactivate() { if (!initialized) return; active = false; ++fetchRun; controller?.abort(); loadingTrack = false; $("refresh").disabled = false; save(); generation.deactivate(); engine.deactivate(); }
+  function deactivate() { if (!initialized) return; active = false; ++selectionRevision; ++fetchRun; controller?.abort(); stopCustomChecks(); stopBeatChecks(); loadingTrack = false; $("refresh").disabled = false; save(); generation.deactivate(); engine.deactivate(); }
   return { init, activate, deactivate, refresh, getState, flush, save,
     transportClock: () => engine?.transportClock?.(Number($("bpm").value)),
     get snapshot() { return engine?.snapshot(); }, get generationSnapshot() { return generation?.snapshot(); } };

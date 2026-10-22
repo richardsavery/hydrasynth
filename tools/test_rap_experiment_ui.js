@@ -192,6 +192,20 @@ async function card(action, id) { events.get("root:click")({ target: { closest: 
   assert.equal(posts.at(-1).source_experiment_id, undefined, "missing expressive source causes a fresh source request");
   app.deactivate();
   assert.equal(timers.size, 0);
+  {
+    const previous = clone(stored), originalSet = context.localStorage.setItem;
+    const quota = new Error("Browser storage is full");
+    context.localStorage.setItem = () => { throw quota; };
+    el("text").value = "The latest comparison words";
+    assert.doesNotThrow(() => events.get("text:input")(), "ordinary editing still works when autosave fails");
+    assert.equal(app.getState().text, "The latest comparison words");
+    assert.deepEqual(stored, previous);
+    assert.throws(() => app.flush({ strict: true }), error => error === quota,
+      "explicit session capture cannot silently keep stale comparison settings");
+    context.localStorage.setItem = originalSet;
+    app.flush({ strict: true });
+    assert.equal(stored.text, "The latest comparison words");
+  }
 
   current = { ...current, id: "fast-saved", state: "complete", variants: ["flash", "robot"], sources: { flash: { state: "complete" } },
     robot_style: "radio", robot_amount: .7, robot_tone_hz: 3000, timings: { ready_seconds: 1.4 },

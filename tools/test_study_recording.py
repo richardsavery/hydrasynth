@@ -258,6 +258,28 @@ class StudyTests(unittest.TestCase):
         self.assertTrue(all(event["session_id"] is None for event in events if event["type"] == "generation.updated"))
         self.assertEqual(self.service._job_sessions, {})
 
+    def test_custom_audio_upload_origin_survives_retry_and_later_separation_after_reopen(self):
+        job_id = uuid.uuid4().hex
+        other_session = str(uuid.uuid4())
+        job = {"id": job_id, "origin": "uploaded", "name": "Participant recording", "state": "complete"}
+        route = "/api/elevenlabs/uploads?filename=recording.wav&request_id=" + job_id
+        self.service.observe_http("POST", route, {"size_bytes": len(wav())}, 201, job, self.session)
+        self.service.observe_http("POST", route, {"size_bytes": len(wav())}, 201, {**job, "reused": True}, other_session)
+        self.service.flush()
+        self.service.close()
+        self.service = StudyRecorder(self.root / "study")
+        self.service.record_job("elevenlabs", {**job, "stem_separation": {"state": "complete"}})
+        events = self.export_events()
+        updates = [event for event in events if event["type"] == "generation.updated"]
+        self.assertTrue(updates)
+        self.assertEqual({event["session_id"] for event in updates}, {self.session})
+        self.assertEqual(updates[-1]["payload"]["job"]["stem_separation"]["state"], "complete")
+        requests = [event for event in events if event["type"] == "service.request_completed"]
+        self.assertEqual({event["session_id"] for event in requests}, {self.session, other_session})
+        with zipfile.ZipFile(self.service.export().path) as archive:
+            manifest = json.loads(archive.read("manifest.json"))
+            self.assertEqual(manifest["job_origins"], [{"namespace": "elevenlabs", "job_id": job_id, "origin_session_id": self.session}])
+
     def test_effects_version_retains_its_own_participant_and_source(self):
         parent_id, child_id = uuid.uuid4().hex, uuid.uuid4().hex
         other_session = str(uuid.uuid4())

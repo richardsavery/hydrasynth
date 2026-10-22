@@ -447,7 +447,7 @@ class StudyRecorder:
                 job_id = next((part for part in parts[3:] if JOB_ID.fullmatch(part)), None)
             if namespace in NAMESPACES and job_id:
                 creation_routes = {"rap-response": {"responses"}, "rap": {"renders"},
-                                   "rap-experiment": {"experiments"}, "elevenlabs": {"generations", "continuations"}}
+                                   "rap-experiment": {"experiments"}, "elevenlabs": {"generations", "continuations", "uploads"}}
                 creates_job = len(parts) == 3 and parts[2] in creation_routes[namespace]
                 # Applying local effects creates a new recording with its own
                 # participant origin, while retaining the source response ID.

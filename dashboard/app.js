@@ -107,6 +107,7 @@ const state = {
   midiOutput: null,
   midiConnecting: null, midiConnectionError: "",
   connectionPreferences: loadConnectionPreferences(), connectionsReady: false,
+  sessionReloading: false,
   midiNoteTimers: new Map(),
   midiSustainOutputs: new Set(),
   activityPending: false,
@@ -219,6 +220,7 @@ function bindSonificationWorkspaces() {
     container: document.getElementById("session-library"),
     beforeCapture: captureSessionState,
     beforeRestore: stopSessionPlayback,
+    reload: reloadSession,
     getRoute: () => `#${state.workspaceView || "connections"}`
   });
   updateConnectionSummary();
@@ -230,8 +232,15 @@ function captureSessionState() {
   saveConnectionPreferences();
   globalThis.HydraSynthMixer?.flush();
   globalThis.HydraMusicMixer?.flush();
-  globalThis.HydraRapExperiment?.flush();
-  globalThis.HydraRapResponse?.flush();
+  globalThis.HydraRapExperiment?.flush({ strict: true });
+  globalThis.HydraRapResponse?.flush({ strict: true });
+  globalThis.HydraElevenLabs?.flush?.({ strict: true });
+  globalThis.HydraElevenRealtime?.flush?.({ strict: true });
+  const robotSettings = globalThis.HydraRobotLive?.snapshot?.()?.settings;
+  if (robotSettings) localStorage.setItem("hydra-robot-live-settings-v1", JSON.stringify(robotSettings));
+  if (globalThis.HydraRobotDrums?.snapshot?.()?.settings) {
+    localStorage.setItem("hydra-robot-drums-v1", JSON.stringify(globalThis.HydraRobotDrums.exportState()));
+  }
 }
 
 function stopSessionPlayback() {
@@ -249,7 +258,32 @@ function stopSessionPlayback() {
   return Promise.all([drumsStopped, hardwareStopped]);
 }
 
+function reloadSession(route) {
+  // SessionLibrary calls this only after playback cleanup and the storage
+  // transaction succeed. Deactivating again on unload would save the old mixers
+  // over the version we just restored.
+  state.sessionReloading = true;
+  try {
+    window.history.replaceState(null, "", route);
+    window.location.reload();
+  } catch (error) {
+    state.sessionReloading = false;
+    throw error;
+  }
+}
+
+function stopDashboardOnUnload() {
+  if (state.sessionReloading) return;
+  disconnectLive(); stopPlayback(); panicMidi();
+  globalThis.HydraSynthMixer?.deactivate(); globalThis.HydraMusicMixer?.deactivate();
+  globalThis.HydraRapExperiment?.deactivate(); globalThis.HydraElevenLabs?.deactivate();
+  globalThis.HydraRapResponse?.deactivate();
+  globalThis.HydraRobotLive?.stop();
+  Promise.resolve(globalThis.HydraRobotControl?.deactivate()).catch(() => {});
+}
+
 function selectSonificationWorkspace(view, previous) {
+  if (state.sessionReloading) return;
   if (view === state.workspaceView) return;
   // Microphone capture and automatic replies only belong to the visible tab.
   if (previous === "rap-response") globalThis.HydraRapResponse?.deactivate();
@@ -448,14 +482,7 @@ function bindInterface() {
     }
   });
   document.addEventListener("keydown", handlePlaybackShortcut);
-  window.addEventListener("beforeunload", () => {
-    disconnectLive(); stopPlayback(); panicMidi();
-    globalThis.HydraSynthMixer?.deactivate(); globalThis.HydraMusicMixer?.deactivate();
-    globalThis.HydraRapExperiment?.deactivate(); globalThis.HydraElevenLabs?.deactivate();
-    globalThis.HydraRapResponse?.deactivate();
-    globalThis.HydraRobotLive?.stop();
-    Promise.resolve(globalThis.HydraRobotControl?.deactivate()).catch(() => {});
-  });
+  window.addEventListener("beforeunload", stopDashboardOnUnload);
 }
 
 async function loadRecordings(refresh) {
@@ -1937,11 +1964,16 @@ globalThis.HydraBeatClock = {
     const clock = mixer ? globalThis.HydraMusicMixer?.transportClock?.() : synthRapClock();
     const running = mixer ? Boolean(clock?.playing && clock.valid !== false)
       : Boolean(state.playing && state.output !== "drums" && !state.liveSilenced && state.synthBeatClock);
+    const sampledAt = performance.now();
+    const detected = mixer && clock?.detected === true;
+    const audioOffset = sampledAt - (Number(clock?.context?.currentTime) || 0) * 1000;
     return { running, bpm: Number(clock?.bpm) || 96,
       beat: Number.isFinite(clock?.beat) ? clock.beat : 0,
-      at: performance.now(),
-      token: mixer ? clock?.token ?? null : `${state.playbackGeneration}:${state.synthBeatClock?.signature?.split(":").slice(1).join(":") || "stopped"}`,
+      at: sampledAt,
+      token: mixer ? clock?.transportToken ?? clock?.token ?? null : `${state.playbackGeneration}:${state.synthBeatClock?.signature?.split(":").slice(1).join(":") || "stopped"}`,
       estimated: clock?.estimated === true, rateChanging: clock?.rateChanging === true,
+      ...(clock?.beatTrackingError ? { beatTrackingError: clock.beatTrackingError } : {}),
+      ...(detected ? { detected: true, beatContacts: (clock.beatContacts || []).map(contact => ({ ...contact, at: audioOffset + contact.at * 1000 })) } : {}),
       source: mixer ? "mixer" : "synth", label: mixer ? "Music mixer" : "Synth" };
   }
 };

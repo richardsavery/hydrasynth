@@ -1,12 +1,13 @@
 """Local ElevenLabs storage, job queue, and bounded provider client.
 
-The dashboard owns HTTP origin checks and file streaming. This module never sends
-source recordings to the provider and never retries an ambiguous generation.
+The dashboard owns HTTP origin checks and file streaming. Uploaded audio stays
+local until separation is requested; ambiguous provider calls are never retried.
 """
 
 from __future__ import annotations
 
 import copy
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import fcntl
@@ -28,6 +29,7 @@ from typing import Any
 from urllib import error, request
 from urllib.parse import parse_qs, urlsplit
 import uuid
+import wave
 import zipfile
 
 from elevenlabs_analysis import (
@@ -37,12 +39,17 @@ from elevenlabs_realtime import (
     STEM_ID, STEM_VARIATIONS, compile_live_plan, compile_prompt_plan, extract_stems,
     original_music_plan, validated_continuation_request,
 )
+import beat_tracking
 
 
 API_PREFIX = "/api/elevenlabs"
 PROVIDER_URL = "https://api.elevenlabs.io/v1/music?output_format=auto"
 STEM_PROVIDER_URL = "https://api.elevenlabs.io/v1/music/stem-separation"
 MAX_UPLOAD_BYTES = 8 * 1024 * 1024
+MAX_CUSTOM_AUDIO_BYTES = 128 * 1024 * 1024
+MAX_CUSTOM_STEM_ARCHIVE_BYTES = 512 * 1024 * 1024
+MAX_CUSTOM_STEM_BYTES = 256 * 1024 * 1024
+MAX_CUSTOM_STEM_EXPANDED_BYTES = 1024 * 1024 * 1024
 MAX_AUDIO_BYTES = 128 * 1024 * 1024
 IDENTIFIER = re.compile(r"^[0-9a-f]{32}$")
 ACTIVE_STATES = {"queued", "generating"}
@@ -78,6 +85,10 @@ def plan_cache_key(plan: dict[str, Any]) -> str:
     Artifacts retain their exact original values. This separate representation
     lets saved plans and browser-rebuilt equivalents share a result safely.
     """
+    if plan.get("origin") == "uploaded":
+        validate_uploaded_plan(plan)
+        return digest({"origin": "uploaded", "sha256": plan["source"]["sha256"],
+                       "size_bytes": plan["source"]["size_bytes"]})
     analysis_settings = copy.deepcopy(plan["analysis_settings"])
     baseline = copy.deepcopy(plan["baseline"])
     channels = []
@@ -123,6 +134,8 @@ class FileResponse:
     path: Path
     content_type: str
     download_name: str | None = None
+    temporary: bool = False
+    on_close: Callable[[], None] | None = None
 
 
 class ServiceError(Exception):
@@ -135,6 +148,41 @@ class GenerationError(Exception):
     def __init__(self, message: str, state: str = "failed"):
         super().__init__(message)
         self.state = state
+
+
+def uploaded_filename(filename: str) -> str:
+    """Keep a display basename only; storage names never come from the client."""
+    if not isinstance(filename, str) or not filename or len(filename) > 255:
+        raise ValueError("Choose an audio file with a filename of at most 255 characters.")
+    basename = filename.replace("\\", "/").rsplit("/", 1)[-1]
+    basename = re.sub(r'[\x00-\x1f\x7f<>:"|?*]', "", basename).strip(" .")
+    if not basename:
+        raise ValueError("Choose an audio file with a valid filename.")
+    return basename
+
+
+def validate_uploaded_plan(plan: dict[str, Any]) -> None:
+    """Validate upload provenance without inventing a provider generation request."""
+    if not isinstance(plan, dict) or plan.get("origin") != "uploaded" or plan.get("can_generate") is not False:
+        raise ValueError("Invalid uploaded audio plan.")
+    if "request" in plan or plan.get("realtime"):
+        raise ValueError("Uploaded audio cannot include a generation or continuation request.")
+    source = plan.get("source")
+    if not isinstance(source, dict) or not isinstance(source.get("sha256"), str) or not re.fullmatch(r"[0-9a-f]{64}", source["sha256"]):
+        raise ValueError("Uploaded audio is missing its source checksum.")
+    size, duration = source.get("size_bytes"), plan.get("duration_seconds")
+    if type(size) is not int or not 0 < size <= MAX_CUSTOM_AUDIO_BYTES:
+        raise ValueError("Uploaded audio exceeds the 128 MiB size limit.")
+    if type(duration) not in (int, float) or not math.isfinite(duration) or duration <= 0:
+        raise ValueError("Uploaded audio must have a finite, positive duration.")
+    if uploaded_filename(source.get("filename")) != source["filename"]:
+        raise ValueError("Invalid uploaded audio filename.")
+    if not isinstance(plan.get("name"), str) or plan["name"] != Path(source["filename"]).stem:
+        raise ValueError("Invalid uploaded audio name.")
+    if plan.get("dataset_hash") != source["sha256"] or plan.get("mapping_version") != "uploaded-audio-v1":
+        raise ValueError("Invalid uploaded audio provenance.")
+    if plan.get("sections") != [] or plan.get("analysis_id") is not None or plan.get("dataset_id") is not None:
+        raise ValueError("Uploaded audio cannot include generated section timings or a recording analysis.")
 
 
 def load_configuration(env_path: Path) -> tuple[str, float, list[str]]:
@@ -221,7 +269,7 @@ class ElevenLabsClient:
         )
         return self._download(outgoing, destination)
 
-    def separate_stems(self, source: Path, destination: Path, variation: str) -> dict[str, Any]:
+    def separate_stems(self, source: Path, destination: Path, variation: str, *, max_archive_bytes: int = MAX_AUDIO_BYTES) -> dict[str, Any]:
         if variation not in STEM_VARIATIONS or not 0 < source.stat().st_size <= MAX_AUDIO_BYTES:
             raise GenerationError("The saved track or stem variation is not supported.")
         boundary = "codex-elevenlabs-" + uuid.uuid4().hex
@@ -233,9 +281,9 @@ class ElevenLabsClient:
             "xi-api-key": self.api_key, "Content-Type": "multipart/form-data; boundary=" + boundary,
             "Accept": "application/zip",
         })
-        return self._download(outgoing, destination, archive=True)
+        return self._download(outgoing, destination, archive=True, max_bytes=max_archive_bytes)
 
-    def _download(self, outgoing: request.Request, destination: Path, *, archive: bool = False) -> dict[str, Any]:
+    def _download(self, outgoing: request.Request, destination: Path, *, archive: bool = False, max_bytes: int = MAX_AUDIO_BYTES) -> dict[str, Any]:
         try:
             deadline = time.monotonic() + self.timeout
             with request.build_opener(NoRedirect, request.HTTPSHandler(context=self.tls_context)).open(outgoing, timeout=self.timeout) as response:
@@ -252,7 +300,7 @@ class ElevenLabsClient:
                         expected_length = int(content_length)
                     except ValueError:
                         raise GenerationError("ElevenLabs returned an invalid audio response length.", "unknown") from None
-                    if expected_length < 0 or expected_length > MAX_AUDIO_BYTES:
+                    if expected_length < 0 or expected_length > max_bytes:
                         raise GenerationError("The generated audio exceeded the local response size limits.")
                 total = 0
                 with destination.open("xb") as audio:
@@ -263,8 +311,8 @@ class ElevenLabsClient:
                         if not chunk:
                             break
                         total += len(chunk)
-                        if total > MAX_AUDIO_BYTES:
-                            raise GenerationError("The generated audio exceeded the local 128 MiB limit.")
+                        if total > max_bytes:
+                            raise GenerationError("The returned audio exceeded the local response size limit.")
                         audio.write(chunk)
                     audio.flush()
                     os.fsync(audio.fileno())
@@ -313,11 +361,15 @@ class ElevenLabsClient:
             ) from None
 
 
-def validate_audio(path: Path, requested_duration: float, ffmpeg: str, ffprobe: str) -> dict[str, Any]:
+def validate_audio(path: Path, requested_duration: float, ffmpeg: str, ffprobe: str, *, uploaded: bool = False) -> dict[str, Any]:
     """Decode all frames before exposing audio and inspect the actual container."""
     try:
+        # Disallow network protocols and playlist/container indirection. MOV's
+        # external data references are disabled explicitly for local uploads.
+        input_options = ["-protocol_whitelist", "file,pipe", "-format_whitelist", "mp3,wav,flac,ogg,mov,aac"]
         probe = subprocess.run(
-            [ffprobe, "-v", "error", "-show_entries", "format=format_name,duration:stream=codec_type", "-of", "json", str(path)],
+            [ffprobe, "-v", "error", *input_options, "-enable_drefs", "0", "-show_entries",
+             "format=format_name,duration:stream=codec_type,channels:stream_disposition=attached_pic", "-of", "json", str(path)],
             capture_output=True, timeout=60, check=False,
         )
         metadata = json.loads(probe.stdout) if probe.returncode == 0 else {}
@@ -327,6 +379,13 @@ def validate_audio(path: Path, requested_duration: float, ffmpeg: str, ffprobe: 
             raise ValueError
         if not math.isfinite(duration) or duration <= 0:
             raise ValueError
+        if uploaded and any(item.get("codec_type") == "video" and not item.get("disposition", {}).get("attached_pic")
+                            for item in metadata.get("streams", [])):
+            raise ValueError
+        if uploaded:
+            streams = [item for item in metadata.get("streams", []) if item.get("codec_type") == "audio"]
+            if len(streams) != 1 or streams[0].get("channels") not in (1, 2):
+                raise ServiceError("Choose a mono or stereo audio file with one audio track.")
         names = set(audio_format.get("format_name", "").split(","))
         formats = [
             ("mp3", "mp3", "audio/mpeg"), ("wav", "wav", "audio/wav"),
@@ -336,22 +395,37 @@ def validate_audio(path: Path, requested_duration: float, ffmpeg: str, ffprobe: 
         identified = next((item for item in formats if item[0] in names), None)
         if identified is None:
             raise ValueError
+        if "mov" in names:
+            input_options += ["-enable_drefs", "0"]
+        upload_options = ["-progress", "pipe:1", "-nostats"] if uploaded else []
         decoded = subprocess.run(
-            [ffmpeg, "-v", "error", "-xerror", "-err_detect", "explode", "-i", str(path), "-map", "0:a:0", "-f", "null", "-"],
-            capture_output=True, timeout=min(1200, max(60, requested_duration * 2)), check=False,
+            [ffmpeg, "-v", "error", "-xerror", "-err_detect", "explode", *input_options,
+             "-i", str(path), "-map", "0:a" if uploaded else "0:a:0", *upload_options, "-f", "null", "-"],
+            capture_output=True, timeout=min(1200, max(60, duration * 2)), check=False,
         )
         if decoded.returncode != 0:
             raise ValueError
+        if uploaded:
+            # Decode the complete file, bounded by wall time rather than song
+            # length. Preserve its measured timeline without silently trimming.
+            measured = re.findall(rb"(?:^|\n)out_time_us=(\d+)", decoded.stdout)
+            if not measured:
+                raise ValueError
+            duration = max(int(value) for value in measured) / 1_000_000
+            if not math.isfinite(duration) or duration <= 0:
+                raise ValueError
     except (OSError, ValueError, TypeError, subprocess.SubprocessError):
-        raise GenerationError("The returned audio failed full decode or format validation. No playable result was saved.") from None
+        message = ("Choose a valid audio-only WAV, MP3, FLAC, OGG, M4A or AAC file. The upload failed full decode or format validation."
+                   if uploaded else "The returned audio failed full decode or format validation. No playable result was saved.")
+        raise GenerationError(message) from None
     tolerance = max(0.5, requested_duration * 0.02)
     warning = None
-    if abs(duration - requested_duration) > tolerance:
+    if not uploaded and abs(duration - requested_duration) > tolerance:
         warning = "Measured duration %.2fs differs from the requested %.2fs. Section boundaries remain planned timings." % (duration, requested_duration)
     return {
         "duration_seconds": duration, "format": identified[0], "extension": identified[1],
         "content_type": identified[2], "timing_warning": warning,
-        "requested_duration_seconds": requested_duration,
+        "requested_duration_seconds": None if uploaded else requested_duration,
     }
 
 
@@ -368,6 +442,10 @@ class ElevenLabsService:
         self._storage_released = False
         for folder in ("datasets", "analyses", "plans", "jobs", "exports"):
             (self.root / folder).mkdir(exist_ok=True)
+        # Interrupted HTTP windows are disposable; full saved audio is untouched.
+        for temporary in self.root.glob("audio-window.tmp-*.wav"):
+            temporary.unlink(missing_ok=True)
+        self._window_slots = threading.BoundedSemaphore(2)
         self._api_key, self.timeout, self._config_issues = load_configuration(Path(env_path))
         self.ffmpeg = self._find_audio_tool("ffmpeg")
         self.ffprobe = self._find_audio_tool("ffprobe")
@@ -409,6 +487,13 @@ class ElevenLabsService:
             "model_id": "music_v2_5", "output_format": "auto", "max_upload_bytes": MAX_UPLOAD_BYTES,
             "realtime_available": True, "stem_variations": sorted(STEM_VARIATIONS),
             "separate_stems_by_default": True,
+            "custom_audio_available": bool(self.ffmpeg and self.ffprobe),
+            "max_custom_audio_bytes": MAX_CUSTOM_AUDIO_BYTES,
+            "max_custom_audio_seconds": None,
+            "max_custom_audio_channels": 2,
+            "beat_tracking_available": bool(self.ffmpeg and beat_tracking.available()),
+            "beat_tracking_setup_error": (None if self.ffmpeg and beat_tracking.available() else
+                                           "Install FFmpeg and requirements-beat-tracking.txt in the dashboard Python environment to analyze beats locally."),
         }
 
     def _record_path(self, kind: str, identifier: str) -> Path:
@@ -429,7 +514,7 @@ class ElevenLabsService:
             return record
         except FileNotFoundError:
             raise ServiceError("Record not found.", 404) from None
-        except (OSError, ValueError):
+        except (OSError, ValueError, KeyError, TypeError):
             raise ServiceError("A saved local record could not be read.", 500) from None
 
     def _save(self, kind: str, body: dict[str, Any]) -> dict[str, Any]:
@@ -456,6 +541,89 @@ class ElevenLabsService:
                 raise ServiceError("Filename must be at most 255 characters.")
             dataset = parse_dataset(content, Path(filename).name)
         return self._dataset_view(self._save("datasets", dataset))
+
+    def create_upload(self, content: bytes, filename: str, request_id: str) -> dict[str, Any]:
+        """Validate and retain local audio. Only create_stem_job contacts ElevenLabs."""
+        if not isinstance(request_id, str) or not IDENTIFIER.fullmatch(request_id):
+            raise ServiceError("An upload request_id of 32 lowercase hexadecimal characters is required.")
+        filename = uploaded_filename(filename)
+        if not isinstance(content, bytes) or not 0 < len(content) <= MAX_CUSTOM_AUDIO_BYTES:
+            raise ServiceError("Choose an audio file no larger than 128 MiB.", 413)
+        source = {"filename": filename, "sha256": hashlib.sha256(content).hexdigest(), "size_bytes": len(content)}
+
+        def existing_upload():
+            row = self._db.execute("SELECT body FROM jobs WHERE id=?", (request_id,)).fetchone()
+            if row is None:
+                return None
+            job = json.loads(row[0])
+            if job.get("origin") != "uploaded" or job.get("source", {}).get("sha256") != source["sha256"]:
+                raise ServiceError("This upload request ID already belongs to different audio. Choose the file again to start a new upload.", 409)
+            self._check_saved_audio(job)
+            job["reused"] = True
+            return job
+
+        with self._lock:
+            existing = existing_upload()
+            if existing:
+                return existing
+            if self._closed:
+                raise ServiceError("The audio service is shutting down.", 503)
+            if not self.ffmpeg or not self.ffprobe:
+                raise ServiceError("Install FFmpeg (including ffprobe) and restart the dashboard to load custom audio.", 503)
+        temporary = self.root / ("upload.tmp-" + uuid.uuid4().hex)
+        plan = None
+        job_dir = None
+        try:
+            temporary.write_bytes(content)
+            try:
+                audio = validate_audio(temporary, 0, self.ffmpeg, self.ffprobe, uploaded=True)
+            except GenerationError as exc:
+                raise ServiceError(str(exc)) from None
+            audio.update(size_bytes=len(content), source_sha256=source["sha256"])
+            with self._lock:
+                existing = existing_upload()
+                if existing:
+                    return existing
+                if self._closed:
+                    raise ServiceError("The audio service is shutting down.", 503)
+                body = {
+                    "schema_version": SCHEMA_VERSION, "origin": "uploaded", "name": Path(filename).stem,
+                    "source": source, "dataset_name": filename, "dataset_hash": source["sha256"],
+                    "analysis_id": None, "dataset_id": None, "mapping_version": "uploaded-audio-v1",
+                    "duration_seconds": audio["duration_seconds"], "sections": [], "baseline": {},
+                    "analysis_settings": {}, "settings": {}, "thresholds": [], "warnings": [], "manual_edits": False,
+                    "can_generate": False, "blocking_reasons": ["Uploaded audio can be played or separated into stems; it has no music generation request."],
+                    "cache_key_version": CACHE_KEY_VERSION,
+                }
+                body["cache_key"] = plan_cache_key(body)
+                candidate_dir = self.root / "jobs" / request_id
+                candidate_dir.mkdir()
+                job_dir = candidate_dir
+                plan = self._save("plans", body)
+                final = job_dir / ("audio." + audio["extension"])
+                temporary.replace(final)
+                timestamp = utc_now()
+                job = {
+                    "id": request_id, "plan_id": plan["id"], "cache_key": plan["cache_key"],
+                    "cache_key_version": CACHE_KEY_VERSION, "origin": "uploaded", "name": plan["name"], "source": source,
+                    "state": "complete", "attempt_count": 1, "variation": False, "separate_stems": False,
+                    "created_at": timestamp, "updated_at": timestamp, "completed_at": timestamp, "error": None,
+                    "audio": audio, "audio_filename": final.name,
+                    "audio_url": f"{API_PREFIX}/generations/{request_id}/audio",
+                    "export_url": f"{API_PREFIX}/generations/{request_id}/export",
+                    "requested_duration_seconds": None, "model_id": None, "output_format": audio["format"],
+                    "generation_settings": {},
+                }
+                self._write_job(job)
+                return copy.deepcopy(job)
+        except Exception:
+            if plan:
+                self._record_path("plans", plan["id"]).unlink(missing_ok=True)
+            if job_dir:
+                shutil.rmtree(job_dir, ignore_errors=True)
+            raise
+        finally:
+            temporary.unlink(missing_ok=True)
 
     def create_analysis(self, payload: dict[str, Any]) -> dict[str, Any]:
         dataset = self._read("datasets", payload.get("dataset_id"))
@@ -586,6 +754,8 @@ class ElevenLabsService:
                 anchor = self._read("plans", validated["plan_id"])
                 if anchor.get("realtime"):
                     anchor = self._read("plans", anchor["realtime"]["root_plan_id"])
+                if anchor.get("origin") == "uploaded":
+                    raise ServiceError("Uploaded audio cannot generate continuations. Use Loop to keep playing it, or choose a generated track.")
                 source = None
                 if validated["source_job_id"] is not None:
                     source = self._job(validated["source_job_id"])
@@ -691,8 +861,72 @@ class ElevenLabsService:
             raise ServiceError("Stem not found.", 404)
         return FileResponse(self.root / "jobs" / identifier / "stems" / stem["filename"], stem["content_type"])
 
+    def _beat_source(self, job: dict[str, Any]) -> tuple[Path, str, str | None]:
+        original = self.audio_response(job)
+        separation = self.get_stem_job(job["id"])
+        if separation.get("state") == "complete":
+            drum = next((stem for stem in separation["stems"]
+                         if stem["id"].lower() in {"drums", "drum", "percussion"}), None)
+            if drum:
+                return self.resolve_stem_audio(job["id"], drum["id"]).path, "drums", drum["id"]
+        return original.path, "mix", None
+
+    def create_beat_job(self, identifier: str, payload: dict[str, Any]) -> dict[str, Any]:
+        """Analyze locally only after an explicit request; never call a provider."""
+        hint = payload.get("bpm_hint")
+        if hint is not None and (type(hint) not in (int, float) or not math.isfinite(hint) or not 20 <= hint <= 300):
+            raise ServiceError("The optional BPM hint must be between 20 and 300.")
+        with self._lock:
+            job = self._job(identifier)
+            self.audio_response(job)
+            existing = job.get("beat_analysis")
+            if existing and existing.get("state") in {"queued", "analyzing"}:
+                return {**copy.deepcopy(existing), "reused": True}
+            if self._closed:
+                raise ServiceError("The music service is shutting down.", 503)
+            if not self.ffmpeg or not beat_tracking.available():
+                raise ServiceError(self.status()["beat_tracking_setup_error"], 503)
+            source_path, source, stem_id = self._beat_source(job)
+            source_hash = beat_tracking.file_sha256(source_path)
+            original_hash = (source_hash if source == "mix" else
+                             beat_tracking.file_sha256(self.audio_response(job).path))
+            if (existing and existing.get("state") == "complete" and existing.get("bpm_hint") == hint
+                    and existing.get("source_sha256") == source_hash and existing.get("source") == source
+                    and existing.get("audio_sha256") == original_hash
+                    and existing.get("algorithm") == beat_tracking.ALGORITHM):
+                beat_tracking.validate_beat_analysis(existing, job["audio"]["duration_seconds"])
+                return {**copy.deepcopy(existing), "reused": True}
+            timestamp = utc_now()
+            result = {"generation_id": identifier, "schema_version": beat_tracking.SCHEMA_VERSION,
+                      "analysis_id": uuid.uuid4().hex,
+                      "algorithm": beat_tracking.ALGORITHM, "state": "queued", "bpm_hint": hint,
+                      "source": source, "source_stem_id": stem_id, "source_sha256": source_hash,
+                      "audio_sha256": original_hash, "duration_seconds": job["audio"]["duration_seconds"],
+                      "beats_seconds": [], "active_regions": [], "warnings": [], "error": None,
+                      "created_at": timestamp, "updated_at": timestamp, "progress": 0}
+            job["beat_analysis"] = result
+            self._write_job(job)
+            self._queue.put(("beats", identifier))
+            return copy.deepcopy(result)
+
+    def get_beat_job(self, identifier: str) -> dict[str, Any]:
+        with self._lock:
+            job = self._job(identifier)
+            result = job.get("beat_analysis")
+            if not result:
+                return {"generation_id": identifier, "state": "not_requested", "beats_seconds": [], "error": None}
+            try:
+                beat_tracking.validate_beat_analysis(result, (job.get("audio") or {}).get("duration_seconds"))
+            except ValueError:
+                result.update(state="failed", beats_seconds=[], active_regions=[], warnings=[], updated_at=utc_now(),
+                              error="The saved beat analysis is invalid. Analyze the track again before using detected beats.")
+                self._write_job(job)
+            return copy.deepcopy(result)
+
     def create_generation(self, payload: dict[str, Any]) -> dict[str, Any]:
         plan = self._read("plans", payload.get("plan_id"))
+        if plan.get("origin") == "uploaded":
+            raise ServiceError("Uploaded audio has no generation request. Play it or explicitly request stem separation.")
         if not plan.get("can_generate", False):
             raise ServiceError("This plan cannot be generated: " + "; ".join(plan.get("blocking_reasons", ["analysis validation failed"])))
         validate_request(plan["request"])
@@ -767,7 +1001,7 @@ class ElevenLabsService:
                     job.update(cache_key=plan["cache_key"], cache_key_version=CACHE_KEY_VERSION, cache_migrated_at=utc_now())
                     changed = True
                 attempt_counts[job["cache_key"]] = attempt_counts.get(job["cache_key"], 0) + 1
-                if job["attempt_count"] != attempt_counts[job["cache_key"]]:
+                if job.get("origin") != "uploaded" and job["attempt_count"] != attempt_counts[job["cache_key"]]:
                     job["attempt_count"] = attempt_counts[job["cache_key"]]
                     changed = True
                 if changed:
@@ -788,6 +1022,10 @@ class ElevenLabsService:
                     self._write_job(job)
                 elif separation and separation["state"] == "queued":
                     self._queue.put(("stems", job["id"]))
+                analysis = job.get("beat_analysis")
+                if analysis and analysis.get("state") in {"queued", "analyzing"}:
+                    analysis.update(state="failed", error="Local beat analysis was interrupted. Select Analyze beats to try again.", updated_at=utc_now())
+                    self._write_job(job)
         for directory in (self.root / "jobs").glob("*/stems.tmp*"):
             if directory.is_dir():
                 shutil.rmtree(directory, ignore_errors=True)
@@ -803,7 +1041,10 @@ class ElevenLabsService:
             actual_size = 0
         if actual_size > 0 and (expected_size is None or actual_size == expected_size):
             return
-        job.update(state="failed", updated_at=utc_now(), error="The saved audio is missing or incomplete. No new request was sent; generate another variation only if you want a new paid attempt.")
+        message = ("The uploaded audio is missing or incomplete. Load the original file again. No provider request was sent."
+                   if job.get("origin") == "uploaded" else
+                   "The saved audio is missing or incomplete. No new request was sent; generate another variation only if you want a new paid attempt.")
+        job.update(state="failed", updated_at=utc_now(), error=message)
         job.pop("audio_url", None)
         job.pop("export_url", None)
         with self._lock:
@@ -817,7 +1058,10 @@ class ElevenLabsService:
                     if identifier is None or self._closed:
                         return
                     if isinstance(identifier, tuple):
-                        self._run_stem_job(identifier[1])
+                        if identifier[0] == "beats":
+                            self._run_beat_job(identifier[1])
+                        else:
+                            self._run_stem_job(identifier[1])
                     else:
                         self._run_job(identifier)
                 finally:
@@ -877,6 +1121,7 @@ class ElevenLabsService:
                 return
             separation.update(state="generating", started_at=utc_now(), updated_at=utc_now())
             self._write_job(job)
+
         directory = self.root / "jobs" / identifier
         archive_path = directory / "stems.zip.tmp"
         temporary = directory / ("stems.tmp-" + uuid.uuid4().hex)
@@ -892,9 +1137,14 @@ class ElevenLabsService:
                 "generation_id": identifier, "stem_variation_id": separation["stem_variation_id"],
                 "source_audio_sha256": hashlib.sha256(original.path.read_bytes()).hexdigest(),
             })
-            self.client.separate_stems(original.path, archive_path, separation["stem_variation_id"])
+            uploaded = job.get("origin") == "uploaded"
+            archive_options = {"max_archive_bytes": MAX_CUSTOM_STEM_ARCHIVE_BYTES} if uploaded else {}
+            self.client.separate_stems(original.path, archive_path, separation["stem_variation_id"], **archive_options)
+            extraction_options = {"max_stem_bytes": MAX_CUSTOM_STEM_BYTES,
+                                  "max_unpacked_bytes": MAX_CUSTOM_STEM_EXPANDED_BYTES} if uploaded else {}
             stems = extract_stems(archive_path, temporary, job["audio"]["duration_seconds"],
-                                  lambda path, duration: validate_audio(path, duration, self.ffmpeg, self.ffprobe))
+                                  lambda path, duration: validate_audio(path, duration, self.ffmpeg, self.ffprobe),
+                                  **extraction_options)
             final = directory / "stems"
             # An interrupted separation is never retried automatically; remove
             # no old validated result when installing this unique attempt.
@@ -920,7 +1170,58 @@ class ElevenLabsService:
             job["stem_separation"] = separation
             self._write_job(job)
 
+    def _run_beat_job(self, identifier: str) -> None:
+        with self._lock:
+            job = self._job(identifier)
+            analysis = copy.deepcopy(job.get("beat_analysis"))
+            if not analysis or analysis.get("state") != "queued":
+                return
+            analysis.update(state="analyzing", updated_at=utc_now())
+            job["beat_analysis"] = analysis
+            self._write_job(job)
+
+        def progress(value: float) -> None:
+            if self._closed:
+                raise ValueError("Local beat analysis was interrupted. Select Analyze beats to try again.")
+            with self._lock:
+                current = self._job(identifier)
+                if (current.get("beat_analysis", {}).get("analysis_id") != analysis["analysis_id"]
+                        or current["beat_analysis"].get("state") != "analyzing"):
+                    raise ValueError("This analysis was replaced by a restored session.")
+                current["beat_analysis"].update(progress=round(value, 3), updated_at=utc_now())
+                self._write_job(current)
+
+        try:
+            path = (self.resolve_stem_audio(identifier, analysis["source_stem_id"]).path
+                    if analysis["source"] == "drums" else self.audio_response(job).path)
+            if beat_tracking.file_sha256(path) != analysis["source_sha256"]:
+                raise ValueError("The audio changed before beat analysis. Analyze the track again.")
+            result = beat_tracking.analyze(path, job["audio"]["duration_seconds"], self.ffmpeg,
+                                           source=analysis["source"], source_stem_id=analysis["source_stem_id"],
+                                           audio_sha256=analysis["audio_sha256"], bpm_hint=analysis["bpm_hint"], progress=progress)
+            analysis.update(result, progress=1, completed_at=utc_now(), updated_at=utc_now())
+        except ValueError as exc:
+            analysis.update(state="failed", error=self._redact(str(exc)), updated_at=utc_now())
+        except Exception:
+            analysis.update(state="failed", error="Local beat analysis failed. The original audio is unchanged; try analyzing again.", updated_at=utc_now())
+        with self._lock:
+            current = self._job(identifier)
+            if (current.get("beat_analysis", {}).get("analysis_id") != analysis["analysis_id"]
+                    or current["beat_analysis"].get("state") != "analyzing"):
+                return
+            current["beat_analysis"] = analysis
+            self._write_job(current)
+
     def _manifest(self, plan: dict[str, Any], job: dict[str, Any] | None) -> dict[str, Any]:
+        if plan.get("origin") == "uploaded":
+            validate_uploaded_plan(plan)
+            return {
+                "schema_version": 1, "origin": "uploaded", "plan_id": plan["id"], "name": plan["name"],
+                "source": plan["source"], "cache_key": plan["cache_key"], "can_generate": False,
+                "measured_duration_seconds": plan["duration_seconds"], "plan_created_at": plan["created_at"],
+                "exported_at": utc_now(), "generation": job,
+                "provenance_note": "User-supplied audio. No music generation request was made; stem separation is requested separately.",
+            }
         return {
             "schema_version": 1, "mapping_version": plan["mapping_version"],
             "origin": plan.get("origin", "live_extrapolation" if plan.get("realtime") else "recording"),
@@ -946,7 +1247,11 @@ class ElevenLabsService:
         temporary = destination.with_name(destination.name + ".tmp-" + uuid.uuid4().hex)
         try:
             with zipfile.ZipFile(temporary, "w", compression=zipfile.ZIP_DEFLATED) as archive:
-                archive.writestr("request.json", canonical_json(plan["request"]))
+                if plan.get("origin") == "uploaded":
+                    validate_uploaded_plan(plan)
+                    archive.writestr("plan.json", canonical_json(plan))
+                else:
+                    archive.writestr("request.json", canonical_json(plan["request"]))
                 archive.writestr("features.json", canonical_json({
                     "sections": plan["sections"], "baseline": plan["baseline"],
                     "warnings": plan["warnings"], "blocking_reasons": plan["blocking_reasons"],
@@ -977,12 +1282,91 @@ class ElevenLabsService:
             raise ServiceError("The saved audio file is missing.", 404)
         return FileResponse(path, job["audio"]["content_type"])
 
-    def dispatch(self, method: str, path: str, payload: dict[str, Any] | None = None) -> tuple[int, dict[str, Any] | FileResponse]:
+    def audio_window(self, source: FileResponse, job: dict[str, Any], query: str) -> FileResponse:
+        """Decode one bounded playback window; never replace or export the source.
+
+        Every stem uses the original track's timeline and sample count. Accurate
+        input seeking avoids decoding all preceding audio for each later window.
+        The HTTP handler deletes this temporary WAV when sending finishes.
+        """
+        values = parse_qs(query, keep_blank_values=True, max_num_fields=3)
+        if set(values) - {"start", "duration", "sample_rate"} or any(len(items) != 1 for items in values.values()):
+            raise ServiceError("Supply one start, duration and optional sample_rate for an audio window.")
+        try:
+            start = float(values["start"][0])
+            duration = float(values["duration"][0])
+            sample_rate = int(values.get("sample_rate", ["48000"])[0])
+        except (KeyError, TypeError, ValueError, IndexError):
+            raise ServiceError("Audio windows need numeric start, duration and sample_rate values.") from None
+        if not math.isfinite(start) or start < 0 or not math.isfinite(duration) or not 1 <= duration <= 30:
+            raise ServiceError("Audio windows need a nonnegative start and a duration from 1 to 30 seconds.")
+        if not 8000 <= sample_rate <= 96000:
+            raise ServiceError("Audio window sample_rate must be between 8000 and 96000.")
+        total = job["audio"]["duration_seconds"]
+        if start >= total:
+            raise ServiceError("The audio window starts beyond the saved track.", 416)
+        if not math.isfinite(start * sample_rate):
+            raise ServiceError("The audio window starts beyond the supported timeline.", 416)
+        frame_start = round(start * sample_rate)
+        frames = round(min(start + duration, total) * sample_rate) - frame_start
+        if frames <= 0:
+            raise ServiceError("The audio window starts beyond the saved track.", 416)
+        if not self.ffmpeg:
+            raise ServiceError("FFmpeg is required for streaming saved audio.", 503)
+        if not self._window_slots.acquire(timeout=30):
+            raise ServiceError("Other audio windows are still loading. Try playback again.", 503)
+        destination = self.root / ("audio-window.tmp-" + uuid.uuid4().hex + ".wav")
+        handed_off = False
+        try:
+            # Do not permit indirect/network sources even for already validated
+            # local audio. apad/atrim make all layers use identical frame counts,
+            # including the last partial window and codec tail rounding.
+            input_options = ["-protocol_whitelist", "file,pipe", "-format_whitelist", "mp3,wav,flac,ogg,mov,aac"]
+            if source.path.suffix.lower() == ".m4a":
+                input_options += ["-enable_drefs", "0"]
+            # A short preroll supplies resampler history at later boundaries;
+            # trim it after resampling so adjacent windows do not click.
+            seek_frame = max(0, frame_start - round(sample_rate * 0.1))
+            preroll = frame_start - seek_frame
+            filtering = (f"aresample={sample_rate},atrim=start_sample={preroll},asetpts=N/SR/TB,"
+                         f"apad=whole_len={frames},atrim=end_sample={frames}")
+            result = subprocess.run([
+                self.ffmpeg, "-v", "error", "-xerror", "-err_detect", "explode", *input_options,
+                "-ss", format(seek_frame / sample_rate, ".12f"), "-i", str(source.path),
+                "-map", "0:a:0", "-af", filtering, "-t", format(frames / sample_rate, ".12f"),
+                "-ac", "2", "-ar", str(sample_rate), "-c:a", "pcm_s16le", "-f", "wav", str(destination),
+            ], capture_output=True, timeout=60, check=False)
+            if result.returncode != 0:
+                raise ServiceError("This saved audio window could not be decoded.", 422)
+            with wave.open(str(destination), "rb") as decoded:
+                if (decoded.getnframes() != frames or decoded.getframerate() != sample_rate or
+                        decoded.getnchannels() != 2 or decoded.getsampwidth() != 2):
+                    raise ServiceError("This saved audio window has an unexpected sample layout.", 422)
+            handed_off = True
+            return FileResponse(destination, "audio/wav", temporary=True, on_close=self._window_slots.release)
+        except (OSError, subprocess.SubprocessError, wave.Error):
+            destination.unlink(missing_ok=True)
+            raise ServiceError("This saved audio window could not be decoded in time.", 422) from None
+        except Exception:
+            destination.unlink(missing_ok=True)
+            raise
+        finally:
+            # Hold the slot until HTTP delivery finishes as well, so slow
+            # readers cannot accumulate unbounded temporary WAV files.
+            if not handed_off:
+                self._window_slots.release()
+
+    def dispatch(self, method: str, path: str, payload: dict[str, Any] | bytes | None = None) -> tuple[int, dict[str, Any] | FileResponse]:
         try:
             parsed = urlsplit(path)
             if not parsed.path.startswith(API_PREFIX + "/"):
                 raise ServiceError("Endpoint not found.", 404)
             parts = parsed.path[len(API_PREFIX) + 1:].strip("/").split("/")
+            if method == "POST" and parts == ["uploads"]:
+                query = parse_qs(parsed.query, max_num_fields=8)
+                if any(len(query.get(key, [])) != 1 for key in ("filename", "request_id")):
+                    raise ServiceError("Supply one filename and request_id for the audio upload.")
+                return 201, self.create_upload(payload, query["filename"][0], query["request_id"][0])
             payload = {} if payload is None else payload
             if not isinstance(payload, dict):
                 raise ServiceError("The request body must be a JSON object.")
@@ -994,11 +1378,16 @@ class ElevenLabsService:
                     return (202 if parts[0] in {"generations", "continuations"} else 201), handlers[parts[0]](payload)
             if method == "POST" and len(parts) == 3 and parts[0] == "generations" and parts[2] == "stems":
                 return 202, self.create_stem_job(parts[1], payload.get("stem_variation_id", "six_stems_v1"))
+            if method == "POST" and len(parts) == 3 and parts[0] == "generations" and parts[2] == "beats":
+                return 202, self.create_beat_job(parts[1], payload)
             if method == "GET":
+                if len(parts) == 3 and parts[0] == "generations" and parts[2] == "beats":
+                    return 200, self.get_beat_job(parts[1])
                 if len(parts) == 3 and parts[0] == "generations" and parts[2] == "stems":
                     return 200, self.get_stem_job(parts[1])
                 if len(parts) == 5 and parts[0] == "generations" and parts[2] == "stems" and parts[4] == "audio":
-                    return 200, self.resolve_stem_audio(parts[1], parts[3])
+                    audio = self.resolve_stem_audio(parts[1], parts[3])
+                    return 200, self.audio_window(audio, self._job(parts[1]), parsed.query) if parsed.query else audio
                 if parts == ["plans"]:
                     return 200, {"plans": self.plans()}
                 if parts == ["generations"]:
@@ -1014,7 +1403,8 @@ class ElevenLabsService:
                     if len(parts) == 2:
                         return 200, job
                     if parts[2] == "audio":
-                        return 200, self.audio_response(job)
+                        audio = self.audio_response(job)
+                        return 200, self.audio_window(audio, job, parsed.query) if parsed.query else audio
                     if parts[2] == "export":
                         if job["state"] != "complete":
                             raise ServiceError("Audio export requires a successfully completed generation.", 409)

@@ -104,6 +104,10 @@
             "Install local transcription and vocal processing dependencies."
           ],
           [
+            "requirements-beat-tracking.txt",
+            "Install local beat analysis for Music mixer and Keirzo timing."
+          ],
+          [
             "FFmpeg and ffprobe",
             "Prepare, inspect and validate audio files."
           ],
@@ -143,7 +147,7 @@
       },
       {
         "type": "code",
-        "text": "sudo apt-get install build-essential pkg-config libasound2-dev \\\n  alsa-utils python3-venv ffmpeg ca-certificates\n/usr/bin/python3 -m venv .venv\n.venv/bin/python -m pip install -r requirements-robot.txt -r requirements-rap-response.txt\nmake all\n.venv/bin/python tools/prepare_rap_transcription.py\n.venv/bin/python tools/configure_api_key.py"
+        "text": "sudo apt-get install build-essential pkg-config libasound2-dev \\\n  alsa-utils python3-venv ffmpeg ca-certificates\n/usr/bin/python3 -m venv .venv\n.venv/bin/python -m pip install -r requirements-robot.txt -r requirements-rap-response.txt -r requirements-beat-tracking.txt\nmake all\n.venv/bin/python tools/prepare_rap_transcription.py\n.venv/bin/python tools/configure_api_key.py"
       },
       {
         "type": "p",
@@ -342,6 +346,10 @@
       {
         "type": "p",
         "text": "Pause display freezes the inspection display only. The browser still receives movement, learns ranges and drives active mappings. Reset learned ranges changes calibration, not the sender. Use it after a change in movement range, not as a substitute for reconnecting a broken stream. A channel becomes stale when it has not supplied usable data for more than three seconds; updates on other channels do not make its old values current."
+      },
+      {
+        "type": "p",
+        "text": "The skeleton channel supports ZED BODY_18 data as 54 flat values or 18 nested XYZ triples. With Connections input selected, the mixers default to seven body-region movement controls: whole body, head, torso, each arm and each leg. Each joint’s movement speed combines changes along X, Y and Z in metres per second; a region averages its tracked joints’ speeds. Skeleton detail also offers 18 individual joint movement signals and the original 54 XYZ position axes plus raw arrays. Existing selected fields stay visible when changing the detail view, and saved mappings retain their meaning. Motion uses consecutive valid frames and resets after tracking loss, timestamp resets or gaps over half a second. Recorded movement needs t_recv or stamp timestamps and is calculated before downsampling. Original positions remain in metres, with X forward, Y left and Z up in the camera reference frame."
       },
       {
         "type": "p",
@@ -696,7 +704,7 @@
       },
       {
         "type": "p",
-        "text": "If no track is available, generate one or transfer the intended local music library. Sessions JSON contains references, not audio. Current Music mixer playback requires prepared instrumental stems. For an older track with missing stems, use the Previous version interface’s preparation workflow, which uses credits, or choose a fully prepared track."
+        "text": "If no track is available, open a Sessions ZIP containing the intended music or generate a new track. ZIP exports include the selected generated audio and completed stems; older Sessions JSON files contain references only. Current Music mixer playback requires prepared instrumental stems. For an older track with missing stems, restore its complete session archive, use the Previous version interface’s preparation workflow, which uses credits, or choose a fully prepared track."
       },
       {
         "type": "h2",
@@ -956,12 +964,12 @@
     "blocks": [
       {
         "type": "p",
-        "text": "Sessions is a named settings library opened from the top bar. It captures the controls across workspaces so you can return to an arrangement or distribute the same starting configuration to several laptops. It is distinct from the academic study’s participant sessions and recorded events. Saving a musical session does not label a new participant, export study data or save a new audio recording."
+        "text": "Sessions is a named setup library opened from the top bar. It captures controls across workspaces together with their referenced completed generated music, rap audio and stems, so you can return to an arrangement or distribute it to several laptops. It is distinct from the academic study’s participant sessions and recorded events. Saving a musical session does not label a new participant, export study data or record a live performance."
       },
       {
         "type": "figure",
         "src": "manual-assets/session-library.jpg",
-        "caption": "Saved sessions holds named versions of dashboard preferences. Export selected or Export all produces a portable settings JSON file."
+        "caption": "Saved sessions holds named versions of dashboard preferences and their generated audio. Export selected or Export all produces a portable ZIP containing settings and audio."
       },
       {
         "type": "h2",
@@ -970,17 +978,17 @@
       {
         "type": "ol",
         "items": [
-          "Prepare the Connections choices, mixer mappings, sound settings and other controls you want to retain. Give signal mixes clear names before saving.",
-          "Open Sessions, enter Version name and press Save new version. Use a descriptive name such as Workshop baseline – browser – slow brightness.",
-          "Make an experiment. Save new version again with another name to preserve both versions. Use Update selected only when you intend to replace the selected version’s snapshot.",
+          "Prepare the Connections choices, mixer mappings, sound settings and other controls you want to retain. Give signal mixes clear names and wait for selected generated tracks and their stems to finish before saving.",
+          "Open Sessions, keep the suggested Version name or enter a descriptive name such as Workshop baseline – browser – slow brightness, then press Save new version. Repeated names receive a numbered suffix.",
+          "Make an experiment. Save new version again to preserve both versions. Use Update selected only when you intend to replace the selected version’s settings and audio snapshot.",
           "Choose a version under Saved versions to inspect its details. Rename changes its name; Delete removes that saved settings version.",
-          "Press Load to restore. The app stops playback and robot/live activity, reloads the controls, and does not automatically reconnect live movement or start playback. The normal browser MIDI discovery and permission flow may run after reload.",
+          "Press Load to restore the saved audio and controls. The app stops playback and robot/live activity, and does not automatically reconnect live movement or start playback. The normal browser MIDI discovery and permission flow may run after reload.",
           "Check the recording or live address, audio/MIDI output, available tracks and hardware state. Reconnect live data or MIDI where needed, then press Play explicitly."
         ]
       },
       {
         "type": "p",
-        "text": "Sessions retain mixer controls and mappings, shared definitions, prompts and asset IDs, connection preferences, Rap response and robot/drum preferences, and previous-interface settings. Running jobs remain separate. Restoration neither repeats a paid request nor verifies a physical instrument’s state."
+        "text": "Sessions retain mixer controls and mappings, shared definitions, prompts and asset IDs, connection preferences, Rap response and robot/drum preferences, and previous-interface settings. The server keeps an immutable copy of referenced completed generated audio, including stems. Running jobs remain separate. Restoration neither repeats a paid request nor verifies a physical instrument’s state."
       },
       {
         "type": "h2",
@@ -989,16 +997,16 @@
       {
         "type": "ol",
         "items": [
-          "On the source laptop, choose a tested baseline under Saved versions. Press Export selected for one version or Export all for the full settings library.",
-          "Keep the downloaded JSON with the workshop setup files. Give the file a version/date in its filename so operators can identify the intended release.",
-          "On another laptop, start its own dashboard and open Sessions → Import…. Select the exported JSON.",
-          "Select the imported version and press Load. Verify the local input/output and confirm every referenced recording or generated track exists on that laptop.",
+          "On the source laptop, choose a tested baseline under Saved versions. Press Export selected for one version or Export all for the saved library and its generated audio.",
+          "Keep the downloaded ZIP with the workshop setup files. Give the file a version/date in its filename so operators can identify the intended release.",
+          "On another laptop, start its own dashboard and open Sessions → Open file…. Select the exported ZIP.",
+          "A file with one version loads immediately. For a file with several versions, select one under Saved versions and press Load. Verify the local input/output and separately provide any referenced movement recording that is not bundled with the app.",
           "Use a new local version name for laptop-specific changes, such as its MIDI destination or workshop live-stream address. Export that variant if it needs to be retained outside the browser."
         ]
       },
       {
         "type": "p",
-        "text": "The portable JSON contains settings and references, not generated audio, microphone recordings, the API key, model files or the robot’s head-calibration file. Do not treat it as a complete installation backup. Bundled movement recordings normally exist in every clone, whereas tracks in var/elevenlabs and raps in var/rap-response are local server assets. Copy the intended assets separately when those references must resolve on another computer; do not indiscriminately clone one laptop’s participant study identity."
+        "text": "The portable ZIP includes settings, referenced generated audio and completed stems. It excludes movement recordings, microphone input recordings, participant records, the API key, model files and the robot’s head-calibration file. Do not treat it as a complete installation backup. Older Sessions JSON files still open but contain settings and audio references only. Export an older version as ZIP on the original laptop to collect its audio; restore any missing audio there before exporting. Do not indiscriminately clone one laptop’s participant study identity."
       },
       {
         "type": "h2",
@@ -1006,11 +1014,11 @@
       },
       {
         "type": "p",
-        "text": "Preferences and named versions belong to this browser profile and page origin. localhost:8790 and 127.0.0.1:8790 are different origins. Clearing site data or changing profiles can make them unavailable. Use one address consistently and export important versions."
+        "text": "Preferences and named versions belong to this browser profile and page origin; saved audio snapshots live in the server’s session-assets directory. localhost:8790 and 127.0.0.1:8790 are different origins. Clearing site data or changing profiles can make named versions unavailable. Use one address consistently and export important versions as ZIP before moving or clearing either store."
       },
       {
         "type": "p",
-        "text": "The library supports 50 versions and validates imports. If storage is full or unavailable, keep the page open, export existing versions, allow site storage or remove older versions, then retry. Import a Sessions file, not an older preset-library file."
+        "text": "The library supports 50 versions and validates imports. If storage is full or unavailable, keep the page open, export existing versions and check both browser storage and server disk space before retrying. If referenced audio is missing, restore its session ZIP or choose an available track; saving does not silently substitute another track. Open a Sessions ZIP or older Sessions JSON, not an older preset-library file."
       },
       {
         "type": "h2",
@@ -1018,7 +1026,7 @@
       },
       {
         "type": "p",
-        "text": "The older Synth interface has mapping tabs and its own Save preset, Open in new tab, Export and Import controls. Its preset library is different from Sessions JSON. Previous version in Music mixer likewise retains an older workflow. Use Sessions for a complete new workshop baseline."
+        "text": "The older Synth interface has mapping tabs and its own Save preset, Open in new tab, Export and Import controls. Its preset library is different from Sessions archives. Previous version in Music mixer likewise retains an older workflow. Use Sessions for a complete new workshop baseline."
       }
     ]
   },
@@ -1780,11 +1788,11 @@
           ],
           [
             "Generated music and rap assets",
-            "Project var folders, including var/elevenlabs and var/rap-response. Preserve these if you want saved job references to remain playable."
+            "Project var folders, including var/elevenlabs and var/rap-response. Saved session audio snapshots normally live in var/session-assets. Export Sessions ZIPs to transfer the audio referenced by saved versions; preserve the service folders when migrating the complete generated library."
           ],
           [
             "Mixer settings and Sessions library",
-            "This browser’s local storage. Export selected/all sessions to portable JSON before changing browser, profile or origin."
+            "Settings and named versions use this browser’s local storage. Export selected/all sessions as ZIP, including their generated audio, before changing browser, profile or origin."
           ],
           [
             "Study journal and microphone media",
@@ -1798,7 +1806,7 @@
       },
       {
         "type": "p",
-        "text": "Saved Sessions JSON captures settings and job references; it does not embed all referenced audio. Moving only the JSON to another laptop cannot recreate missing generated tracks. Study export bundles serve an analysis/archive purpose and are not an automatic import mechanism for the application’s music library. Keep a separate operational copy of generated assets when migrating a working installation."
+        "text": "Sessions ZIP exports carry settings and their referenced completed generated audio. Opening the ZIP on another prepared laptop restores that audio when a version loads. Older Sessions JSON files contain references only and require the original audio to remain available. Study export bundles serve an analysis/archive purpose and are not an automatic import mechanism for the application’s music library."
       },
       {
         "type": "p",
@@ -2036,7 +2044,7 @@
           ],
           [
             "Saved settings seem missing after restart",
-            "Check browser profile and the exact hostname/port. Sessions are browser-local. Import an exported Sessions JSON when moving to another browser; make sure referenced audio assets also exist."
+            "Check browser profile and the exact hostname/port. Named versions are browser-local. Use Sessions → Open file… to restore an exported ZIP with its generated audio. Older JSON files need their referenced audio on the server."
           ]
         ]
       },
@@ -2115,7 +2123,7 @@
           ],
           [
             "Session version",
-            "A browser-local snapshot of application settings. Exported session JSON references audio and recordings; it is not a full study archive."
+            "A named snapshot of application settings with referenced completed generated audio. Exported ZIPs include that audio; movement recordings and participant study records remain separate."
           ],
           [
             "Study session",

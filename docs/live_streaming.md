@@ -81,6 +81,54 @@ Nested arrays are accepted too. `shape`, timestamps and other metadata do not
 control the musical clock. Invalid numbers are excluded from aggregate reducers;
 an invalid indexed element is treated as missing, without shifting indices.
 
+### Map individual body parts
+
+The `skeleton` channel automatically exposes the ZED BODY_18 layout from the
+ENACT participant handout: 18 body points, each with X, Y and Z coordinates in
+metres. It accepts 54 flat values in joint-major order or 18 nested triples.
+The optional `shape` must be `[18,3]` or `[54]`.
+
+In Synth mixer or Music mixer, choose **Connections input**. The input menu
+defaults to seven movement signals: **Whole body**, **Head**, **Torso**,
+**Left arm**, **Right arm**, **Left leg** and **Right leg**. Each region averages
+the speeds of its tracked joints. **Skeleton detail → Joints · XYZ combined**
+shows one movement signal for each of the 18 joints instead.
+
+Movement speed combines changes in all three coordinates:
+`sqrt(dx² + dy² + dz²) / elapsed_seconds`, in metres per second. Stationary
+tracking gives zero; movement in any direction contributes. Arms use shoulder,
+elbow and wrist; legs use hip, knee and ankle; torso uses neck, shoulders and
+hips; head uses nose, eyes and ears; whole body uses all 18 points. Regions
+average only joint pairs tracked in both frames and wait when none are usable.
+Movement IDs include `skeleton:region:left_arm:speed` and
+`skeleton:right_wrist:speed`.
+
+Motion is calculated before recording downsampling. Live input uses numeric
+`t_recv` or `stamp` seconds when available, otherwise browser receipt time;
+recordings need one of those timestamps. The first frame, a clock reset or a
+gap over half a second starts a new baseline. Sub-millisecond intervals are
+coalesced to avoid artificial speed spikes. A joint reacquired after tracking
+loss needs two valid frames before its speed is available again.
+
+**Skeleton detail → XYZ axes** retains the original 54 position inputs and raw
+arrays. X increases forward, Y increases left and Z increases upward in the
+camera reference frame. Left and right identify the person's body sides.
+Changing the detail view only filters the menu; a selected input stays visible
+and saved mappings keep their meaning. The same inputs work with recordings,
+shared signal mixes and saved sessions.
+
+Joint order is nose, neck, right shoulder, right elbow, right wrist, left
+shoulder, left elbow, left wrist, right hip, right knee, right ankle, left hip,
+left knee, left ankle, right eye, left eye, right ear, left ear. Thus right wrist
+Z reads flat index 14 (joint 4, axis 2). Named source IDs are stable, for example
+`skeleton:right_wrist:z` within the `skeleton` channel. The original **Data**
+array remains available for existing mean, RMS and index mappings.
+
+A live joint containing an invalid coordinate or the tracker's missing-joint marker
+`[0,0,0]` is unavailable to named mappings until tracking recovers. It does not
+contribute a false zero to automatic range learning. Other 54-element channels
+are not interpreted as skeletons.
+
 ## Timing, ranges and disconnection
 
 The musical clock samples the latest values at the chosen tempo. It does not

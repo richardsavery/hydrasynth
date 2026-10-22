@@ -144,12 +144,14 @@ class SetupMacOSTests(unittest.TestCase):
             source = source.replace(original, '"' + str(self.root / fixture) + '"')
         (self.root / "tools/setup_macos.sh").write_text(source, encoding="utf-8")
         shutil.copy2(TOOLS / "configure_api_key.py", self.root / "tools/configure_api_key.py")
-        for name in ("requirements-robot.txt", "requirements-rap-response.txt", "Makefile"):
+        for name in ("requirements-robot.txt", "requirements-rap-response.txt", "requirements-beat-tracking.txt", "Makefile"):
             (self.root / name).write_text("# fixture\n", encoding="utf-8")
         binary = self.root / "bin"
         binary.mkdir()
         dispatch = binary / "dispatch"
-        dispatch.write_text("#!" + sys.executable + "\n" + DISPATCH, encoding="utf-8")
+        # Resolve a venv symlink so a checkout containing spaces does not put
+        # an unparseable interpreter path in the fixture's shebang.
+        dispatch.write_text("#!" + str(Path(sys.executable).resolve()) + "\n" + DISPATCH, encoding="utf-8")
         dispatch.chmod(0o755)
         for name in ("uname", "xcrun", "xcode-select", "curl", "make", "cc",
                      "ffmpeg", "ffprobe", "python-bootstrap", "brew"):
@@ -196,6 +198,7 @@ class SetupMacOSTests(unittest.TestCase):
         self.assertEqual(pip[0][strategy + 1], "only-if-needed")
         self.assertIn("requirements-robot.txt", pip[0])
         self.assertIn("requirements-rap-response.txt", pip[0])
+        self.assertIn("requirements-beat-tracking.txt", pip[0])
 
     def test_fresh_install_builds_native_tools_and_loads_whisper(self):
         result = self.run_setup(SETUP_FIXTURE_MISSING="ffmpeg,python@3.12")

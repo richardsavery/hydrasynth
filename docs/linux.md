@@ -63,7 +63,7 @@ The equivalent manual installation is:
 ```sh
 sudo apt-get install build-essential pkg-config libasound2-dev alsa-utils python3-venv ffmpeg ca-certificates
 /usr/bin/python3 -m venv .venv
-.venv/bin/python -m pip install -r requirements-robot.txt -r requirements-rap-response.txt
+.venv/bin/python -m pip install -r requirements-robot.txt -r requirements-rap-response.txt -r requirements-beat-tracking.txt
 make
 .venv/bin/python tools/prepare_rap_transcription.py
 .venv/bin/python tools/configure_api_key.py

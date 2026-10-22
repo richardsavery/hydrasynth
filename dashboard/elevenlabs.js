@@ -7,7 +7,7 @@ globalThis.HydraElevenLabs = (() => {
   const ACTIVE_STATES = new Set(["queued", "generating"]);
   const state = { initialized: false, loaded: false, active: false, analysis: null,
     plan: null, jobs: [], plans: [], currentJob: null, status: null, busy: false,
-    dirty: false, timer: null, playbackFrame: null };
+    dirty: false, timer: null, playbackFrame: null, unavailablePlanId: null, unavailableJobId: null };
   let root;
   const $ = (id) => root.querySelector(`#el-${id}`);
   const escapeHTML = (value) => String(value ?? "").replace(/[&<>"']/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[char]));
@@ -28,19 +28,38 @@ globalThis.HydraElevenLabs = (() => {
   const canGenerate = ({ plan, dirty, requestDirty, busy, status, jobs }) => Boolean(plan?.can_generate && !dirty && !requestDirty && !busy &&
     (jobs.some((job) => matchesPlan(job, plan)) || (status?.ready && !jobs.some(hasPendingWork))));
 
+  function musicLabel(record, plan = {}) {
+    const settings = record.realtime?.generation_settings || record.generation_settings || record.settings || plan.settings || {};
+    const title = String(record.name || settings.style || (record.origin === "original" ? "Original music" : "Generated music"))
+      .replace(/\s+/g, " ").trim();
+    const duration = Number(record.audio?.duration_seconds ?? record.requested_duration_seconds ?? record.duration_seconds ?? plan.duration_seconds);
+    const date = record.created_at || plan.created_at;
+    return [title.length > 60 ? `${title.slice(0, 57)}…` : title,
+      Number(settings.bpm) > 0 ? `${settings.bpm} BPM` : "", settings.key,
+      Number.isFinite(duration) && duration > 0 ? `${Number(duration.toFixed(1))}s` : "",
+      date && !Number.isNaN(new Date(date).getTime()) ? localDate(date) : "",
+      record.id ? String(record.id).slice(-8) : ""].filter(Boolean).join(" · ");
+  }
+
   async function api(path, body) {
     const response = await fetch(`${API}${path}`, { method: body === undefined ? "GET" : "POST",
       headers: body === undefined ? undefined : { "Content-Type": "application/json" },
       body: body === undefined ? undefined : JSON.stringify(body), cache: "no-store" });
     let data;
     try { data = await response.json(); } catch (_) { throw new Error(`The local server returned an unreadable response (${response.status}).`); }
-    if (!response.ok) throw new Error(message(data.error || data.detail || data.message || `Request failed (${response.status}).`));
+    if (!response.ok) {
+      const error = new Error(message(data.error || data.detail || data.message || `Request failed (${response.status}).`));
+      error.status = response.status;
+      throw error;
+    }
     return data;
   }
 
-  function remember() {
-    try { localStorage.setItem(STORAGE_KEY, JSON.stringify({ planId: state.plan?.id, jobId: state.currentJob?.id, generationSettings: readGenerationSettings(), durationSeconds: Number($("length").value) })); } catch (_) { /* Server persistence still works without browser storage. */ }
+  function remember({ strict = false } = {}) {
+    try { localStorage.setItem(STORAGE_KEY, JSON.stringify({ planId: state.plan?.id || state.unavailablePlanId || undefined, jobId: state.currentJob?.id || state.unavailableJobId || undefined, generationSettings: readGenerationSettings(), durationSeconds: Number($("length").value) })); }
+    catch (error) { if (strict) throw error; /* Server persistence still works without browser storage. */ }
   }
+  function flush(options) { if (state.initialized && state.loaded) remember(options); }
   function remembered() { try { return JSON.parse(localStorage.getItem(STORAGE_KEY) || "{}"); } catch (_) { return {}; } }
   function notice(text, error = false) {
     $("notice").textContent = text;
@@ -211,8 +230,10 @@ globalThis.HydraElevenLabs = (() => {
     if (![20, 40, 60].includes(durationSeconds)) throw new Error("Choose a starting track length of 20, 40 or 60 seconds.");
     return { kind: "original", duration_seconds: durationSeconds, settings: validateGenerationSettings(settings) };
   }
-  function setPlan(plan) {
+  function setPlan(plan, preferredJobId = null) {
     state.plan = plan;
+    state.unavailablePlanId = null;
+    state.unavailableJobId = preferredJobId;
     state.dirty = false;
     if (!matchesPlan(state.currentJob || {}, plan)) {
       state.currentJob = null;
@@ -225,7 +246,13 @@ globalThis.HydraElevenLabs = (() => {
   }
   async function restorePlan(id, preferredJobId) {
     notice("Opening saved music…");
-    const plan = await api(`/plans/${encodeURIComponent(id)}`);
+    let plan;
+    try { plan = await api(`/plans/${encodeURIComponent(id)}`); }
+    catch (error) {
+      renderSavedPlans();
+      if (error.status === 404) throw new Error(`Saved music ${id} is unavailable. Restore its session bundle or choose another saved track. Your saved selection has been kept.`);
+      throw error;
+    }
     state.analysis = null;
     // Old tracks can still use their optional recording replay. Their audio does
     // not depend on that recording being available, and original music has none.
@@ -235,10 +262,25 @@ globalThis.HydraElevenLabs = (() => {
     }
     applyGenerationSettings(plan.settings);
     if (plan.origin === "original" && [20, 40, 60].includes(plan.duration_seconds)) $("length").value = String(plan.duration_seconds);
-    setPlan(plan);
+    setPlan(plan, preferredJobId || null);
     await refreshLists();
-    const job = state.jobs.find((item) => item.id === preferredJobId && matchesPlan(item, plan)) ||
-      state.jobs.find((item) => matchesPlan(item, plan) && item.state === "complete") || state.jobs.find((item) => matchesPlan(item, plan));
+    let job;
+    if (preferredJobId) {
+      job = state.jobs.find((item) => item.id === preferredJobId && matchesPlan(item, plan));
+      if (!job) {
+        // Older saved versions can fall outside the recent-jobs listing.
+        try {
+          const saved = await api(`/generations/${encodeURIComponent(preferredJobId)}`);
+          if (matchesPlan(saved, plan)) { job = saved; state.jobs.push(saved); }
+        } catch (error) { if (error.status !== 404) throw error; }
+      }
+      if (!job) {
+        state.currentJob = null;
+        $("audio").pause(); $("audio").removeAttribute("src");
+        renderAttempts(); updateActions(); remember();
+        throw new Error(`Saved track ${preferredJobId} is unavailable. Restore its session bundle or choose another saved version. Your saved selection has been kept.`);
+      }
+    } else job = state.jobs.find((item) => matchesPlan(item, plan) && item.state === "complete") || state.jobs.find((item) => matchesPlan(item, plan));
     if (job) chooseAttempt(job.id);
     schedulePoll();
     notice("Saved music restored. Play it below or generate an original starting track from your musical direction.");
@@ -280,11 +322,18 @@ globalThis.HydraElevenLabs = (() => {
     const results = await Promise.all([api("/generations"), api("/plans")]);
     state.jobs = list(results[0].jobs).sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)));
     state.plans = list(results[1].plans);
-    $("saved-plan").innerHTML = '<option value="">Choose saved music…</option>' + state.plans.map((plan) => `<option value="${escapeHTML(plan.id)}">${escapeHTML(plan.origin === "original" ? "Original music" : "Saved music")} · ${seconds(plan.duration_seconds)} · ${escapeHTML(localDate(plan.created_at))}</option>`).join("");
-    if (state.plan) $("saved-plan").value = state.plan.id;
+    renderSavedPlans();
     if (state.currentJob) state.currentJob = state.jobs.find((job) => job.id === state.currentJob.id) || state.currentJob;
     renderAttempts();
     updateActions();
+  }
+  function renderSavedPlans() {
+    const selected = state.plan?.id || state.unavailablePlanId;
+    const missing = selected && !state.plans.some((plan) => plan.id === selected);
+    $("saved-plan").innerHTML = '<option value="">Choose saved music…</option>'
+      + (missing ? `<option value="${escapeHTML(selected)}">${escapeHTML(state.plan ? musicLabel(state.plan) : `Saved music unavailable · ${selected}`)}</option>` : "")
+      + state.plans.map((plan) => `<option value="${escapeHTML(plan.id)}">${escapeHTML(musicLabel(plan))}</option>`).join("");
+    $("saved-plan").value = selected || "";
   }
   async function generate(variation) {
     // Capture and validate the user's direction before the first request. Creating
@@ -329,16 +378,17 @@ globalThis.HydraElevenLabs = (() => {
   function renderAttempts() {
     const jobs = planJobs();
     const completed = jobs.filter((job) => job.state === "complete");
-    const label = (job) => `Attempt ${job.attempt_count || jobs.slice().reverse().findIndex((item) => item.id === job.id) + 1} · ${seconds(job.audio?.duration_seconds ?? job.requested_duration_seconds)}`;
+    const label = (job) => musicLabel(job, state.plan || {});
     const options = completed.map((job) => `<option value="${escapeHTML(job.id)}">${escapeHTML(label(job))}</option>`).join("");
     const alternatives = completed.filter((job) => job.id !== state.currentJob?.id);
     const compareValue = $("compare").value;
-    $("attempt").innerHTML = options;
+    $("attempt").innerHTML = (state.unavailableJobId ? `<option value="${escapeHTML(state.unavailableJobId)}">Saved track unavailable · ${escapeHTML(state.unavailableJobId)}</option>` : "") + options;
+    if (state.unavailableJobId) $("attempt").value = state.unavailableJobId;
     $("compare").innerHTML = '<option value="">Select another saved attempt</option>' + alternatives.map((job) => `<option value="${escapeHTML(job.id)}">${escapeHTML(label(job))}</option>`).join("");
     if (alternatives.some((job) => job.id === compareValue)) $("compare").value = compareValue;
     else if (completed.length > 1) $("compare").value = alternatives[0]?.id || "";
     $("swap").disabled = completed.length < 2;
-    $("listen").hidden = completed.length === 0;
+    $("listen").hidden = completed.length === 0 || Boolean(state.unavailableJobId);
     if (state.currentJob?.state === "complete") $("attempt").value = state.currentJob.id;
     $("attempts").innerHTML = jobs.length ? `<div class="el-attempts-heading">Saved versions</div>${jobs.map((job) => `<button class="el-attempt ${job.id === state.currentJob?.id ? "is-selected" : ""}" data-job="${escapeHTML(job.id)}" type="button"><span>${escapeHTML(label(job))}</span><b class="el-state-${escapeHTML(job.state)}">${escapeHTML(job.state)}</b></button>`).join("")}` : "";
     showJobStatus();
@@ -362,6 +412,7 @@ globalThis.HydraElevenLabs = (() => {
     const time = preservePosition ? audio.currentTime : 0;
     const wasPlaying = preservePosition && !audio.paused;
     state.currentJob = job;
+    state.unavailableJobId = null;
     if (job.state === "complete") {
       const source = job.audio_url || `${API}/generations/${encodeURIComponent(job.id)}/audio`;
       if (audio.getAttribute("src") !== source) {
@@ -425,9 +476,10 @@ globalThis.HydraElevenLabs = (() => {
       await refreshLists();
       if (state.currentJob?.state === "complete" && (previousJob?.state !== "complete" || !$("audio").getAttribute("src"))) chooseAttempt(state.currentJob.id);
       if (!state.loaded) {
-        state.loaded = true;
         const saved = remembered();
-        const id = saved.planId && state.plans.some((plan) => plan.id === saved.planId) ? saved.planId : state.plans[0]?.id;
+        state.unavailablePlanId = saved.planId || null;
+        state.unavailableJobId = saved.jobId || null;
+        const id = saved.planId || state.plans[0]?.id;
         if (id) await task(() => restorePlan(id, saved.jobId));
         if (saved.generationSettings) {
           const planned = JSON.stringify(readGenerationSettings());
@@ -443,6 +495,7 @@ globalThis.HydraElevenLabs = (() => {
           remember();
         }
         $("create").open = true;
+        state.loaded = true;
       }
       schedulePoll();
     } catch (error) { notice(error.message, true); $("setup").textContent = error.message; }
@@ -455,5 +508,5 @@ globalThis.HydraElevenLabs = (() => {
     if (state.initialized) $("audio").pause();
   }
 
-  return { init, activate, deactivate, showView, sectionAt, canGenerate, matchesPlan, hasPendingWork, validateGenerationSettings, originalPlanRequest };
+  return { init, activate, deactivate, flush, showView, sectionAt, canGenerate, matchesPlan, hasPendingWork, validateGenerationSettings, originalPlanRequest, musicLabel };
 })();

@@ -6,6 +6,8 @@ const path = require("node:path");
 const vm = require("node:vm");
 const { createMappingTracker } = require("../dashboard/study-recorder.js");
 const copy = (value) => JSON.parse(JSON.stringify(value));
+const labelContext = vm.createContext({});
+vm.runInContext(fs.readFileSync(path.join(__dirname, "../dashboard/elevenlabs.js"), "utf8"), labelContext);
 
 // Recordings reuse a joint label for its position and velocity. Exercise the
 // rendered picker and real UI handlers without audio, a browser, or paid calls.
@@ -43,6 +45,7 @@ const mappingConfigurations = () => studyEvents.filter(event => event.type === "
 const mappingPlaybacks = () => studyEvents.filter(event => event.type === "mapping.playback").map(event => event.payload);
 function pushSnapshot(next) { engineSnapshot = copy(next); onUpdate(next); }
 const generationCalls = [];
+const selectedTracks = [];
 const sharedStorage = new Map();
 let activations = 0, configurationWrites = 0, refreshRequests = 0;
 const savedRap = { text: "Earlier voice draft", experiment_id: "saved-voice", pending: { request_id: "pending-voice", variants: ["flash", "robot"] },
@@ -56,13 +59,15 @@ let savedWorkspace = { rap: copy(savedRap), config: { mode: "shared", buses: [{ 
 const planRequests = [];
 const context = vm.createContext({
   AbortController,
+  setTimeout, clearTimeout,
   performance: { now: () => 0 },
   HydraStudy: { emit: studyRecorder.emit, createMappingTracker: workspace => createMappingTracker(studyRecorder, workspace) },
   localStorage: {
     getItem: key => key === "hydra.signal-library.v1" ? sharedStorage.get(key) || null : JSON.stringify(savedWorkspace),
     setItem(key, value) { if (key === "hydra.signal-library.v1") sharedStorage.set(key, value); else savedWorkspace = JSON.parse(value); }
   },
-  HydraElevenLabs: { originalPlanRequest: (duration, settings) => { planRequests.push(copy(settings)); return { kind: "original", duration_seconds: Number(duration), settings }; } },
+  HydraElevenLabs: { musicLabel: labelContext.HydraElevenLabs.musicLabel,
+    originalPlanRequest: (duration, settings) => { planRequests.push(copy(settings)); return { kind: "original", duration_seconds: Number(duration), settings }; } },
   HydraRap: { create() { throw new Error("Music mixer must not mount a rap player"); } },
   HydraMusicMixerVoice: { create() { throw new Error("Music mixer must not mount a voice player"); } },
   HydraMusicMixerGeneration: { create: (options) => { generationOptions = options; onGenerationUpdate = options.onUpdate; return {
@@ -72,6 +77,7 @@ const context = vm.createContext({
   HydraMusicMixerEngine: {
     validateConfig: copy,
     instrumentalStems: () => [],
+    stemsForTrack: track => context.HydraMusicMixerEngine.instrumentalStems(track.stems || track.stem_separation?.stems),
     create(options) {
       engineSnapshot = { fields, buses: [], channels: [], running: false };
       onUpdate = options.onUpdate;
@@ -90,6 +96,7 @@ const context = vm.createContext({
           if (!source) return false;
           Object.assign(source, { rangeMode: "auto", learnedMin: null, learnedMax: null }); onUpdate(copy(engineSnapshot)); return true;
         },
+        async setTrack(track) { selectedTracks.push(copy(track)); pushSnapshot({ ...engineSnapshot, track }); },
         activate() { activations++; }, snapshot: () => copy(engineSnapshot) };
     }
   },
@@ -123,6 +130,47 @@ assert.match(element("buses").innerHTML, /Robot joint states · Direct value/);
 assert.match(element("buses").innerHTML, />Single input<\/p>/);
 assert.match(element("buses").innerHTML, /data-operator disabled/);
 assert.doesNotMatch(element("buses").innerHTML, /combined signal history/);
+assert.equal(element("skeleton-detail-field").hidden, true, "ordinary input channels do not add skeleton controls");
+
+// A compact skeleton picker is a view preference, never a rewrite of mappings.
+const skeletonRegions = ["whole_body", "head", "torso", "left_arm", "right_arm", "left_leg", "right_leg"];
+const skeletonField = (id, name, skeletonLevel) => ({ key: `skeleton|${encodeURIComponent(id)}`, fieldId: id,
+  channelId: "skeleton", channelName: "Skeleton", name, optionLabel: name, skeletonLevel,
+  kind: ["region", "joint"].includes(skeletonLevel) ? "motion" : "array", reducers: ["value"], default_reducer: "value" });
+const skeletonFields = [skeletonField("data", "Data", "raw"),
+  ...Array.from({ length: 54 }, (_, i) => skeletonField(`skeleton:joint_${Math.floor(i / 3)}:${"xyz"[i % 3]}`, `Joint ${Math.floor(i / 3)} ${"XYZ"[i % 3]}`, "axis")),
+  ...Array.from({ length: 18 }, (_, i) => skeletonField(`skeleton:joint_${i}:speed`, `Joint ${i} movement`, "joint")),
+  ...skeletonRegions.map(region => skeletonField(`skeleton:region:${region}:speed`, `${region.replaceAll("_", " ")} movement`, "region"))];
+const skeletonOptionKeys = () => [...element("buses").innerHTML.matchAll(/<option value="(skeleton\|[^"]+)"/g)].map(match => match[1]);
+const skeletonView = value => handlers.change({ target: { ...busControl({}, value), id: "mm-skeleton-detail" } });
+const initialSource = copy(config.buses[0].sources[0]);
+pushSnapshot({ fields: [...fields, ...skeletonFields], buses: [], channels: [] });
+assert.equal(element("skeleton-detail-field").hidden, false);
+assert.equal(element("skeleton-detail").value, "region");
+assert.equal(skeletonOptionKeys().length, 7, "only the seven combined body regions appear by default");
+assert.match(element("buses").innerHTML, /<optgroup label="Robot joint states">/, "other channels stay available");
+skeletonView("joint");
+assert.equal(skeletonOptionKeys().length, 18, "joint view combines each joint's XYZ values");
+skeletonView("axis");
+assert.equal(skeletonOptionKeys().length, 55, "detailed axes and the original raw array remain available");
+const axisField = skeletonFields[1];
+handlers.change({ target: busControl({ sourceField: "sourceKey" }, axisField.key) });
+const mappedAxis = copy(config), writesBeforeView = configurationWrites, revisionsBeforeView = mappingConfigurations().length;
+skeletonView("region");
+assert.equal(skeletonOptionKeys().length, 8, "an existing detailed mapping stays visible alongside the seven regions");
+assert.ok(skeletonOptionKeys().includes(axisField.key));
+assert.deepEqual(config, mappedAxis, "changing detail never changes the saved source");
+assert.equal(configurationWrites, writesBeforeView);
+assert.equal(mappingConfigurations().length, revisionsBeforeView, "a view-only choice is not a mapping edit");
+handlers.change({ target: busControl({ sourceField: "sourceKey" }, skeletonFields.at(-1).key) });
+assert.match(element("buses").innerHTML, /Skeleton · Movement speed · m\/s/);
+assert.match(element("buses").innerHTML, /Regions average their tracked joints/);
+skeletonView("joint");
+assert.equal(skeletonOptionKeys().length, 19, "selected regions are equally preserved when browsing joints");
+handlers.change({ target: busControl({ sourceField: "sourceKey" }, initialSource.sourceKey) });
+skeletonView("region");
+pushSnapshot({ fields, buses: [], channels: [] });
+assert.equal(element("skeleton-detail-field").hidden, true);
 
 const routeCaption = element("route-caption");
 routes.push({ querySelector: (selector) => selector === "[data-route-source]" ? routeCaption : { value: "mix-a" } });
@@ -470,3 +518,63 @@ context.HydraMusicMixer.flush();
 assert.equal(savedWorkspace.config.channels[0].routes[0].strength, 0.55);
 
 console.log("Music mixer UI: inputs, saved controls, next-track choices, shared signal refresh, immutable mapping history, playback attribution and recorder failure isolation passed.");
+
+async function savedTrackRestoreTests() {
+  // Let the earlier deliberately rejected offline refresh finish before testing
+  // the real restoration path against deterministic local server responses.
+  await new Promise(setImmediate);
+  const savedConfig = { ...copy(config), includeVocals: false }, requests = [];
+  const savedPlan = { id: "saved-plan", settings: { style: "Gentle cello & piano", bpm: 85, key: "A minor" }, duration_seconds: 40 };
+  const recent = { id: "newest-track", plan_id: savedPlan.id, state: "complete", requested_duration_seconds: 40 };
+  const older = { ...recent, id: "older-saved-track", stem_separation: { state: "complete", stems: savedConfig.channels.slice(1).map(channel => ({ name: channel.name })) } };
+  let listed = [recent];
+  context.fetch = async (url, options) => {
+    const route = url.replace("/api/elevenlabs", "");
+    requests.push({ route, method: options?.method || "GET" });
+    const data = route === "/generations" ? { jobs: listed }
+      : route === "/plans" ? { plans: [savedPlan] }
+        : route === `/generations/${older.id}` ? older : null;
+    return { ok: data !== null, status: data ? 200 : 404, json: async () => copy(data) };
+  };
+  async function restore(trackId) {
+    savedWorkspace = { ...copy(savedWorkspace), config: copy(savedConfig), trackId };
+    vm.runInContext(fs.readFileSync(path.join(__dirname, "../dashboard/music-mixer.js"), "utf8"), context);
+    context.HydraMusicMixer.init({ container: root });
+    await context.HydraMusicMixer.activate();
+  }
+
+  await restore("missing-saved-track");
+  assert.equal(context.HydraMusicMixer.getState().trackId, "missing-saved-track");
+  assert.equal(element("track").value, "missing-saved-track");
+  assert.match(element("track").innerHTML, /Saved track unavailable/);
+  assert.match(element("notice").textContent, /Saved track missing-saved-track is unavailable/);
+  assert.deepEqual(copy(config), savedConfig, "missing audio must preserve every saved channel and effect mapping");
+  assert.deepEqual(selectedTracks, [], "missing saved audio must not silently load the latest available track");
+  context.HydraMusicMixer.flush();
+  assert.equal(savedWorkspace.trackId, "missing-saved-track");
+  assert.match(element("track").innerHTML, /Gentle cello &amp; piano · 85 BPM · A minor · 40s/);
+  assert.equal(requests.filter(request => request.route === "/plans").length, 1, "one plans listing names all original tracks");
+  assert.equal(requests.some(request => request.route.startsWith("/plans/")), false);
+
+  await restore("");
+  assert.deepEqual(copy(config), savedConfig, "an unset track must not discard configured mixer channels");
+  assert.equal(element("track").value, "");
+  assert.deepEqual(selectedTracks, [], "opening saved settings alone does not choose another recording");
+  listed = [];
+  await restore("missing-saved-track");
+  assert.deepEqual(copy(config), savedConfig, "an empty music library must not reset saved controls");
+  assert.equal(context.HydraMusicMixer.getState().trackId, "missing-saved-track");
+
+  listed = [recent];
+  await restore(older.id);
+  assert.equal(selectedTracks.at(-1).id, older.id, "saved tracks outside the recent list are fetched by their exact ID");
+  assert.equal(selectedTracks.at(-1).generation_settings.style, savedPlan.settings.style, "loaded originals inherit the cached generation settings");
+  assert.deepEqual(copy(config), savedConfig);
+  assert.equal(element("track").value, older.id);
+  const beforeRefresh = selectedTracks.length;
+  await context.HydraMusicMixer.refresh();
+  assert.equal(selectedTracks.length, beforeRefresh, "refreshing the library does not reset the already loaded track");
+  assert.equal(requests.every(request => request.method === "GET"), true, "restore and refresh never generate music");
+  console.log("Music mixer UI: exact saved-track restoration, missing assets, preserved mixer settings, batched descriptive labels and refresh stability passed.");
+}
+savedTrackRestoreTests().catch(error => { console.error(error); process.exitCode = 1; });

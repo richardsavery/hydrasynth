@@ -176,6 +176,21 @@ function harness(fetchHandler, options = {}) {
 }
 
 (async () => {
+  {
+    const options = { settings: { mode: "shared", duration: 40, budget: 3 } };
+    const h = harness(async () => { throw new Error("Saving settings must not generate audio"); }, options);
+    const previous = JSON.stringify(h.saved);
+    options.storageUnavailable = true;
+    h.element("duration").value = "60";
+    assert.doesNotThrow(() => h.app.flush(), "autosave remains optional for ongoing playback");
+    assert.throws(() => h.app.flush({ strict: true }), /Storage unavailable/,
+      "session capture cannot silently reuse old realtime mappings or controls");
+    assert.equal(JSON.stringify(h.saved), previous);
+    options.storageUnavailable = false;
+    h.app.flush({ strict: true });
+    assert.equal(h.saved.duration, 60);
+    assert.equal(h.requests.length, 0);
+  }
   const sharedDefault = harness(async () => { throw new Error("Opening simplified UI must not spend credits"); }, {
     fields: [{ key: "motion", name: "Motion", default_reducer: "rms", minimum: 10, maximum: 30 }] });
   assert.equal(sharedDefault.element("source").value, "shared", "a fresh workspace uses the Connections input");
@@ -313,6 +328,40 @@ function harness(fetchHandler, options = {}) {
   handoff.app.setSelection({ plan: { id: "original-plan" }, currentJob: originalTrack, jobs: [originalTrack], analysis: null });
   assert.equal(handoff.element("track").value, "starter", "refreshing the same original must preserve a deliberate starter selection");
   assert.equal(handoff.requests.length, 0);
+
+  const customTrack = { id: "custom", plan_id: "uploaded-plan", origin: "uploaded", state: "complete", audio_url: "/custom.wav",
+    stems: [{ name: "vocals", audio_url: "/custom-vocals.wav" }] };
+  const custom = harness(async () => { throw new Error("Prepared custom audio playback never submits work"); }, {
+    starter: customTrack, settings: { mode: "demo" } });
+  assert.equal(custom.element("auto").disabled, true, "custom audio cannot arm provider continuations");
+  assert.match(custom.element("budget-note").textContent, /Generate new in Music mixer/);
+  await custom.element("play").event("click"); await custom.advance(2000);
+  assert.equal(custom.players[0].playing, true, "the origin guard leaves saved audio and stems playable");
+  assert.deepEqual(Array.from(custom.players[0].stemNames), ["vocals"]);
+  custom.element("auto").checked = true; await custom.element("auto").event("change"); await custom.advance(50);
+  assert.equal(custom.element("auto").checked, false, "an injected change event cannot bypass the origin guard");
+  assert.equal(custom.requests.length, 0);
+  await custom.element("stop").event("click");
+  custom.app.setSelection({ plan: { id: "original-plan" }, currentJob: originalTrack, jobs: [originalTrack], analysis: null });
+  assert.equal(custom.element("auto").disabled, false, "selecting generated music restores the continuation option");
+
+  const selectedCustom = harness(async () => { throw new Error("Selecting custom audio must not submit work"); });
+  selectedCustom.element("auto").checked = true; await selectedCustom.element("auto").event("change");
+  selectedCustom.app.setSelection({ plan: { id: "uploaded-plan", origin: "uploaded" }, currentJob: customTrack, jobs: [customTrack], analysis: null });
+  assert.equal(selectedCustom.element("auto").checked, false, "changing a previously armed starter to custom audio disarms it");
+  assert.equal(selectedCustom.element("auto").disabled, true);
+
+  const customSeparation = harness(async (request) => request.options.method === "GET"
+    ? { state: "not_requested", stems: [] } : { state: "complete", stems: customTrack.stems }, {
+    starter: { ...customTrack, stems: undefined }, settings: { mode: "demo" } });
+  await customSeparation.advance(2000);
+  assert.equal(customSeparation.requests.length, 0, "opening uploaded audio never prepares stems without an action");
+  await customSeparation.element("separate").event("click");
+  assert.equal(customSeparation.requests.filter(request => request.options.method === "POST").length, 1);
+  assert.equal(customSeparation.requests.at(-1).url, "/api/elevenlabs/generations/custom/stems", "explicit separation still works for uploaded audio");
+  await customSeparation.element("play").event("click"); await customSeparation.advance(2000);
+  assert.equal(customSeparation.players[0].playing, true);
+  assert.equal(customSeparation.requests.length, 2, "playing the prepared upload reuses saved stems");
 
   const generationSelection = harness(async () => ({ id: "selected-next", state: "complete", audio_url: "/next.mp3", stem_separation: { state: "complete", stems: [{ name: "bass", audio_url: "/bass.mp3" }] } }), {
     sourceValues: { a: 0.2, b: 0.8 }, fields: [{ key: "a", name: "A" }, { key: "b", name: "B" }],

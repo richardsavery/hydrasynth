@@ -57,7 +57,7 @@ done
 
 project_directory="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
 cd -- "$project_directory"
-[[ -f requirements-robot.txt && -f requirements-rap-response.txt && -f Makefile ]] || fail 'The checkout is incomplete.'
+[[ -f requirements-robot.txt && -f requirements-rap-response.txt && -f requirements-beat-tracking.txt && -f Makefile ]] || fail 'The checkout is incomplete.'
 
 if ! "$skip_system"; then
     command -v apt-get >/dev/null && command -v dpkg-query >/dev/null ||
@@ -102,7 +102,7 @@ fi
 
 printf 'Installing or updating Python dependencies.\n'
 "$venv_python" -m pip install --upgrade --upgrade-strategy only-if-needed \
-    -r requirements-robot.txt -r requirements-rap-response.txt
+    -r requirements-robot.txt -r requirements-rap-response.txt -r requirements-beat-tracking.txt
 
 printf 'Building native Linux MIDI and audio tools.\n'
 make all PYTHON="$venv_python"

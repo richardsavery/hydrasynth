@@ -20,6 +20,9 @@ globalThis.HydraSynthMixer = (() => {
   const $ = (id) => root.querySelector(`#sm-${id}`);
   const api = () => globalThis.HydraSynthMixerEngine;
   const fields = () => snapshot?.fields || [];
+  let skeletonDetail = "region";
+  const visibleFields = (available = fields(), selected) => available.filter((field) => !field.skeletonLevel
+    || field.key === selected || field.skeletonLevel === skeletonDetail || (skeletonDetail === "axis" && field.skeletonLevel === "raw"));
   const destinations = () => getDestinations?.() || globalThis.HydraSonification.DESTINATIONS;
   const destinationFor = (id) => destinations().find((item) => item.id === id);
   const status = () => transport?.status?.() || { playing: false, preparing: false, output: "audio" };
@@ -32,6 +35,7 @@ globalThis.HydraSynthMixer = (() => {
   function fieldLabel(field) {
     if (!field) return "Choose an input";
     const name = field.optionLabel || field.name || field.label || field.fieldId || field.key;
+    if (field.skeletonLevel) return readable(name);
     if (["position", "velocity"].includes(field.kind)) {
       const joint = field.label || name.replace(new RegExp(`\\s+${field.kind}$`, "i"), "");
       return `${readable(joint)} · ${readable(field.kind)}`;
@@ -104,7 +108,7 @@ globalThis.HydraSynthMixer = (() => {
     save();
   }
   function sourceOptions(selected) {
-    const items = fields(), groups = new Map();
+    const items = visibleFields(fields(), selected), groups = new Map();
     for (const field of items) {
       const channel = channelLabel(field);
       if (!groups.has(channel)) groups.set(channel, []);
@@ -121,7 +125,7 @@ globalThis.HydraSynthMixer = (() => {
     const reducers = [...new Set([...(field?.reducers || Object.keys(READ_MODES)), source.reducer])];
     return `<div class="mm-source" data-source="${index}">
       <div class="mm-source-line"><label class="sr-only" for="sm-${escape(bus.id)}-source-${index}">Input ${index + 1} for ${escape(bus.name)}</label><select id="sm-${escape(bus.id)}-source-${index}" data-source-field="sourceKey">${sourceOptions(source.sourceKey)}</select><output data-raw title="Incoming value">—</output><button class="mm-button mm-icon" data-action="remove-source" aria-label="Remove input ${index + 1}" ${bus.sources.length === 1 ? "disabled" : ""}>×</button></div>
-      <p class="mm-source-caption">${escape(field ? [channelLabel(field), source.reducer === "index" ? `Element ${source.index + 1}` : READ_MODES[source.reducer] || readable(source.reducer)].filter(Boolean).join(" · ") : source.sourceKey === "__unassigned" ? "No input selected" : "Input unavailable")}</p>
+      <p class="mm-source-caption"${field?.kind === "motion" ? ' title="Movement speed combines X, Y and Z. Regions average their tracked joints."' : ""}>${escape(field ? [channelLabel(field), field.kind === "motion" ? "Movement speed · m/s" : source.reducer === "index" ? `Element ${source.index + 1}` : READ_MODES[source.reducer] || readable(source.reducer)].filter(Boolean).join(" · ") : source.sourceKey === "__unassigned" ? "No input selected" : "Input unavailable")}</p>
       <meter min="0" max="1" value="0" data-source-meter aria-label="Normalized input ${index + 1}"></meter>
       <details class="mm-source-details" data-detail="${escape(bus.id)}:${index}"><summary><span>${source.rangeMode === "auto" ? "Auto learn" : "Fixed range"}</span> <span data-bounds></span></summary>
         <div class="mm-pair"><label>Read as<select data-source-field="reducer">${reducers.map((reducer) => `<option value="${escape(reducer)}" ${reducer === source.reducer ? "selected" : ""}>${escape(READ_MODES[reducer] || readable(reducer))}</option>`).join("")}</select></label><label>Range<select data-source-field="rangeMode"><option value="auto" ${source.rangeMode === "auto" ? "selected" : ""}>Auto learn</option><option value="fixed" ${source.rangeMode === "fixed" ? "selected" : ""}>Fixed</option></select></label></div>
@@ -139,6 +143,8 @@ globalThis.HydraSynthMixer = (() => {
   function renderBuses() {
     rendering = true;
     try {
+      $("skeleton-detail-field").hidden = !fields().some((field) => field.skeletonLevel);
+      $("skeleton-detail").value = skeletonDetail;
       preserveDetails($("buses"), config.buses.map((bus, i) => `<article class="mm-bus mm-color-${i % 4}" data-bus="${escape(bus.id)}">
         <div class="mm-bus-head"><span class="mm-bus-letter">${String.fromCharCode(65 + i)}</span><input data-bus-name value="${escape(bus.name)}" maxlength="30" aria-label="Signal mix name"><output data-bus-value>—</output><button class="mm-button mm-icon" data-action="remove-bus" aria-label="Remove ${escape(bus.name)}" ${config.buses.length === 1 ? "disabled" : ""}>×</button></div>
         <p class="mm-bus-combination">${escape(combinationLabel(bus))}</p>${libraryRow(bus)}
@@ -308,6 +314,10 @@ globalThis.HydraSynthMixer = (() => {
   function onChange(event) {
     if (rendering) return;
     const element = event.target, { bus, source, sourceIndex, parameter } = context(element);
+    if (element.id === "sm-skeleton-detail") {
+      if (!["region", "joint", "axis"].includes(element.value)) return;
+      skeletonDetail = element.value; renderBuses(); return;
+    }
     if (element.id === "sm-shared-mix") { renderLibrary(); return; }
     if (element.id === "sm-parameter-group") { renderPicker(); return; }
     if (element.dataset.control) {
@@ -325,7 +335,7 @@ globalThis.HydraSynthMixer = (() => {
     if (element.id === "sm-mode") {
       signalLibrary?.detachAll();
       config.mode = element.value;
-      const available = element.value === "demo" ? globalThis.HydraMusicMixerEngine.DEMO_FIELDS : sourceBridge?.describe?.().fields || [];
+      const available = visibleFields(element.value === "demo" ? globalThis.HydraMusicMixerEngine.DEMO_FIELDS : sourceBridge?.describe?.().fields || []);
       config.buses.forEach((item, index) => { item.sources = [sourceFor(available[index % Math.max(1, available.length)]?.key, available)]; });
       history.clear(); commit("all", { action: "mode" }); notice(""); return;
     }
@@ -408,12 +418,13 @@ globalThis.HydraSynthMixer = (() => {
     if (element.dataset.action === "detach-mix") { signalLibrary?.detach(bus.id); captureMapping("detach_shared", { bus_id: bus.id }); renderBuses(); save(); return; }
     if (element.id === "sm-add-bus") {
       if (config.buses.length >= 4) return;
-      config.buses.push(newBus(`mix-${Date.now().toString(36)}`, `Mix ${String.fromCharCode(65 + config.buses.length)}`, fields()[config.buses.length % Math.max(1, fields().length)]?.key)); commit("all", { action: "add_bus", bus_id: config.buses.at(-1).id }); return;
+      const available = visibleFields();
+      config.buses.push(newBus(`mix-${Date.now().toString(36)}`, `Mix ${String.fromCharCode(65 + config.buses.length)}`, available[config.buses.length % Math.max(1, available.length)]?.key)); commit("all", { action: "add_bus", bus_id: config.buses.at(-1).id }); return;
     }
     switch (element.dataset.action) {
       case "add-source":
         if (bus.sources.length >= 6) return;
-        bus.sources.push(sourceFor(fields().find((field) => !bus.sources.some((source) => source.sourceKey === field.key))?.key || fields()[0]?.key));
+        bus.sources.push(sourceFor(visibleFields().find((field) => !bus.sources.some((source) => source.sourceKey === field.key))?.key || visibleFields()[0]?.key));
         commit("all", { action: "add_source", bus_id: bus.id, source_index: bus.sources.length - 1 }); break;
       case "remove-source":
         if (bus.sources.length <= 1) return;
@@ -454,7 +465,7 @@ globalThis.HydraSynthMixer = (() => {
         </details>
         <div class="sm-transport"><button id="sm-play" class="mm-button mm-primary">▶ Play</button><button id="sm-stop" class="mm-button" disabled>■ Stop</button><span id="sm-transport-status" role="status">Stopped</span><a href="#connections" data-workspace="connections">Connections ↗</a></div>
       </section><p id="sm-notice" class="mm-notice" role="status" hidden></p>
-      <section aria-labelledby="sm-input-title"><div class="mm-section-heading"><div><span class="mm-eyebrow">02 / SIGNALS</span><h2 id="sm-input-title">Signal mixes</h2></div><button id="sm-add-bus" class="mm-button">+ Signal mix</button></div><div class="mm-source-toolbar"><label>Signals from<select id="sm-mode"><option value="shared">Connections input</option><option value="demo">Simulated demo signals</option></select></label><span id="sm-source-label">Choose an input in Connections</span><a href="#connections" data-workspace="connections">Connections ↗</a></div><div class="mm-library-toolbar"><label>Shared signal mixes<select id="sm-shared-mix"></select></label><button id="sm-add-shared" class="mm-button">Add shared mix</button></div><div id="sm-buses" class="mm-buses"></div></section>
+      <section aria-labelledby="sm-input-title"><div class="mm-section-heading"><div><span class="mm-eyebrow">02 / SIGNALS</span><h2 id="sm-input-title">Signal mixes</h2></div><button id="sm-add-bus" class="mm-button">+ Signal mix</button></div><div class="mm-source-toolbar"><label>Signals from<select id="sm-mode"><option value="shared">Connections input</option><option value="demo">Simulated demo signals</option></select></label><label id="sm-skeleton-detail-field" hidden>Skeleton detail<select id="sm-skeleton-detail" title="Choose body regions, individual joints, or XYZ axes. Existing mappings stay selected."><option value="region">Body regions</option><option value="joint">Joints · XYZ combined</option><option value="axis">XYZ axes</option></select></label><span id="sm-source-label">Choose an input in Connections</span><a href="#connections" data-workspace="connections">Connections ↗</a></div><div class="mm-library-toolbar"><label>Shared signal mixes<select id="sm-shared-mix"></select></label><button id="sm-add-shared" class="mm-button">Add shared mix</button></div><div id="sm-buses" class="mm-buses"></div></section>
       <div class="mm-flowline" aria-hidden="true"><span>INPUT SIGNALS</span><i>→</i><span>SIGNAL MIXES</span><i>→</i><span>SYNTH PARAMETERS</span></div>
       <section aria-labelledby="sm-desk-title"><div class="mm-section-heading"><div><span class="mm-eyebrow">03 / PARAMETER DESK</span><h2 id="sm-desk-title">Synth parameters</h2></div><button id="sm-add-parameter" class="mm-button">+ Parameter</button></div><p id="sm-parameter-count" class="mm-footnote"></p><div id="sm-parameters" class="sm-parameters"></div></section>
       <dialog id="sm-picker" class="sm-picker" aria-labelledby="sm-picker-title"><header><h2 id="sm-picker-title">Add a parameter</h2><button id="sm-close-picker" class="mm-button" aria-label="Close parameter picker">×</button></header><div class="sm-picker-controls"><label>Find a parameter<input id="sm-parameter-search" type="search" placeholder="Pitch, filter, envelope…" autocomplete="off"></label><label>Group<select id="sm-parameter-group"></select></label></div><p id="sm-picker-count" class="sm-picker-count"></p><div id="sm-picker-results" class="sm-picker-results"></div></dialog>`;

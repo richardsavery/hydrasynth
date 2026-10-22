@@ -1,0 +1,2 @@
+# Local, optional Music mixer beat analysis. Audio never leaves the computer.
+librosa==0.11.0

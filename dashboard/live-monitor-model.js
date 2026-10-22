@@ -117,10 +117,11 @@ globalThis.HydraLiveMonitorModel = (() => {
       for (const field of stream.fieldIndex.values()) {
         if (field.channelId !== frame.channel) continue;
         const indexed = /^(data|velocity):(\d+)$/.exec(field.fieldId);
+        const scalar = field.reducers?.length === 1 && field.reducers[0] === "value";
         const base = indexed ? indexed[1] : field.fieldId;
         let summary = summaries.get(base) || { value: null, count: 0, numericCount: 0, preview: [], currentMinimum: null, currentMaximum: null };
-        if (indexed) {
-          const value = channel.arrays.get(base)?.[Number(indexed[2])];
+        if (scalar) {
+          const value = stream.valueFor({ reducer: "value", index: 0 }, field, channel);
           summary = { value: finite(value) ? value : null, count: 1, numericCount: finite(value) ? 1 : 0,
             preview: [finite(value) ? value : null], currentMinimum: finite(value) ? value : null, currentMaximum: finite(value) ? value : null };
         }
@@ -133,7 +134,7 @@ globalThis.HydraLiveMonitorModel = (() => {
         } else if (points.length) points.length = 0;
         fields.set(field.key, { key: field.key, channelId: field.channelId,
           name: field.fieldId === "data" ? "Data" : field.fieldId === "velocity" ? "Velocity" : field.name,
-          kind: field.kind, reducer: indexed ? "value" : "mean", at: now, ...summary,
+          kind: field.kind, reducer: scalar ? "value" : "mean", at: now, ...summary,
           minimum: summary.value === null ? previous?.minimum ?? null : Math.min(previous?.minimum ?? Infinity, summary.value),
           maximum: summary.value === null ? previous?.maximum ?? null : Math.max(previous?.maximum ?? -Infinity, summary.value),
           points, bucket: Math.floor(now / 100), current: true });

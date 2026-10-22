@@ -26,6 +26,7 @@ function element(id) {
 const root = { classList: { add() {} }, querySelector: (selector) => element(selector.slice(1)),
   querySelectorAll: () => [], addEventListener(type, fn) { handlers[type] = fn; } };
 let output = "audio", storageError = false, finishPatch, finishStart, playing = false, preparing = false;
+let connectedFields = [];
 const context = vm.createContext({ document: { activeElement: null }, performance: { now: () => 0 },
   setInterval, clearInterval, window: { setInterval, clearInterval },
   HydraRap: { create() { throw new Error("Rap must only run in its dedicated workspace"); } },
@@ -43,7 +44,8 @@ context.HydraSynthMixerEngine.create = options => {
   engine.setConfig = config => { configurationWrites++; return setConfig(config); };
   return engine;
 };
-context.HydraSynthMixer.init({ container: root, transport: {
+context.HydraSynthMixer.init({ container: root,
+  sourceBridge: { describe: () => ({ mode: "live", label: "Connected inputs", fields: connectedFields }) }, transport: {
   status: () => ({ output, playing, preparing, midiReady: output === "midi", midiFormat: "nrpn" }), stop: () => { transportStops++; playing = false; },
   start() { preparing = true; return new Promise(resolve => { finishStart = () => { preparing = false; playing = true; resolve(); }; }); },
   selectPatch(bank, number) { selectedPatches.push({ bank, number }); return new Promise(resolve => { finishPatch = resolve; }); }
@@ -59,6 +61,7 @@ function click(id, dataset) { return handlers.click({ target: button(id, dataset
   assert.deepEqual(mappingEvents()[0].config.signalLinks, {});
   assert.equal(playbackEvents().length, 0, "restoring controls does not imply that they played");
   assert.doesNotMatch(root.innerHTML, /id="sm-rap"/, "Synth mixer has no embedded rap controls");
+  assert.equal(element("sm-skeleton-detail-field").hidden, true, "skeleton controls stay hidden for ordinary sources");
   assert.equal(JSON.stringify(context.HydraSynthMixer.getState().rap), JSON.stringify(savedRap), "earlier rap drafts survive session exports without running");
   assert.equal(element("sm-apply-patch").disabled, true, "patch selection requires connected MIDI output");
   await click("sm-apply-patch");
@@ -259,6 +262,56 @@ function click(id, dataset) { return handlers.click({ target: button(id, dataset
   await handlers.click({ target: rangeAction });
   assert.equal(mappingEvents().at(-1).action, "relearn");
   assert.notEqual(mappingEvents().at(-1).revision_id, firstRelearn, "deliberate range relearning is retained even if its configured values are already reset");
+
+  const skeletonField = (id, name, skeletonLevel) => ({ key: `skeleton|${encodeURIComponent(id)}`, fieldId: id,
+    channelId: "skeleton", channelName: "Skeleton", name, optionLabel: name, skeletonLevel,
+    kind: ["region", "joint"].includes(skeletonLevel) ? "motion" : "array", reducers: ["value"], default_reducer: "value" });
+  connectedFields = [skeletonField("data", "Data", "raw"),
+    ...Array.from({ length: 54 }, (_, i) => skeletonField(`skeleton:joint_${Math.floor(i / 3)}:${"xyz"[i % 3]}`, `Joint ${Math.floor(i / 3)} ${"XYZ"[i % 3]}`, "axis")),
+    ...Array.from({ length: 18 }, (_, i) => skeletonField(`skeleton:joint_${i}:speed`, `Joint ${i} movement`, "joint")),
+    ...["whole_body", "head", "torso", "left_arm", "right_arm", "left_leg", "right_leg"].map(region =>
+      skeletonField(`skeleton:region:${region}:speed`, `${region.replaceAll("_", " ")} movement`, "region")),
+    { key: "other|data", channelName: "Other input", name: "Data", reducers: ["mean"], default_reducer: "mean" }];
+  const simpleControl = (id, value) => ({ id, dataset: {}, value, closest: () => null, hasAttribute: () => false });
+  const skeletonView = value => handlers.change({ target: simpleControl("sm-skeleton-detail", value) });
+  const skeletonOptions = () => [...element("sm-buses").innerHTML.match(/data-source-field="sourceKey">([\s\S]*?)<\/select>/)[1]
+    .matchAll(/<option value="(skeleton\|[^"]+)"/g)].map(match => match[1]);
+  context.HydraSynthMixer.activate();
+  handlers.change({ target: simpleControl("sm-mode", "shared") });
+  assert.equal(element("sm-skeleton-detail-field").hidden, false);
+  assert.equal(element("sm-skeleton-detail").value, "region");
+  assert.equal(skeletonOptions().length, 7, "the default skeleton picker has seven combined regions");
+  assert.match(context.HydraSynthMixer.getState().buses[0].sources[0].sourceKey, /skeleton%3Aregion%3A/,
+    "switching into Connections selects from the compact list even when raw and axis fields arrive first");
+  assert.match(element("sm-buses").innerHTML, /Skeleton · Movement speed · m\/s/);
+  assert.match(element("sm-buses").innerHTML, /<optgroup label="Other input">/, "unrelated channels remain accessible");
+  const regionBefore = context.HydraSynthMixer.getState().buses[0].sources[0].sourceKey;
+  skeletonView("joint");
+  assert.equal(skeletonOptions().length, 19, "the selected region stays visible beside the eighteen joints");
+  assert.ok(skeletonOptions().includes(regionBefore));
+  skeletonView("axis");
+  assert.equal(skeletonOptions().length, 56, "axes, raw array and the selected region all remain available");
+  const mappedAxis = connectedFields[1];
+  Object.assign(sourceControl, { dataset: { sourceField: "sourceKey" }, value: mappedAxis.key });
+  handlers.change({ target: sourceControl });
+  const stateBeforeView = JSON.stringify(context.HydraSynthMixer.getState());
+  const writesBeforeView = configurationWrites, eventsBeforeView = mappingEvents().length;
+  skeletonView("region");
+  assert.equal(skeletonOptions().length, 8, "restored or selected axes remain visible when returning to compact view");
+  assert.ok(skeletonOptions().includes(mappedAxis.key));
+  assert.equal(JSON.stringify(context.HydraSynthMixer.getState()), stateBeforeView);
+  assert.equal(configurationWrites, writesBeforeView, "view changes cannot overwrite saved mappings");
+  assert.equal(mappingEvents().length, eventsBeforeView, "view changes do not create mapping revisions");
+  const addSource = { id: "", dataset: { action: "add-source" }, closest(selector) { return selector === "button" ? this : sourceControl.closest(selector); } };
+  await handlers.click({ target: addSource });
+  assert.match(context.HydraSynthMixer.getState().buses[0].sources.at(-1).sourceKey, /skeleton%3Aregion%3A/,
+    "adding an input uses the compact choices");
+  await click("sm-add-bus");
+  assert.match(context.HydraSynthMixer.getState().buses.at(-1).sources[0].sourceKey, /skeleton%3Aregion%3A/,
+    "adding a mix uses the compact choices");
+  handlers.change({ target: simpleControl("sm-mode", "demo") });
+  assert.equal(element("sm-skeleton-detail-field").hidden, true, "the extra selector disappears when leaving skeleton input");
+  context.HydraSynthMixer.deactivate();
   storageError = true;
   assert.throws(() => context.HydraSynthMixer.flush(), /Storage full/, "session capture cannot silently persist stale state");
   assert.doesNotThrow(() => context.HydraSynthMixer.save(), "periodic preference saving remains tolerant");

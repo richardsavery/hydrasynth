@@ -127,7 +127,7 @@
           ],
           [
             "Sessions",
-            "Save and reload named collections of settings. Available in the top bar."
+            "Save and reload named setups with their generated audio. Available in the top bar."
           ],
           [
             "Keirzo control",
@@ -188,6 +188,10 @@
       {
         "type": "p",
         "text": "Pause display only freezes the live monitor’s picture; it does not stop the incoming data or active music. Use the player’s Stop button to stop playback. Use Disconnect to end the live connection. Return to recording selects the recorded-data path again."
+      },
+      {
+        "type": "p",
+        "text": "Skeleton inputs default to seven movement controls: whole body, head, torso, left arm, right arm, left leg and right leg. Choose Connections input, then a field such as Left arm movement. These combine motion along X, Y and Z into movement speed; each region averages its tracked joints. Use Skeleton detail to choose individual joints with XYZ combined, or the original XYZ position axes. Changing this view keeps your existing mappings intact. The same choices work with movement recordings."
       },
       {
         "type": "h2",
@@ -393,6 +397,18 @@
         "text": "Next track defaults to Generate new. Generate new and Generate similar can keep requesting replacement tracks and using credits while music plays. Choose Loop before playing saved music when you want no new generation. Stop or changing to Loop prevents future requests, but work already submitted may still finish and use credits."
       },
       {
+        "type": "p",
+        "text": "To use your own audio, expand Recent tracks → Use your own audio. Choose a mono or stereo WAV, MP3, FLAC, OGG, M4A or AAC file up to 128 MiB, with no fixed duration limit. Loading saves it locally and selects Loop without starting playback. Separate with ElevenLabs sends the audio to ElevenLabs and uses credits; completed stems, including vocals, appear in the mixer. Sessions saves the selected custom audio and completed stems with your settings and includes them in ZIP exports."
+      },
+      {
+        "type": "p",
+        "text": "Imported tracks align automatically when loaded. The small Aligning beats… status changes to Beat sync ready. Press Play saved track as usual; playback waits if analysis is still running. Stop cancels a pending start. Loading and analysis never start music or drumming. The analysis runs locally, uses no ElevenLabs credits, and is saved with the audio in Sessions for reuse."
+      },
+      {
+        "type": "p",
+        "text": "Keirzo’s Follow → Music mixer follows the detected beats through leading silence, pauses and changing tempo. The groove accent is estimated automatically. Optional corrections and Retry beat analysis are tucked under Recent tracks → Beat timing · Advanced; normal use needs no Analyze or Use detected beats action. Ambiguous rhythms may affect the estimate. Timing adjustment moves beats later for positive values or earlier for negative values. First detected beat in bar defaults to Automatic, with optional Beat 1–4 overrides. Track BPM can provide a starting estimate before Analyze again if detection chooses half or double the intended pulse. Timing mode → Manual BPM explicitly restores a fixed grid from the file start. These advanced changes apply while stopped. Generated tracks keep their requested tempo unless Analyze beats → Use detected beats is selected. Use the master’s Playback speed to change how fast audio plays; entering a BPM alone does not change its speed."
+      },
+      {
         "type": "h2",
         "text": "Create a new instrumental"
       },
@@ -409,7 +425,7 @@
       },
       {
         "type": "p",
-        "text": "The requested style, key and tempo guide generation; they are not exact measurements of the result. Listen before relying on the beat for a coordinated performance. If a saved track is missing or its instrument layers are unavailable, choose another prepared track or ask the organiser to restore the intended library. A saved settings file alone does not contain the music."
+        "text": "The requested style, key and tempo guide generation; they are not exact measurements of the result. Listen before relying on the beat for a coordinated performance. If a saved track or its instrument layers are missing, open its Sessions ZIP to restore the audio, or ask the organiser for the complete archive. Older JSON settings files do not contain the music."
       },
       {
         "type": "table",
@@ -570,7 +586,7 @@
     "blocks": [
       {
         "type": "p",
-        "text": "Sessions saves a named set of your dashboard settings so you can return to a musical idea. It includes the mixers, mappings and other workspace preferences. It is different from the organiser’s participant records and is not an audio recording."
+        "text": "Sessions keeps a named musical setup with its generated audio so you can return to an idea. It includes the mixers, mappings, workspace preferences, selected music and rap audio, and completed stems. It does not record a live performance or include the organiser’s participant records."
       },
       {
         "type": "figure",
@@ -584,10 +600,10 @@
       {
         "type": "ol",
         "items": [
-          "Arrange the sound, mappings and connections you want to keep.",
-          "Open Sessions in the top bar. Enter a Version name that will mean something later, such as Slow pad with movement filter.",
-          "Press Save new version. Keep the organiser’s original version and save your experiments under new names.",
-          "To keep another variation, change the settings and use Save new version again. Update selected replaces the settings in the version you have selected."
+          "Arrange the sound, mappings and connections you want to keep. Wait for selected music or rap generation to finish.",
+          "Open Sessions in the top bar. Keep the suggested Version name or enter one that will mean something later, such as Slow pad with movement filter.",
+          "Wait for selected generated music and its stems to finish, then press Save new version. Keep the organiser’s original version and save your experiments under new names. Repeated names receive a number automatically.",
+          "To keep another variation, change the settings and use Save new version again. Update selected replaces the settings and audio snapshot in the version you have selected."
         ]
       },
       {
@@ -598,26 +614,26 @@
         "type": "ol",
         "items": [
           "Stop any performance you want to finish. Open Sessions and select the required version under Saved versions.",
-          "Press Load. The app stops playback and robot/live activity and reloads the saved settings. Generation jobs already submitted are separate and can still finish.",
+          "Press Load. The app stops playback and robot/live activity and restores the saved settings and audio. Generation jobs already submitted are separate and can still finish.",
           "Check the input, Synth output and selected track. Reconnect live movement or the intended MIDI device if needed.",
           "Press Play when you are ready. Loading settings does not start a performance, create new music or establish that physical hardware is ready."
         ]
       },
       {
         "type": "h2",
-        "text": "Take your settings with you"
+        "text": "Take your setup and audio with you"
       },
       {
         "type": "ol",
         "items": [
-          "Select a saved version and press Export selected, or use Export all for your saved settings library.",
-          "Keep the downloaded JSON file in a folder you can find. Copy that file if you need the settings on another prepared laptop.",
-          "On the other laptop, open Sessions > Import… and select the file. Choose the imported version, press Load and check the available inputs and tracks."
+          "Select a saved version and press Export selected, or use Export all for your saved library.",
+          "Keep the downloaded ZIP file in a folder you can find. It contains the settings and referenced generated audio. Copy the ZIP to another prepared laptop to take the setup with you.",
+          "On the other laptop, open Sessions > Open file and select the ZIP. A file with one version loads immediately. For a file with several versions, choose one under Saved versions and press Load. Check the available inputs and output before playing."
         ]
       },
       {
         "type": "note",
-        "text": "A Sessions export carries settings, not the music files themselves. A track created on one laptop may be missing on another. Ask the organiser to help transfer any required audio. A saved setup is also not a backup of participant recordings."
+        "text": "Older JSON session files still open, but they contain settings and references rather than audio. Exporting an older version as ZIP collects its audio from the current laptop; a missing file must be restored before that export can finish. Session files do not include movement recordings, microphone input recordings or participant records."
       },
       {
         "type": "p",
@@ -769,7 +785,7 @@
         "rows": [
           [
             "Your arrangement of controls",
-            "Save a named version in Sessions. Export the settings file for a portable copy."
+            "Save a named version in Sessions. Export a ZIP for a portable copy of the setup and its generated audio."
           ],
           [
             "A generated rap you want to listen to elsewhere",
@@ -856,11 +872,11 @@
           ],
           [
             "Saved settings seem missing",
-            "Return to the same browser profile and exact bookmarked address. Import an exported Sessions file if available."
+            "Return to the same browser profile and exact bookmarked address. Use Sessions > Open file to restore an exported ZIP if available."
           ],
           [
             "A loaded version cannot find its track",
-            "The settings file does not contain that audio. Ask the organiser to provide the track or choose a completed track that exists on this laptop."
+            "Open the version’s Sessions ZIP to restore its generated audio. Older JSON files contain settings only and need the original track files. If the ZIP is unavailable or reports missing audio, ask the organiser for the complete archive or choose an available track; your saved selection and mixer settings are kept."
           ],
           [
             "A robot status shows an error",
@@ -940,7 +956,7 @@
           ],
           [
             "Session version",
-            "A saved collection of musical settings. This is separate from the study’s participant record."
+            "A saved collection of musical settings and their generated audio. This is separate from the study’s participant record."
           ],
           [
             "Stop",

@@ -5,10 +5,14 @@ const vm = require("node:vm");
 const plain = (value) => JSON.parse(JSON.stringify(value));
 const defer = () => { let resolve; const promise = new Promise((done) => { resolve = done; }); return { promise, resolve }; };
 const settle = async () => { for (let i = 0; i < 10; i++) await Promise.resolve(); };
+const until = async (predicate) => { for (let i = 0; i < 100 && !predicate(); i++) await new Promise(resolve => setTimeout(resolve, 1)); assert.ok(predicate(), "asynchronous preparation finished"); };
 const fixed = (sourceKey, extra = {}) => ({ sourceKey, reducer: "value", rangeMode: "fixed", inputMin: 0, inputMax: 100, weight: 1, ...extra });
 const bus = (id, sources, operator = "average") => ({ id, name: id, sources, operator });
 const route = (busId, target, outputMin, outputMax, invert = false) => ({ busId, target, outputMin, outputMax, invert });
 const track = { id: "saved", audio_url: "/saved.mp3", stems: [{ name: "Bass", audio_url: "/bass.mp3" }, { name: "Drums", audio_url: "/drums.mp3" }] };
+const beatMap = extra => ({ state: "complete", schema_version: 1, beats_seconds: [1, 1.5, 2.1], bpm_median: 110,
+  duration_seconds: 20, active_regions: [{ start_seconds: 1, end_seconds: 2.2 }], bpm_min: 100, bpm_max: 120,
+  source: "mix", audio_sha256: "a".repeat(64), source_sha256: "a".repeat(64), ...extra });
 
 function harness(options = {}) {
   const timers = new Map(), players = [], updates = [], errors = [], reads = [], preparations = [], resets = [], transitions = [];
@@ -32,14 +36,16 @@ function harness(options = {}) {
     updateControls(controls, valid) { this.controls = plain(controls); this.valid = valid; }
     setSourceValid(valid) { this.valid = valid; }
     async resume() { this.resumed = true; if (options.resume) await options.resume(); }
-    transportClock(bpm) { return { bpm, playing: Boolean(this.playing), valid: this.valid !== false, token: "fake-deck", context: this }; }
+    transportClock(bpm) { return { bpm, playing: Boolean(this.playing), valid: this.valid !== false,
+      token: "fake-deck", transportToken: "fake-transport", context: this }; }
     async loadTrack(selected) {
       this.track = selected;
       if (options.load) await options.load();
       this.stemNames = options.stemFailure ? [] : (selected.stems || []).map((stem) => stem.name);
       return !this.disposed;
     }
-    async start() {
+    async start(startOptions) {
+      this.startOptions = startOptions;
       this.initialControls = plain(this.controls); this.initialValid = this.valid;
       if (options.start) await options.start();
       this.playing = !this.disposed; return this.playing;
@@ -62,13 +68,16 @@ function harness(options = {}) {
   }
   const context = vm.createContext({
     performance: { now: () => time },
+    AbortController, setTimeout, clearTimeout,
+    HydraRobotDrums: options.drums,
     setInterval(callback, interval) { assert.equal(interval, 100); const id = ++timerId; timers.set(id, callback); return id; },
     clearInterval(id) { timers.delete(id); }
   });
-  for (const file of ["elevenlabs-realtime.js", "music-mixer-engine.js"])
+  for (const file of ["elevenlabs-player.js", "elevenlabs-realtime.js", "music-mixer-engine.js"])
     vm.runInContext(fs.readFileSync(`${__dirname}/../dashboard/${file}`, "utf8"), context);
   const library = context.HydraMusicMixerEngine;
   const engine = library.create({ sourceBridge: bridge, Player, now: () => time, onUpdate: (state) => updates.push(state), onError: (message) => errors.push(message),
+    beatPollIntervalMs: 0, requestBeatTiming: options.requestBeatTiming || (async () => { throw new Error("No beat response configured."); }),
     onTransition: (selected, details) => transitions.push({ selected, details }) });
   return { library, engine, bridge, Player, timers, players, updates, errors, samples, reads, preparations, resets, transitions,
     async tick(at = time + 100) { time = at; for (const callback of [...timers.values()]) callback(); await settle(); },
@@ -76,6 +85,152 @@ function harness(options = {}) {
 }
 
 async function main() {
+  {
+    const completion = defer(), requests = [], id = "0".repeat(32);
+    const h = harness({ requestBeatTiming: async (path, options) => {
+      requests.push({ path, ...options });
+      return options.method === "POST" ? completion.promise : { state: "not_requested" };
+    } }), e = h.engine;
+    e.setConfig({ uploadedBpms: { [id]: 123 }, beatTracking: { [id]: { enabled: false, offsetSeconds: .025, firstBeatInBar: 2 } } });
+    await e.setTrack({ ...track, id, origin: "uploaded" }); await settle();
+    assert.equal(e.snapshot().beatTiming.state, "preparing");
+    assert.equal(h.players.length, 0, "selecting an upload prepares only local metadata, without unlocking or playing audio");
+    assert.deepEqual(requests.map(request => request.method || "GET"), ["GET", "POST"]);
+    assert.ok(requests.every(request => request.path === `/generations/${id}/beats`), "automatic analysis cannot call generation or paid separation endpoints");
+    assert.deepEqual(JSON.parse(requests[1].body), { bpm_hint: 123 });
+    assert.deepEqual(plain(e.getConfig().beatTracking[id]), { enabled: true, mode: "auto", offsetSeconds: .025, firstBeatInBar: 2 }, "older disabled detection settings migrate to automatic while retaining adjustments");
+    e.activate(); const started = e.start();
+    assert.equal(h.players[0].resumed, true, "Play unlocks audio synchronously before awaiting local beat preparation");
+    await settle(); assert.equal(h.players[0].track, undefined, "the deck does not load or start before its map is ready");
+    completion.resolve(beatMap());
+    assert.equal(await started, true);
+    assert.equal(requests.length, 2, "Play shares the existing analysis request");
+    assert.equal(e.snapshot().beatTiming.state, "ready");
+    assert.deepEqual(plain(h.players[0].track.beat_analysis), beatMap());
+    assert.equal(e.transportClock(null).valid, true);
+    e.deactivate();
+  }
+  {
+    const requests = [], id = "1".repeat(32), replies = [{ state: "queued", progress: .1 }, { state: "analyzing", progress: .6 }, beatMap()];
+    const h = harness({ requestBeatTiming: async (path, options) => { requests.push(options.method || "GET"); return replies.shift(); } }), e = h.engine;
+    await e.setTrack({ ...track, id, origin: "uploaded" });
+    await until(() => e.snapshot().beatTiming?.state === "ready");
+    assert.deepEqual(requests, ["GET", "GET", "GET"], "reopening an in-progress local analysis polls without submitting it again");
+    assert.ok(h.updates.some(update => update.beatTiming?.progress === .6));
+    assert.equal(e.snapshot().running, false, "successful background preparation never auto-plays");
+    assert.equal(e.getConfig().beatTracking[id].firstBeatInBar, undefined, "automatic bar detection is retained when no user override exists");
+    assert.equal(h.players.length, 0); e.deactivate();
+  }
+  {
+    const completion = defer(), requests = [], id = "2".repeat(32);
+    const h = harness({ requestBeatTiming: async (path, options) => { requests.push(options); return completion.promise; } }), e = h.engine;
+    await e.setTrack({ ...track, id, origin: "uploaded" }); e.activate();
+    const started = e.start(); await settle(); e.stop();
+    assert.equal(requests[0].signal.aborted, true, "Stop cancels pending requests and polling");
+    completion.resolve(beatMap());
+    assert.equal(await started, false);
+    assert.equal(e.snapshot().running, false); assert.equal(e.snapshot().track.beat_analysis, undefined, "a late response cannot install a canceled beat map");
+    assert.ok(h.players.every(player => !player.playing)); e.deactivate();
+  }
+  {
+    const completion = defer(), requests = [], first = "3".repeat(32), second = "4".repeat(32);
+    const h = harness({ requestBeatTiming: async (path, options) => { requests.push(options); return completion.promise; } }), e = h.engine;
+    await e.setTrack({ ...track, id: first, origin: "uploaded" });
+    await e.setTrack({ ...track, id: second, origin: "uploaded", beat_analysis: beatMap({ first_beat_in_bar: 3 }) });
+    await settle(); assert.equal(requests[0].signal.aborted, true);
+    completion.resolve(beatMap({ first_beat_in_bar: 1 })); await settle();
+    assert.equal(e.snapshot().track.id, second);
+    assert.equal(e.snapshot().track.beat_analysis.first_beat_in_bar, 3, "changing track prevents stale analysis from replacing the selected track");
+    assert.equal(requests.length, 1, "valid saved maps need no analysis request"); e.deactivate();
+  }
+  {
+    const requests = [], id = "5".repeat(32); let succeeds = false;
+    const h = harness({ requestBeatTiming: async (path, options) => {
+      requests.push(options.method || "GET");
+      return options.method === "POST" && succeeds ? beatMap() : { state: "failed", error: "Local analysis dependencies are unavailable." };
+    } }), e = h.engine;
+    e.activate(); await e.setTrack({ ...track, id, origin: "uploaded" }); await settle();
+    assert.equal(e.snapshot().beatTiming.state, "failed");
+    assert.match(e.snapshot().beatTiming.error, /dependencies/);
+    for (let i = 0; i < 5; i++) await h.tick();
+    assert.equal(requests.length, 2, "failure does not create a timer-based retry loop");
+    assert.equal(await e.start(), false, "a failed analysis cannot silently fall back to a guessed grid");
+    succeeds = true; assert.equal(await e.start(), true, "an explicit Play retries preparation and then starts with its map");
+    assert.equal(e.snapshot().beatTiming.state, "ready"); e.deactivate();
+  }
+  {
+    const requests = [], id = "6".repeat(32);
+    const h = harness({ requestBeatTiming: async (...args) => { requests.push(args); throw new Error("Must not analyze manual mode"); } }), e = h.engine;
+    e.setConfig({ uploadedBpms: { [id]: 120 }, beatTracking: { [id]: { mode: "manual", enabled: false } } });
+    await e.setTrack({ ...track, id, origin: "uploaded" }); e.activate();
+    assert.equal(await e.start(), true, "explicit advanced manual mode remains available");
+    assert.equal(e.transportClock(null).bpm, 120); assert.equal(requests.length, 0); e.deactivate();
+  }
+  {
+    const completion = defer(), id = "7".repeat(32), requests = [];
+    const h = harness({ requestBeatTiming: async (path, options) => { requests.push(options); return completion.promise; } }), e = h.engine;
+    await e.setTrack(track); e.activate(); await e.start();
+    const queued = e.queueTrack({ ...track, id, origin: "uploaded", audio_url: "/custom.wav" });
+    await settle(); assert.equal(h.players[0].queued, undefined, "incoming audio cannot enter a live crossfade before its beat map is ready");
+    assert.equal(e.snapshot().running, true, "current music continues during incoming preparation");
+    e.setConfig({ channels: [{ name: "master", level: .5 }] });
+    assert.equal(e.getConfig().beatTracking[id].enabled, true, "an unrelated mixer edit cannot remove automatic timing from the preparing deck");
+    completion.resolve(beatMap()); assert.equal(await queued, true);
+    assert.deepEqual(plain(h.players[0].queued.beat_analysis), beatMap());
+    h.players[0].promote(); assert.equal(e.snapshot().beatTiming.trackId, id); assert.equal(e.snapshot().beatTiming.state, "ready");
+    e.deactivate();
+  }
+  {
+    const completion = defer(), requests = [], id = "8".repeat(32);
+    const h = harness({ requestBeatTiming: async (path, options) => { requests.push(options); return completion.promise; } }), e = h.engine;
+    await e.setTrack(track); e.activate(); await e.start();
+    const queued = e.queueTrack({ ...track, id, origin: "uploaded", audio_url: "/custom.wav" });
+    e.clearQueuedTrack(); completion.resolve(beatMap());
+    assert.equal(await queued, false); assert.equal(requests[0].signal.aborted, true);
+    assert.equal(h.players[0].queued, null); assert.equal(e.snapshot().running, true, "canceling a pending incoming map does not stop the current deck"); e.deactivate();
+  }
+  {
+    const requests = [], id = "a".repeat(32), drumMap = beatMap({ source: "drums", source_stem_id: "drums", source_sha256: "d".repeat(64) });
+    const replies = [{ state: "analyzing", progress: .5 }, beatMap(), drumMap];
+    const h = harness({ requestBeatTiming: async (path, options) => { requests.push(options.method || "GET"); return replies.shift(); } }), e = h.engine;
+    await e.setTrack({ ...track, id, origin: "uploaded", beat_analysis: beatMap(),
+      stems: [{ id: "drums", name: "Drums", audio_url: "/drums.wav" }], stem_separation: { state: "complete" } });
+    await until(() => e.snapshot().beatTiming?.state === "ready");
+    assert.deepEqual(requests, ["GET", "GET", "POST"], "a finishing full-mix analysis upgrades to newly separated drums before playback");
+    assert.equal(e.snapshot().track.beat_analysis.source, "drums"); e.deactivate();
+  }
+  {
+    const requests = [], id = "c".repeat(32), first = beatMap({ first_beat_in_bar: 2 }), updated = beatMap({ first_beat_in_bar: 4 });
+    const h = harness({ requestBeatTiming: async (path, options) => { requests.push(options); return updated; } }), e = h.engine;
+    e.setConfig({ beatTracking: { [id]: { offsetSeconds: .1, firstBeatInBar: 3 } } });
+    await e.setTrack({ ...track, id, origin: "uploaded", beat_analysis: first }); await settle();
+    assert.equal(await e.prepareBeatTiming({ force: true }), true);
+    assert.deepEqual(requests.map(request => request.method), ["POST"], "explicit reanalysis is a single local request and applies without another toggle");
+    assert.equal(e.snapshot().track.beat_analysis.first_beat_in_bar, 4);
+    assert.deepEqual(plain(e.getConfig().beatTracking[id]), { mode: "auto", enabled: true, offsetSeconds: .1, firstBeatInBar: 3 }, "manual alignment overrides survive automatic reanalysis");
+    assert.equal(e.snapshot().running, false); assert.equal(h.players.length, 0); e.deactivate();
+  }
+  {
+    const pending = defer(), requests = [], id = "d".repeat(32);
+    const h = harness({ requestBeatTiming: async (path, options) => { requests.push(options); return pending.promise; } }), e = h.engine;
+    await e.setTrack({ ...track, id, origin: "uploaded" }); e.activate(); e.deactivate();
+    assert.equal(requests[0].signal.aborted, true, "leaving the engine cancels preparation requests");
+    pending.resolve(beatMap()); await settle();
+    assert.equal(e.snapshot().active, false); assert.equal(e.snapshot().track.beat_analysis, undefined);
+    assert.equal(h.errors.length, 0, "cancellation is not reported as an analysis failure");
+  }
+  {
+    for (const [enabled, source, firstBeat, rate, expectedLead] of [[true, "mixer", 0, 1, 1.2], [true, "mixer", 2, 1, 0],
+      [true, "mixer", .5, 1.25, .8], [false, "mixer", 0, 1, 0], [true, "synth", 0, 1, 0]]) {
+      const h = harness({ drums: { snapshot: () => ({ enabled, settings: { source } }) } }), e = h.engine, id = "b".repeat(32);
+      const analysis = beatMap({ beats_seconds: [firstBeat, firstBeat + .5, firstBeat + 1], active_regions: [{ start_seconds: firstBeat, end_seconds: firstBeat + 1.1 }] });
+      e.setConfig({ channels: [{ name: "master", rate }] });
+      await e.setTrack({ ...track, id, origin: "uploaded", beat_analysis: analysis }); e.activate();
+      assert.equal(await e.start(), true);
+      assert.ok(Math.abs(h.players[0].startOptions.leadSeconds - expectedLead) < 1e-9, "only already-enabled mixer-following drums receive the lead time needed for the first beat");
+      e.deactivate();
+    }
+  }
   {
     const { library: lib } = harness();
     const old = lib.validateConfig({ channels: [{ name: "master", routes: [
@@ -177,11 +332,18 @@ async function main() {
     assert.equal(e.transportClock(144).bpm, 112, "the sounding track tempo wins over a changed next-track prompt");
     assert.equal(e.transportClock(144).playing, true);
     const token = e.transportClock(144).token;
+    const transportToken = e.transportClock(144).transportToken;
+    const player = h.players.at(-1), originalClock = player.transportClock.bind(player);
+    player.transportClock = bpm => ({ ...originalClock(bpm), token: "changed-rate" });
+    assert.notEqual(e.transportClock(144).token, token);
+    assert.equal(e.transportClock(144).transportToken, transportToken, "the mixer preserves live robot timing across rate changes");
     e.stop();
     assert.equal(e.transportClock(144).context, null, "stopping disposes the accompaniment's voice context");
     assert.equal(e.transportClock(144).bpm, 112, "the selected track tempo remains available after disposing its player");
     await e.unlock();
     assert.notEqual(e.transportClock(144).token, token, "a new transport cannot retain a queued voice");
+    await e.start();
+    assert.notEqual(e.transportClock(144).transportToken, transportToken, "replacing a player cannot reuse its old robot session token");
     e.deactivate();
   }
   {
@@ -198,6 +360,82 @@ async function main() {
     assert.equal(e.transportClock(175).bpm, 125, "pitch changes do not change the tempo used to prepare rap");
     e.activate(); await e.unlock();
     assert.equal(e.transportClock(175).bpm, 125, "unlocking an empty player does not revert the prepared tempo to its default rate");
+    e.deactivate();
+  }
+  {
+    const h = harness(), { engine: e, library: lib } = h;
+    const firstId = "a".repeat(32), secondId = "b".repeat(32);
+    const uploaded = { ...track, id: firstId, origin: "uploaded", generation_settings: { bpm: 180 } };
+    e.setConfig({ beatTracking: { [firstId]: { mode: "manual" }, [secondId]: { mode: "manual" } } });
+    await e.setTrack(uploaded);
+    assert.equal(e.transportClock(100).bpm, null, "unknown custom tempo never uses the next generation prompt or generated metadata");
+    assert.equal(e.transportClock(100).valid, false);
+    const uploadedBpms = { [firstId]: 92.5, [secondId]: 128, bad: 90, ["c".repeat(32)]: "100", ["d".repeat(32)]: 301 };
+    e.setConfig({ uploadedBpms, beatTracking: e.getConfig().beatTracking, channels: [{ name: "master", rate: 1.2, pitch: 7 }] });
+    assert.deepEqual(plain(e.getConfig().uploadedBpms), { [firstId]: 92.5, [secondId]: 128 });
+    assert.equal(e.transportClock(100).baseBpm, 92.5);
+    assert.equal(e.transportClock(100).bpm, 111, "manual source tempo follows playback speed, independently of pitch");
+    assert.deepEqual(plain(lib.validateConfig(plain(e.getConfig()))), plain(e.getConfig()), "per-file manual BPM survives session configuration validation");
+    e.activate(); await e.start();
+    const player = h.players.at(-1), count = h.players.length;
+    player.transportTrack = { ...uploaded, id: secondId };
+    assert.equal(e.transportClock(100).bpm, 128, "the audibly promoted upload uses its own tempo before the UI transition callback");
+    player.transportTrack = { ...track, generation_settings: { bpm: 112 } };
+    assert.equal(e.transportClock(100).bpm, 112, "a generated replacement uses its requested tempo before UI promotion");
+    player.transportTrack = uploaded;
+    const config = e.getConfig(); delete config.uploadedBpms[firstId]; e.setConfig(config);
+    assert.equal(e.transportClock(100).bpm, null);
+    assert.equal(e.transportClock(100).valid, false, "clearing an uploaded BPM disables only its estimated beat grid");
+    assert.equal(e.snapshot().running, true);
+    assert.equal(player.controls.rate, 1.2, "changing source BPM never changes audible playback speed");
+    assert.equal(h.players.length, count, "editing BPM does not restart playback");
+    await e.setTrack({ ...uploaded, id: secondId });
+    assert.equal(e.transportClock(100).baseBpm, 128, "each upload keeps its own tempo");
+    await e.setTrack({ ...track, generation_settings: { bpm: 112 } });
+    assert.equal(e.transportClock(100).baseBpm, 112, "generated music retains the requested tempo");
+    e.deactivate();
+  }
+  {
+    const h = harness(), { engine: e, library: lib } = h, id = "e".repeat(32);
+    await e.setTrack({ ...track, id, origin: "uploaded" });
+    e.setConfig({ beatTracking: { [id]: { enabled: true, offsetSeconds: .125, firstBeatInBar: 3 },
+      bad: { enabled: true }, ["f".repeat(32)]: { enabled: "true", offsetSeconds: 99, firstBeatInBar: 0 } },
+      channels: [{ name: "master", level: .4, rate: 1.2 }] });
+    assert.deepEqual(plain(e.getConfig().beatTracking), { [id]: { enabled: true, offsetSeconds: .125, firstBeatInBar: 3, mode: "auto" },
+      ["f".repeat(32)]: { enabled: false, offsetSeconds: 10, firstBeatInBar: 1 } });
+    assert.deepEqual(plain(lib.validateConfig(e.getConfig())), plain(e.getConfig()), "detected beat choices survive session validation");
+    const before = e.getConfig();
+    const analysis = { state: "complete", schema_version: 1, beats_seconds: [1, 1.5, 2.1], bpm_median: 110,
+      duration_seconds: 20, active_regions: [{ start_seconds: 1, end_seconds: 2.2 }], bpm_min: 100, bpm_max: 120,
+      source: "mix", audio_sha256: "a".repeat(64), source_sha256: "a".repeat(64) };
+    assert.equal(e.updateBeatAnalysis("wrong", analysis), false);
+    assert.equal(e.updateBeatAnalysis(id, analysis), true);
+    assert.deepEqual(plain(e.getConfig()), plain(before), "analysis updates preserve every mixer fader and route");
+    const clock = e.transportClock(null);
+    assert.equal(clock.valid, true); assert.equal(clock.detected, true); assert.equal(clock.estimated, false);
+    assert.equal(clock.bpm, 132); assert.equal(clock.playing, false);
+    assert.equal(h.players.length, 0, "analysing a stopped track does not unlock or start audio");
+    e.activate(); await e.start();
+    assert.deepEqual(plain(h.players.at(-1).callbacks.beatTracking({ id })), plain(before.beatTracking[id]));
+    assert.equal(e.updateBeatAnalysis(id, { state: "failed" }), false, "the beat map cannot change under a playing track");
+    e.deactivate();
+  }
+  {
+    const h = harness(), e = h.engine, id = "9".repeat(32);
+    e.setConfig({ mode: "demo", uploadedBpms: { [id]: 120 }, beatTracking: { [id]: { enabled: true } } });
+    e.activate();
+    for (const analysis of [undefined, { state: "queued" }, { state: "complete", schema_version: 1, beats_seconds: [1, 2], bpm_median: 120 }]) {
+      await e.setTrack({ ...track, id, origin: "uploaded", beat_analysis: analysis });
+      assert.equal(e.transportClock(null).valid, false, "a recalled missing or incomplete map cannot quietly use its saved manual BPM");
+      assert.equal(e.transportClock(null).bpm, null);
+      assert.match(e.transportClock(null).beatTrackingError, /Beat timing is not ready/);
+      assert.equal(await e.start(), false, "automatic imports cannot start without their timing map");
+      assert.equal(e.transportClock(null).playing, false);
+      assert.equal(e.transportClock(null).valid, false, "failed preparation never releases the fixed-tempo fallback guard");
+    }
+    const config = e.getConfig(); Object.assign(config.beatTracking[id], { enabled: false, mode: "manual" }); e.setConfig(config);
+    assert.equal(e.transportClock(null).bpm, 120);
+    assert.equal(e.transportClock(null).valid, true, "explicitly disabling detection permits manual BPM again");
     e.deactivate();
   }
   {
@@ -371,6 +609,34 @@ async function main() {
     assert.equal(e.snapshot().track.id, "original");
     assert.equal(e.snapshot().running, true, "a vocal-only replacement keeps the current track repeating");
     assert.match(e.snapshot().error, /no instrumental stems/);
+    e.deactivate();
+  }
+  {
+    const h = harness(), { engine: e, library: lib } = h;
+    const uploaded = { ...track, id: "1".repeat(32), origin: "uploaded", name: "My recording", beat_analysis: beatMap(),
+      stems: [...track.stems, { id: "vocals", name: "Vocals", audio_url: "/my-vocals.wav" }] };
+    const before = plain(uploaded);
+    assert.deepEqual(plain(lib.stemsForTrack(uploaded)), uploaded.stems, "custom audio retains every separated stem");
+    e.setConfig({ includeVocals: true, channels: [lib.defaultChannel(), lib.defaultChannel("Bass"), lib.defaultChannel("Drums"),
+      { ...lib.defaultChannel("Vocals"), level: 0.35, solo: true }] });
+    const settings = e.getConfig();
+    assert.equal(settings.includeVocals, true);
+    assert.equal(lib.validateConfig(settings).channels.find(channel => channel.name === "Vocals").level, 0.35,
+      "custom vocal controls survive saved settings validation");
+    await e.setTrack(uploaded); e.activate(); assert.equal(await e.start(), true);
+    const p = h.players[0];
+    assert.deepEqual(plain(p.track.stems), uploaded.stems);
+    assert.equal(p.controls.stemGains.Vocals, 0.35);
+    assert.equal(p.controls.stemGains.Bass, 0, "custom vocal solo affects instrument stems");
+    assert.equal(p.valid, true);
+    assert.deepEqual(uploaded, before, "custom audio normalization does not mutate stored metadata");
+    await e.setTrack({ ...uploaded, id: "2".repeat(32), stems: [uploaded.stems.at(-1)] });
+    assert.equal(await e.start(), true, "an uploaded voice-only recording remains playable");
+    await e.setTrack(track);
+    assert.equal(e.getConfig().includeVocals, undefined);
+    assert.ok(e.getConfig().channels.every(channel => channel.name !== "Vocals"), "generated playback discards custom-only vocal controls");
+    assert.equal(await e.start(), true);
+    assert.equal(h.players.at(-1).controls.stemGains.Bass, 1, "a previous custom solo never silences generated music");
     e.deactivate();
   }
   {

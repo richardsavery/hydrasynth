@@ -159,13 +159,14 @@ globalThis.HydraElevenRealtime = (() => {
   const $ = (id) => root.querySelector(`#el-rt-${id}`);
   function targetFor(id) { return TARGETS[id] || { label: `Stem · ${id.slice(5)}`, min: 0, max: 1, low: 0, high: 1 }; }
   function notice(text, error = false) { if (!root) return; $("notice").textContent = text; $("notice").classList.toggle("is-error", error); }
-  function remember() {
+  function remember({ strict = false } = {}) {
     if (!root) return;
     try { localStorage.setItem(STORAGE_KEY, JSON.stringify(validateSettings({ mode: state.mode, address: $("address").value,
       duration: Number($("duration").value), budget: budget(), starterId: state.starterId, generationInput: state.generationInput, mappings: state.mappings,
       stemMix: state.stemMix, mutedStems: [...state.mutedStems] }))); }
-    catch (_) { /* Playback and server artifacts remain available without browser storage. */ }
+    catch (error) { if (strict) throw error; /* Playback and server artifacts remain available without browser storage. */ }
   }
+  function flush(options) { if (state.initialized) remember(options); }
   function restoreSettings() {
     let saved;
     try { saved = JSON.parse(localStorage.getItem(STORAGE_KEY) || "{}"); } catch (_) { saved = {}; }
@@ -356,6 +357,7 @@ globalThis.HydraElevenRealtime = (() => {
       state.points = []; renderState(); remember();
     });
     $("auto").addEventListener("change", () => {
+      if ($("auto").checked && isUploadedTrack(selectedTrack())) { disarm(UPLOADED_GENERATION_NOTE); return; }
       state.armed = $("auto").checked;
       notice(state.armed ? "Upcoming generation armed. Each new segment includes music and stem separation, both using credits, up to the displayed session limit." : "Automatic generation disarmed. An already submitted music-and-stems pipeline may still finish on the server.");
       renderState();
@@ -410,6 +412,10 @@ globalThis.HydraElevenRealtime = (() => {
   }
   function starterTrack() { return state.tracks.get(state.starterId) || state.tracks.get(state.selection.currentJob?.id) || state.selection.currentJob; }
   function selectedTrack() { return state.running && player?.currentTrack ? player.currentTrack : starterTrack(); }
+  const UPLOADED_GENERATION_NOTE = "Custom audio cannot generate upcoming segments here. Use Generate new in Music mixer to create music from your prompt.";
+  function isUploadedTrack(track) {
+    return track?.origin === "uploaded" || state.selection.plan?.origin === "uploaded" && track?.plan_id === state.selection.plan.id;
+  }
   function availableStemNames() { return state.stems.get(selectedTrack()?.id)?.map((stem) => stem.name) || (state.running ? player?.stemNames || [] : []); }
   function retainMixPreferences() {
     const names = [...new Set([...availableStemNames(), ...state.mutedStems, ...Object.keys(state.stemMix)])].slice(0, MAX_MIX_NAMES);
@@ -459,6 +465,9 @@ globalThis.HydraElevenRealtime = (() => {
     }
     $("generation-input").value = String(state.generationInput);
     const track = selectedTrack(), ready = track?.state === "complete" || Boolean(track?.audio_url);
+    const uploaded = isUploadedTrack(track);
+    $("auto").disabled = uploaded;
+    if (uploaded) { state.armed = false; $("auto").checked = false; }
     const starters = [...state.tracks.values()].filter((job) => job.state === "complete" || job.audio_url);
     const starterKey = starters.map((job) => job.id).join("|");
     if (state.starterKey !== starterKey) {
@@ -492,7 +501,8 @@ globalThis.HydraElevenRealtime = (() => {
     $("shared").hidden = state.mode === "shared" || !bridge;
     $("current").textContent = state.starting ? "Loading saved audio…" : state.running ? `${player?.currentTrack?.id?.slice(0, 12) || "Saved track"}${player?.stemNames?.length ? " · stems" : " · full mix"}` : "Stopped";
     $("next").textContent = state.pending ? `Generating ${state.pending.id?.slice(0, 10) || "next segment"}…` : state.next ? `Ready · ${state.next.id.slice(0, 12)}` : state.armed ? (state.used >= budget() ? "Session limit reached" : "Waiting for fresh data / lookahead") : "Automatic generation is off";
-    $("budget-note").textContent = `${state.used} / ${budget()} new segments requested. ${state.armed ? "Automatic generation is on." : "Automatic generation is off."}`;
+    $("budget-note").textContent = uploaded ? UPLOADED_GENERATION_NOTE
+      : `${state.used} / ${budget()} new segments requested. ${state.armed ? "Automatic generation is on." : "Automatic generation is off."}`;
     $("separate").disabled = !needsSeparation || Boolean(state.stemPending || state.pending);
     $("stem-status").textContent = hasStems ? `${state.stems.get(track.id).length} stems ready.${state.running && !player?.stemNames?.length ? " Your mix will apply when stems replace the full track at the next loop." : " Mute overrides volume mappings; unmute restores your mix."}`
       : separation && !["queued", "generating", "separating"].includes(separation.state) ? `Stem separation ${separation.state}. ${typeof separation.error === "string" ? separation.error : "The full mix remains available; no automatic retry will be made."}`
@@ -697,6 +707,7 @@ globalThis.HydraElevenRealtime = (() => {
   function disarm(error) { state.armed = false; $("auto").checked = false; notice(error, true); renderState(); }
   async function generateNext(features) {
     const run = state.run, selected = state.selection.plan, track = player?.currentTrack;
+    if (isUploadedTrack(track)) { disarm(UPLOADED_GENERATION_NOTE); return; }
     const planId = track?.plan_id || selected?.id;
     if (!planId) { disarm("Build or reopen a plan before arming upcoming music."); return; }
     let generationSettings;
@@ -826,5 +837,5 @@ globalThis.HydraElevenRealtime = (() => {
     } catch (error) { if (operation.run === state.run) notice(error.message, true); }
     finally { if (state.stemPending === operation) { state.stemPending = null; renderState(); } }
   }
-  return { init, setSelection, activate, deactivate, stop, normalize, mapValue, summarize, replayValue, shouldGenerate, validateSettings, validateSource, normalizeSource, combineInputs, routeControl, resetLearning, learnRange, TARGETS };
+  return { init, setSelection, activate, deactivate, flush, stop, normalize, mapValue, summarize, replayValue, shouldGenerate, validateSettings, validateSource, normalizeSource, combineInputs, routeControl, resetLearning, learnRange, TARGETS };
 })();

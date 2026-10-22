@@ -93,15 +93,18 @@ globalThis.HydraRobotDrums = (() => {
       }
       for (const listener of listeners) listener(value);
     };
-    const usable = clock => clock.running && !clock.rateChanging;
 
     function readClock() {
       const input = env.clock(config.source) || {}, time = env.now(), bpm = Number(input.bpm), beat = Number(input.beat);
       const at = Number.isFinite(input.at) ? input.at : time;
-      const valid = Number.isFinite(bpm) && bpm > 0 && bpm <= 300 && Number.isFinite(beat) && beat >= 0
+      const detected = input.detected === true && Array.isArray(input.beatContacts);
+      const valid = Number.isFinite(bpm) && bpm > 0 && bpm <= (detected ? 600 : 300) && Number.isFinite(beat) && beat >= 0
         && Number.isFinite(input.at) && at <= time + 100 && time - at <= 500;
       return { source: config.source, label: config.source === "synth" ? "Synth mixer" : "Music mixer", running: input.running === true && valid,
-        bpm: valid ? bpm : null, beat: valid ? beat + Math.max(0, time - at) * bpm / 60000 : 0,
+        bpm: valid ? bpm : null, beat: valid ? beat + (detected ? 0 : Math.max(0, time - at) * bpm / 60000) : 0,
+        ...(detected ? { detected: true, beatContacts: input.beatContacts.filter(contact => Number.isFinite(contact?.beat) && contact.beat >= 0 &&
+          Number.isFinite(contact.at) && typeof contact.key === "string" && contact.key.length <= 256).slice(0, 64) } : {}),
+        ...(typeof input.beatTrackingError === "string" ? { beatTrackingError: input.beatTrackingError.slice(0, 500) } : {}),
         token: String(input.token ?? ""), at: time, estimated: Boolean(input.estimated), rateChanging: Boolean(input.rateChanging) };
     }
     function snapshot() {
@@ -197,7 +200,7 @@ globalThis.HydraRobotDrums = (() => {
     function prepare(clock) {
       const id = ++generation, token = `drums-${Math.floor(env.now())}-${Date.now().toString(36)}-${++sequence}`;
       const controller = new AbortController();
-      session = { token, controller, clockToken: clock.token, bpm: clock.bpm, generation: id };
+      session = { token, controller, clockToken: clock.token, generation: id };
       sessionPlayed = 0; sessionSkipped = 0;
       phase = "preparing"; message = "Preparing drumming arms…"; emit();
       const current = () => enabled && session?.generation === id && !controller.signal.aborted;
@@ -217,32 +220,46 @@ globalThis.HydraRobotDrums = (() => {
       return operation;
     }
     function changedClock(clock) {
-      if (!session || clock.token !== session.clockToken || Math.abs(clock.bpm - session.bpm) > Math.max(2, session.bpm * .02)) return true;
+      if (!session || clock.token !== session.clockToken) return true;
       if (!previousClock) return false;
-      const expected = previousClock.beat + (clock.at - previousClock.at) * previousClock.bpm / 60000;
-      return Math.abs(clock.beat - expected) > .2;
+      // Detected files may pause, vary tempo, or begin a new natural loop.
+      // Their future contacts already contain the exact mapped timestamps.
+      if (clock.detected && previousClock.detected) return false;
+      // A mapped tempo can ramp or change at either end of this interval.
+      // Only a beat jump outside that span requires a new hardware session.
+      const elapsed = Math.max(0, clock.at - previousClock.at) / 60000;
+      const earliest = previousClock.beat + elapsed * Math.min(previousClock.bpm, clock.bpm);
+      const latest = previousClock.beat + elapsed * Math.max(previousClock.bpm, clock.bpm);
+      return clock.beat < earliest - .2 || clock.beat > latest + .2;
     }
     function schedule(clock) {
       if (scheduleTask) return;
+      // Already dispatched contacts keep their timing. New contacts follow
+      // the latest tempo within this short horizon, without cancelling hits
+      // on every input update. Per-arm spacing still applies across changes.
       const time = env.now(), lead = 650, horizon = 950, millisPerBeat = 60000 / clock.bpm;
       const first = Math.max(0, Math.ceil((clock.beat + lead / millisPerBeat) * 4 - 1e-8));
       const last = Math.floor((clock.beat + horizon / millisPerBeat) * 4 + 1e-8);
+      const contacts = clock.detected ? clock.beatContacts.filter(contact => contact.at >= time + lead - 1 && contact.at <= time + horizon) :
+        Array.from({ length: Math.max(0, last - first + 1) }, (_, index) => ({ beat: (first + index) / 4,
+          at: time + ((first + index) / 4 - clock.beat) * millisPerBeat, key: String(first + index) }));
       const batch = [], bars = new Map();
-      for (let step = first; step <= last; step++) {
+      for (const contact of contacts) {
+        const step = Math.round(contact.beat * 4);
         const bar = Math.floor(step / 16);
         if (!bars.has(bar)) bars.set(bar, pattern(config, bar, notes));
         for (const hit of bars.get(bar).filter(hit => Math.round(hit.beat * 4) === step)) {
-          const key = `${step}:${hit.motor_id}`;
+          const key = `${contact.key}:${hit.motor_id}`;
           if (seen.has(key)) continue;
-          const contactAt = Math.round(time + (hit.beat - clock.beat) * millisPerBeat);
-          seen.set(key, hit.beat);
+          const contactAt = Math.round(contact.at);
+          seen.set(key, contactAt);
           const arm = ARMS.find(item => item.id === hit.motor_id);
           if (contactAt - (lastContact.get(arm.id) ?? -Infinity) < Math.max(MIN_HIT_INTERVAL_MS, arm.recovery) || contactAt < env.now() + lead - 1) { skipped++; continue; }
           lastContact.set(arm.id, contactAt);
           batch.push({ id: `${session.token}:${key}`, motor_id: arm.id, contactAt });
         }
       }
-      for (const [key, beat] of seen) if (beat < clock.beat - 8) seen.delete(key);
+      for (const [key, contactAt] of seen) if (contactAt < time - 8000) seen.delete(key);
       if (!batch.length && time - lastHeartbeat < 200) return;
       const token = session.token, id = session.generation;
       lastHeartbeat = time;
@@ -272,10 +289,10 @@ globalThis.HydraRobotDrums = (() => {
         if (hardwareFailure) throw new Error(hardwareFailure);
         if (notesToken !== currentClock.token) clearNotes(currentClock.token);
         notes = notes.filter(note => note.beat >= currentClock.beat - 12);
-        if (!usable(currentClock)) {
+        if (!currentClock.running) {
           if (session) endSession();
           else if (!stopTask) phase = "waiting";
-          message = currentClock.rateChanging ? "Waiting for the track speed to settle…" : `Waiting for ${currentClock.label} playback…`;
+          message = currentClock.beatTrackingError || `Waiting for ${currentClock.label} playback…`;
           previousClock = null; emit(); return;
         }
         if (session && changedClock(currentClock)) {
@@ -354,8 +371,8 @@ globalThis.HydraRobotDrums = (() => {
     for (const key of ["density", "influence", "fills"]) $(`${key}-value`).textContent = `${config[key]}%`;
     $("influence").disabled = config.source !== "synth";
     $("influence-field").classList.toggle("is-muted", config.source !== "synth");
-    $("source-help").textContent = config.source === "synth" ? "The previous synth bar’s note accents shape the next drum bar. The synth clock keeps both parts in time." : "Tempo and beat position come directly from the Music mixer. Changes to the track or its speed resynchronise the arms.";
-    $("clock").textContent = clock?.running ? `${clock.label} · ${Math.round(clock.bpm)} BPM${clock.estimated ? " · estimated grid" : ""}` : `Waiting for ${clock?.label || "music"}`;
+    $("source-help").textContent = config.source === "synth" ? "The previous synth bar’s note accents shape the next drum bar. The synth clock keeps both parts in time." : "Music mixer automatically aligns imported audio before playback, following tempo changes and leaving silent gaps.";
+    $("clock").textContent = clock?.running ? `${clock.label} · ${Math.round(clock.bpm)} BPM${clock.detected ? " · detected beats" : clock.estimated ? " · estimated grid" : ""}` : `Waiting for ${clock?.label || "music"}`;
     const status = value.error || value.message || (value.running ? "" : "Press Start drumming when the arms are ready to play. Changing drum settings stops drumming.");
     $("status").textContent = status; $("status").hidden = !status;
     $("status").classList.toggle("is-error", Boolean(value.error));

@@ -29,7 +29,8 @@ from typing import Any
 from urllib.parse import parse_qs, unquote, urlsplit
 
 from recording_library import RecordingLibrary, default_recordings_directory
-from elevenlabs_service import ElevenLabsService, FileResponse
+from elevenlabs_service import ElevenLabsService, FileResponse, MAX_CUSTOM_AUDIO_BYTES
+from session_assets import SessionAssets, MAX_ZIP as MAX_SESSION_ZIP
 from rap_service import RapService
 from rap_experiment_service import RapExperimentService
 from rap_response_service import RapResponseService
@@ -2830,7 +2831,13 @@ def handler_for(
     robot: RobotControlService | None = None,
     rap_response: RapResponseService | None = None,
     study: StudyRecorder | None = None,
+    sessions: SessionAssets | None = None,
 ) -> type[BaseHTTPRequestHandler]:
+    if sessions is None:
+        audio_root = next((Path(service.root).parent for service in (elevenlabs, rap_response, rap_experiment, rap)
+                           if getattr(service, "root", None) is not None), PROJECT_ROOT / "var")
+        sessions = SessionAssets(audio_root / "session-assets", elevenlabs=elevenlabs,
+                                 rap_response=rap_response, rap_experiment=rap_experiment, rap=rap)
     class DashboardHandler(BaseHTTPRequestHandler):
         server_version = "HydraDashboard/1"
 
@@ -3000,6 +3007,7 @@ def handler_for(
                 "/elevenlabs-source.js": "elevenlabs-source.js",
                 "/audio-pitch.js": "audio-pitch.js",
                 "/audio-pitch-worklet.js": "audio-pitch-worklet.js",
+                "/audio-stream-worklet.js": "audio-stream-worklet.js",
                 "/vendor/soundtouch-2.1.1.js": "vendor/soundtouch-2.1.1.js",
                 "/vendor/soundtouch-2.1.1.js.map": "vendor/soundtouch-2.1.1.js.map",
                 "/vendor/soundtouch-LICENSE.txt": "vendor/soundtouch-LICENSE.txt",
@@ -3062,6 +3070,9 @@ def handler_for(
 
         def do_POST(self) -> None:  # noqa: N802
             path = unquote(urlsplit(self.path).path)
+            if path.startswith("/api/sessions/"):
+                self._local_audio_request("POST", path, sessions, "Saved sessions")
+                return
             if path.startswith("/api/study/"):
                 self._local_audio_request("POST", path, study, "Study recording")
                 return
@@ -3140,14 +3151,22 @@ def handler_for(
                 return
             document = None
             if method == "POST":
-                if self.headers.get_content_type() != "application/json" or self.headers.get("Transfer-Encoding"):
-                    self._json_error(415, "Send application/json with a Content-Length.")
+                session_archive = label == "Saved sessions" and path == "/api/sessions/import"
+                audio_upload = label == "ElevenLabs" and path == "/api/elevenlabs/uploads"
+                binary_upload = session_archive or audio_upload
+                content_type = "application/zip" if session_archive else "application/octet-stream" if audio_upload else "application/json"
+                actual_content_type = self.headers.get_content_type()
+                supported_type = actual_content_type == content_type or (audio_upload and actual_content_type.startswith("audio/"))
+                if not supported_type or self.headers.get("Transfer-Encoding"):
+                    self._json_error(415, f"Send {content_type} with a Content-Length.")
                     return
                 try:
                     length = int(self.headers.get("Content-Length", "0"))
                 except ValueError:
                     length = 0
-                limit = (16 * 1024 if label == "Robot control" else
+                limit = (MAX_SESSION_ZIP if session_archive else MAX_CUSTOM_AUDIO_BYTES if audio_upload else
+                         4 * 1024 * 1024 if label == "Saved sessions" else
+                         16 * 1024 if label == "Robot control" else
                          128 * 1024 if label in {"Rap", "Rap experiment"} else
                          2 * 1024 * 1024 if label == "Rap response" else
                          (48 * 1024 * 1024 if path == "/api/study/media" else 4 * 1024 * 1024)
@@ -3157,19 +3176,33 @@ def handler_for(
                     return
                 try:
                     self.connection.settimeout(30)
-                    document = json.loads(self.rfile.read(length))
-                    if not isinstance(document, dict):
+                    raw_document = self.rfile.read(length)
+                    if len(raw_document) != length:
+                        raise ValueError("Incomplete request")
+                    document = raw_document if binary_upload else json.loads(raw_document)
+                    if not binary_upload and not isinstance(document, dict):
                         raise ValueError("Expected an object")
                 except (ValueError, UnicodeDecodeError, TimeoutError):
-                    self._json_error(400, "Invalid JSON request.")
+                    self._json_error(400, "Incomplete upload request." if binary_upload else "Invalid JSON request.")
                     return
             try:
                 status, body = audio_service.dispatch(method, self.path, document)
-                if study is not None and audio_service is not study:
-                    study.observe_http(method, path, document, status, body,
+                if study is not None and audio_service is not study and audio_service is not sessions:
+                    # The saved audio is referenced by the returned job. Avoid
+                    # duplicating raw uploaded bytes into telemetry JSON.
+                    observed_document = {"size_bytes": len(document)} if isinstance(document, bytes) else document
+                    study.observe_http(method, path, observed_document, status, body,
                                        session_id=self.headers.get("X-Study-Session"))
                 if isinstance(body, FileResponse):
-                    self._send_elevenlabs_file(body)
+                    try:
+                        self._send_elevenlabs_file(body)
+                    finally:
+                        try:
+                            if audio_service is sessions or body.temporary:
+                                body.path.unlink(missing_ok=True)
+                        finally:
+                            if body.on_close:
+                                body.on_close()
                 else:
                     self._send(status, json.dumps(body, allow_nan=False).encode("utf-8"), "application/json; charset=utf-8", "no-store")
             except (BrokenPipeError, ConnectionResetError):

@@ -467,6 +467,22 @@ class RealtimeServiceTests(unittest.TestCase):
 
 
 class StemArchiveTests(unittest.TestCase):
+    def test_long_upload_size_allowance_is_explicit_and_still_bounded(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "stems.zip"
+            source.write_bytes(stem_archive())
+            with mock.patch("elevenlabs_realtime.MAX_STEM_BYTES", 5):
+                with self.assertRaises(ValueError):
+                    extract_stems(source, root / "result", 7200, lambda *_: fixtures.audio_metadata())
+                stems = extract_stems(source, root / "larger", 7200, lambda *_: fixtures.audio_metadata(),
+                                      max_stem_bytes=10, max_unpacked_bytes=20)
+                self.assertEqual(len(stems), 2)
+            with self.assertRaises(ValueError):
+                extract_stems(source, root / "too-much", 7200, lambda *_: fixtures.audio_metadata(),
+                              max_stem_bytes=10, max_unpacked_bytes=10)
+            self.assertFalse((root / "too-much").exists())
+
     def test_reject_unsafe_paths_symlinks_unknown_files_and_oversize_without_extracting(self):
         link = zipfile.ZipInfo("link.wav")
         link.external_attr = (stat.S_IFLNK | 0o777) << 16
@@ -502,6 +518,16 @@ class StemClientTests(unittest.TestCase):
     setUp = fixtures.ClientTests.setUp
     tearDown = fixtures.ClientTests.tearDown
     response = staticmethod(fixtures.ClientTests.response)
+
+    def test_long_upload_archive_allowance_does_not_remove_download_bound(self):
+        source = Path(self.directory.name) / "source.mp3"
+        source.write_bytes(b"the-existing-track")
+        opener = mock.Mock()
+        opener.open.return_value = self.response(stem_archive(), "application/zip")
+        with mock.patch("elevenlabs_service.request.build_opener", return_value=opener):
+            with self.assertRaisesRegex(GenerationError, "size limit"):
+                self.client.separate_stems(source, self.output, "six_stems_v1", max_archive_bytes=5)
+        self.assertEqual(opener.open.call_count, 1)
     def test_stem_upload_is_multipart_and_zip_response_is_bounded(self):
         source = Path(self.directory.name) / "source.mp3"
         source.write_bytes(b"the-existing-track")

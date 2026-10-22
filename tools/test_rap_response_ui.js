@@ -85,6 +85,20 @@ function fixture(options = {}) {
 
 async function main() {
   {
+    const h = fixture(), previous = h.storage.get("hydra.rap-response.v1");
+    const quota = new Error("Browser storage is full");
+    h.box.localStorage.setItem = () => { throw quota; };
+    h.el("text").value = "The latest unsaved words";
+    assert.doesNotThrow(() => h.event("text", "input"), "ordinary editing still works when autosave fails");
+    assert.equal(h.panel.getState().text, "The latest unsaved words");
+    assert.equal(h.storage.get("hydra.rap-response.v1"), previous);
+    assert.throws(() => h.panel.flush({ strict: true }), error => error === quota,
+      "explicit session capture must fail instead of snapshotting an older prompt");
+    h.box.localStorage.setItem = (key, value) => h.storage.set(key, value);
+    h.panel.flush({ strict: true });
+    assert.equal(JSON.parse(h.storage.get("hydra.rap-response.v1")).text, "The latest unsaved words");
+  }
+  {
     const h = fixture({ fetch: (req, response) => req.url.endsWith("/status") ? response({ ready: false, transcription_ready: false }) : undefined });
     await h.panel.activate();
     assert.equal(h.requests.some(req => req.url.startsWith("/rap-voice-demos/")), false, "mounting does not preload demos");

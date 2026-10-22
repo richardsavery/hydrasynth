@@ -101,11 +101,13 @@ dashboard-test:
 	$(PYTHON) -B tools/test_recording_library.py
 	$(PYTHON) -B tools/test_elevenlabs_analysis.py
 	$(PYTHON) -B tools/test_elevenlabs_service.py
+	$(PYTHON) -B tools/test_beat_tracking.py
 	$(PYTHON) -B tools/test_configure_api_key.py
 	$(PYTHON) -B tools/test_setup_linux.py
 	$(PYTHON) -B tools/test_setup_macos.py
 	$(PYTHON) -B tools/test_elevenlabs_realtime.py
 	$(PYTHON) -B tools/test_elevenlabs_http.py
+	$(PYTHON) -B tools/test_session_assets.py
 	$(PYTHON) -B tools/test_rap_render.py
 	$(PYTHON) -B tools/test_rap_service.py
 	$(PYTHON) -B tools/test_rap_http.py
@@ -131,6 +133,7 @@ dashboard-test:
 	$(NODE) --check dashboard/elevenlabs-player.js
 	$(NODE) --check dashboard/audio-pitch.js
 	$(NODE) --check dashboard/audio-pitch-worklet.js
+	$(NODE) --check dashboard/audio-stream-worklet.js
 	$(NODE) --check dashboard/elevenlabs-realtime.js
 	$(NODE) --check dashboard/elevenlabs-source.js
 	$(NODE) --check dashboard/music-mixer-engine.js
@@ -153,6 +156,7 @@ dashboard-test:
 	$(NODE) tools/test_music_mixer_engine.js
 	$(NODE) tools/test_music_mixer_generation.js
 	$(NODE) tools/test_music_mixer_ui.js
+	$(NODE) tools/test_music_mixer_upload.js
 	$(NODE) tools/test_rap_ui.js
 	$(NODE) tools/test_music_mixer_voice.js
 	$(NODE) tools/test_rap_experiment_ui.js
@@ -161,8 +165,10 @@ dashboard-test:
 	$(NODE) tools/test_elevenlabs_source.js
 	$(NODE) tools/test_elevenlabs_player.js
 	$(NODE) tools/test_audio_pitch.js
+	$(NODE) tools/test_audio_stream.js
 	$(NODE) tools/test_elevenlabs_realtime.js
 	$(NODE) tools/test_parameters_live.js
+	$(NODE) tools/test_skeleton_live.js
 	$(NODE) tools/test_live_monitor_model.js
 	$(NODE) tools/test_live_monitor.js
 	$(NODE) tools/test_live_connections.js

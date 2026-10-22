@@ -233,8 +233,12 @@ def compile_live_plan(anchor: dict[str, Any], payload: dict[str, Any], feature_h
 
 
 def extract_stems(archive_path: Path, destination: Path, duration: float,
-                  validator: Callable[[Path, float], dict[str, Any]]) -> list[dict[str, Any]]:
+                  validator: Callable[[Path, float], dict[str, Any]], *,
+                  max_stem_bytes: int | None = None,
+                  max_unpacked_bytes: int | None = None) -> list[dict[str, Any]]:
     """Do not extract provider paths. Validate every entry before exposing files."""
+    max_stem_bytes = MAX_STEM_BYTES if max_stem_bytes is None else max_stem_bytes
+    max_unpacked_bytes = MAX_UNPACKED_BYTES if max_unpacked_bytes is None else max_unpacked_bytes
     destination.mkdir(exist_ok=False)
     try:
         with zipfile.ZipFile(archive_path) as archive:
@@ -254,10 +258,10 @@ def extract_stems(archive_path: Path, destination: Path, duration: float,
                     continue
                 if path.suffix.lower() not in AUDIO_SUFFIXES:
                     raise ValueError("Stem archive contains an unexpected non-audio file.")
-                if entry.flag_bits & 1 or not 0 < entry.file_size <= MAX_STEM_BYTES:
+                if entry.flag_bits & 1 or not 0 < entry.file_size <= max_stem_bytes:
                     raise ValueError("Stem archive contains an encrypted, empty or oversized file.")
                 total += entry.file_size
-                if total > MAX_UNPACKED_BYTES or entry.file_size > max(1024 * 1024, entry.compress_size * 200):
+                if total > max_unpacked_bytes or entry.file_size > max(1024 * 1024, entry.compress_size * 200):
                     raise ValueError("Stem archive exceeds local unpacked size limits.")
                 audio_entries.append(entry)
             if not 2 <= len(audio_entries) <= 8:
@@ -280,7 +284,7 @@ def extract_stems(archive_path: Path, destination: Path, duration: float,
                         if not chunk:
                             break
                         written += len(chunk)
-                        if written > entry.file_size or written > MAX_STEM_BYTES:
+                        if written > entry.file_size or written > max_stem_bytes:
                             raise ValueError("Stem audio exceeds its declared size.")
                         output.write(chunk)
                 if written != entry.file_size:

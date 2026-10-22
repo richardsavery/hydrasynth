@@ -164,6 +164,90 @@ async function main() {
     const blocked = h.library.create({ storage: null });
     await assert.rejects(blocked.save("No storage"), /storage is unavailable/);
   }
+  {
+    const h = harness({ override: { getRoute: () => "#mixer" } });
+    set(h, "hydra.music-mixer.demo.v1", { prompt: { style: "Warm   ambient textures" } });
+    const first = await h.api.save();
+    assert.equal(first.name, "Music mixer · Warm ambient textures");
+    const second = await h.api.save(first.name);
+    assert.equal(second.name, `${first.name} (2)`, "new versions get distinct readable names");
+    assert.throws(() => h.api.rename(second.id, first.name.toUpperCase()), /already has that name/);
+    const imported = h.api.importJSON(h.api.exportJSON(first.id));
+    assert.equal(imported[0].name, `${first.name} (3)`, "imported copies are distinguishable");
+    const importedCopy = h.api.importJSON(h.api.exportJSON(second.id));
+    assert.equal(importedCopy[0].name, `${first.name} (4)`, "copying a numbered version never stacks suffixes");
+    const long = await h.api.save("x".repeat(80));
+    const duplicate = await h.api.save(long.name);
+    assert.equal(duplicate.name.length, 80);
+    assert.ok(duplicate.name.endsWith(" (2)"));
+  }
+  {
+    const events = [];
+    const manifest = { id: "a".repeat(32), files: 3, bytes: 12345,
+      tracks: [{ id: "track-one", name: "Warm pads · 100 BPM · D minor", kind: "elevenlabs", files: 3, bytes: 12345 }] };
+    let failCapture = false, failRestore = false, exported;
+    const assets = {
+      async capture(session) { events.push("audio-capture"); assert.equal(JSON.parse(session.storage["hydra.music-mixer.demo.v1"]).trackId, "track-one"); if (failCapture) throw new Error("Audio missing"); return manifest; },
+      async restore(value) { assert.deepEqual(plain(value), manifest); events.push("audio-restore"); if (failRestore) throw new Error("Saved audio unavailable"); },
+      async export(library) { exported = plain(library); return "zip-blob"; },
+      async import() { return exported; }
+    };
+    const h = harness({ override: { assets, beforeRestore: () => { events.push("stop"); } } });
+    set(h, "hydra.music-mixer.demo.v1", { trackId: "track-one", rap: { pending: { request_id: "pending-voice" }, auto_start: true, legacy_rap: { pending: {}, auto_start: true } } });
+    set(h, "hydra.rap-response.v1", { response_id: "response-one", pending: { request_id: "pending-rap" }, auto_play: true });
+    const saved = await h.api.save("Audio version");
+    assert.deepEqual(plain(saved.assets), manifest);
+    const capturedRap = JSON.parse(saved.storage["hydra.rap-response.v1"]);
+    assert.equal(capturedRap.pending, undefined); assert.equal(capturedRap.auto_play, false);
+    const voice = JSON.parse(saved.storage["hydra.music-mixer.demo.v1"]).rap;
+    assert.equal(voice.pending, undefined); assert.equal(voice.auto_start, false); assert.equal(voice.legacy_rap.pending, undefined);
+    assert.equal(JSON.parse(h.values.get("hydra.rap-response.v1")).auto_play, true, "saving never changes current controls");
+    assert.equal(await h.api.exportArchive(saved.id), "zip-blob");
+    assert.deepEqual(exported.sessions[0].assets, manifest);
+    failCapture = true;
+    await assert.rejects(h.api.update(saved.id), /Audio missing/);
+    assert.deepEqual(plain(h.api.list()[0]), plain(saved), "audio capture failures preserve the saved version");
+    failRestore = true;
+    const before = [...h.values];
+    await assert.rejects(h.api.load(saved.id), /audio unavailable/);
+    assert.deepEqual([...h.values], before);
+    assert.equal(events.includes("stop"), false, "missing audio is reported before stopping playback");
+    failRestore = false;
+    await h.api.load(saved.id);
+    assert.deepEqual(events.slice(-2), ["audio-restore", "stop"], "audio is available before settings change");
+    const restored = await h.api.importFile({ name: "session.zip", type: "application/zip", size: 100 }, true);
+    assert.equal(restored.length, 1);
+    assert.equal(h.api.selectedId, restored[0].id);
+    assert.equal(h.events.filter(event => event.startsWith("reload:")).length, 2, "one-version archives load in one action");
+    const invalid = plain(exported); invalid.sessions[0].assets.id = "../../outside";
+    assert.throws(() => h.api.importJSON(JSON.stringify(invalid)), /audio manifest/);
+    await assert.rejects(h.api.importFile({ name: "huge.zip", size: 1025 * 1024 * 1024 }), /1 GB/);
+    await assert.rejects(h.api.importFile({ name: "huge.json", size: 5 * 1024 * 1024 }), /4 MB/);
+  }
+  {
+    const origin = harness();
+    const saved = await origin.api.save("Old JSON");
+    const target = harness();
+    await target.api.importFile({ name: "old.json", size: 100, text: async () => origin.api.exportJSON(saved.id) }, true);
+    assert.equal(target.events.at(-1), "reload:#synth-mixer", "legacy JSON can be opened directly");
+    await origin.api.save("Another version");
+    const before = target.events.length;
+    await target.api.importFile({ name: "library.json", size: 200, text: async () => origin.api.exportJSON() }, true);
+    assert.equal(target.events.length, before, "multi-version imports wait for an explicit selection");
+  }
+  {
+    const h = harness(), requests = [];
+    const client = h.library.networkAssets(async (url, options) => { requests.push([url, options]); return { ok: true, json: async () => null, blob: async () => "archive" }; });
+    await client.capture({ storage: {}, name: "Music" });
+    assert.equal(requests[0][0], "/api/sessions/capture");
+    assert.deepEqual(JSON.parse(requests[0][1].body), { storage: {}, name: "Music" });
+    assert.equal(await client.export({ sessions: [] }), "archive");
+    const file = {}; await client.import(file);
+    assert.equal(requests.at(-1)[1].headers["Content-Type"], "application/zip");
+    assert.equal(requests.at(-1)[1].body, file);
+    await assert.rejects(h.library.networkAssets(async () => { throw new Error("offline"); }).capture({}), /dashboard server/);
+    await assert.rejects(h.library.networkAssets(async () => ({ ok: false, status: 404, json: async () => { throw new Error(); } })).capture({}), /Restart/);
+  }
   console.log("Session library: snapshot, versioning, import validation, safe restore, rollback and isolation checks passed.");
 }
 main().catch((error) => { console.error(error); process.exitCode = 1; });

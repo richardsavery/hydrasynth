@@ -118,10 +118,13 @@ async function main() {
   assert.ok(notes.length >= 6);
   assert.equal(rap.clock().beat, 2.5, "two subdivisions advance one quarter-note beat");
   const beforeTempoChange = rap.clock().token;
+  const beforeRobotTempoChange = context.HydraBeatClock.snapshot("synth").token;
   settings.tempo = 144;
   await fire(state.playTimer);
   assert.equal(rap.clock().bpm, 144);
   assert.notEqual(rap.clock().token, beforeTempoChange, "mapped or edited tempo changes invalidate a prepared schedule");
+  assert.equal(context.HydraBeatClock.snapshot("synth").token, beforeRobotTempoChange, "Synth tempo changes retain the live robot session");
+  assert.equal(context.HydraBeatClock.snapshot("synth").bpm, 144);
   settings.tempo = 132;
   await fire(state.playTimer);
 
@@ -339,6 +342,27 @@ async function main() {
   api.saveSettings();
   assert.equal(state.tabs[0].controls.tempo, 96, "saving connections retains original Synth controls");
   assert.equal(state.saved.controls.previewVoice, "custom");
+  let musicClock = { playing: true, valid: true, bpm: 120, beat: 4, token: "rate-1", transportToken: "track-1" };
+  context.HydraMusicMixer = { transportClock: () => musicClock };
+  const musicRobotClock = context.HydraBeatClock.snapshot("mixer");
+  musicClock = { ...musicClock, bpm: 160, beat: 4.1, token: "rate-2", rateChanging: true };
+  const changingRobotClock = context.HydraBeatClock.snapshot("mixer");
+  assert.equal(changingRobotClock.token, musicRobotClock.token, "the shared robot clock uses transport continuity instead of the rendered-voice tempo token");
+  assert.equal(changingRobotClock.running, true);
+  assert.equal(changingRobotClock.bpm, 160);
+  assert.equal(changingRobotClock.rateChanging, true);
+  musicClock = { ...musicClock, transportToken: "track-2" };
+  assert.notEqual(context.HydraBeatClock.snapshot("mixer").token, musicRobotClock.token, "new tracks still invalidate robot timing");
+  musicClock = { ...musicClock, detected: true, context: { currentTime: 10 },
+    beatContacts: [{ key: "deck:0:2:0", beat: 2, at: 10.825 }] };
+  const detectedRobotClock = context.HydraBeatClock.snapshot("mixer");
+  assert.equal(detectedRobotClock.detected, true);
+  assert.equal(detectedRobotClock.beatContacts[0].at, detectedRobotClock.at + 825,
+    "detected audio-clock contact times become performance-clock milliseconds at the bridge");
+  assert.equal(detectedRobotClock.beatContacts[0].key, "deck:0:2:0");
+  musicClock = { ...musicClock, valid: false, beatTrackingError: "Detected beats are unavailable.", beatContacts: [] };
+  assert.equal(context.HydraBeatClock.snapshot("mixer").running, false);
+  assert.equal(context.HydraBeatClock.snapshot("mixer").beatTrackingError, "Detected beats are unavailable.");
   console.log("synth mixer transport: isolated presets, persistent playback across tabs, realtime audio/MIDI, stale-input gating and explicit cancellation passed.");
 }
 

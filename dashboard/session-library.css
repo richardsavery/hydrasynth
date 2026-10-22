@@ -16,6 +16,8 @@
 .hs-new input { flex: 1; min-width: 0; width: 0; min-height: 39px; padding: 8px 11px; color: var(--text); background: var(--panel-inset); border: 1px solid var(--line); border-radius: 5px; font: 13px var(--sans); }
 .hs-new input::placeholder { color: var(--muted); }
 .hs-new button { flex-shrink: 0; }
+.hs-help { margin: -12px 0 22px; color: var(--muted); font-size: 11px; }
+.hs-audio-list { margin: 0 0 16px; padding: 10px 12px; border-radius: 5px; background: var(--panel-inset); color: var(--text); font-size: 12px; white-space: pre-line; overflow-wrap: anywhere; }
 #hs-versions { box-sizing: border-box; width: 100%; min-height: 151px; padding: 5px; color: var(--text); border: 1px solid var(--line); border-radius: 5px; background: var(--panel-inset); font: 13px/1.5 var(--sans); }
 #hs-versions option { padding: 7px 10px; border-radius: 3px; }
 #hs-versions option:checked { color: var(--text); background: var(--panel-selected); }

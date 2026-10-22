@@ -32,8 +32,9 @@ globalThis.HydraMusicMixerGeneration = (() => {
     let pending = null;
     try {
       const saved = JSON.parse(storage?.getItem(KEY) || "null");
-      if (saved && ["original", "next"].includes(saved.kind) && saved.path === (saved.kind === "original" ? "/generations" : "/continuations") &&
-          saved.body && typeof saved.body.plan_id === "string" && (saved.kind === "original" ||
+      if (saved && ["original", "next"].includes(saved.kind) &&
+          (saved.path === "/generations" || saved.kind === "next" && saved.path === "/continuations") &&
+          saved.body && typeof saved.body.plan_id === "string" && (saved.path === "/generations" ||
             saved.body.kind === "prompt" && typeof saved.body.session_id === "string" && Number.isInteger(saved.body.sequence)) &&
           ["submitting", "polling", "ready", "failed"].includes(saved.stage)) pending = saved;
     } catch (_) { /* A corrupt draft cannot start a request. */ }
@@ -241,10 +242,10 @@ globalThis.HydraMusicMixerGeneration = (() => {
       } else if (pending.jobId) job = await call(`/generations/${encodeURIComponent(pending.jobId)}`, {}, run);
       else {
         const jobs = (await call("/generations", {}, run)).jobs || [];
-        const matches = pending.kind === "next"
+        const matches = pending.path === "/continuations"
           ? jobs.filter((item) => item.realtime?.session_id === pending.body.session_id && item.realtime?.sequence === pending.body.sequence)
           : jobs.filter((item) => item.plan_id === pending.body.plan_id && !pending.previousIds?.includes(item.id));
-        if (matches.length === 0 && retryMissing && pending.kind === "next" && generates()) {
+        if (matches.length === 0 && retryMissing && pending.path === "/continuations" && generates()) {
           // Only explicit Retry may repeat this POST. Its persisted session and
           // sequence make it idempotent even if the earlier response was lost.
           job = await postPending(run);
@@ -270,18 +271,18 @@ globalThis.HydraMusicMixerGeneration = (() => {
       }
     }
     async function submit(path, body, kind, sourceId, run, settings) {
-      const previousIds = kind === "original" ? ((await call("/generations", {}, run)).jobs || []).map((job) => job.id) : [];
+      const previousIds = path === "/generations" ? ((await call("/generations", {}, run)).jobs || []).map((job) => job.id) : [];
       if (editing || latestChoice.mode === "old" || latestChoice.mode === "loop" && (kind !== "original" || current) || JSON.stringify(settings) !== latestDirection.key && latestChoice.mode !== "loop") return;
       pending = { kind, sourceId, path, body: copy(body), direction: copy(settings), previousIds, stage: "submitting", jobId: null };
       persist(); emit();
       await install(await readyJob(await postPending(run), run), run);
     }
-    async function submitOriginal(run) {
+    async function submitOriginal(run, sourceId = null) {
       const settings = direction(); latestDirection = readDirection();
       const plan = await call("/plans", { method: "POST", body: { kind: "original",
         duration_seconds: settings.duration_seconds, settings: settings.settings } }, run);
-      if (editing || latestChoice.mode === "old" || latestChoice.mode === "loop" && current || JSON.stringify(settings) !== latestDirection.key && latestChoice.mode !== "loop") return;
-      await submit("/generations", { plan_id: plan.id, variation: true }, "original", null, run, settings);
+      if (editing || sourceId && current?.id !== sourceId || latestChoice.mode === "old" || latestChoice.mode === "loop" && current || JSON.stringify(settings) !== latestDirection.key && latestChoice.mode !== "loop") return;
+      await submit("/generations", { plan_id: plan.id, variation: true }, sourceId ? "next" : "original", sourceId, run, settings);
     }
     function launch(action, nextPhase) {
       if (busy) return Promise.resolve(false);
@@ -378,6 +379,10 @@ globalThis.HydraMusicMixerGeneration = (() => {
       void launch(async (run) => {
         if (pending) { await recover(run); return; }
         if (restartOriginal) { await submitOriginal(run); return; }
+        // Uploaded audio has no provider composition to extend. An explicit
+        // generation choice creates a fresh prompt-based piece, queued after
+        // this track with the same recovery journal as other upcoming music.
+        if (current.origin === "uploaded" || !current.plan_id) { await submitOriginal(run, current.id); return; }
         const settings = direction(); latestDirection = readDirection();
         const body = { kind: "prompt", plan_id: current.plan_id, source_job_id: current.id,
           session_id: session, sequence: sequence++, ...settings };

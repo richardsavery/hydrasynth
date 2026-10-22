@@ -30,9 +30,14 @@ selection applies to lights, ribs, beat-synced head movement and automatic drums
 the drum panel's Follow selector stays in sync. Changing source cancels queued
 drum hits; press **Start drumming** again to play with the new source.
 
-Sync uses the dashboard's playback clock, not audio beat detection. If music
-is stopped, synced effects wait for playback to resume. Head movement continues
-at their own pace when **Beat sync** is off.
+Sync uses the dashboard's playback clock. Imported audio in **Music mixer**
+automatically prepares and applies beat timing before playback, including
+leading silence, pauses and tempo changes. Press Play normally; it waits for
+**Beat sync ready** when analysis is still running. No separate analysis or
+apply action is needed. Generated music uses its requested BPM unless detected
+timing is selected in **Music mixer → Recent tracks → Beat timing · Advanced**.
+If music is stopped, synced effects wait for playback to resume. Head movement
+continues at its own pace when **Beat sync** is off.
 
 Choose an Aurora, Firelight, Ocean, or Candy palette, or edit its four colours.
 **Solid colour** uses the first colour, **Palette cycle** advances through the
@@ -200,9 +205,30 @@ the original intended timings; acoustic contact alignment has not been measured
 by this implementation. The source repository is read for provenance only and
 is not needed at runtime.
 
-Music's beat grid is estimated from requested generation BPM and track start;
-it is not audio beat detection. Fast playback-rate changes suspend drumming until
-the clock settles. Synth tempo changes can similarly require resynchronization.
+Imported music follows detected beat timestamps automatically. Local analysis
+runs when the track is loaded and playback waits until alignment is ready. The
+analysis prefers a completed drum stem, otherwise the full mix, and does not
+require an ElevenLabs request. Drums wait before the first detected beat and
+in inactive gaps. When drums are already armed, playback may add a brief startup
+delay to provide enough time to schedule the first strike. A four-beat groove accent is estimated from the audio;
+ambiguous rhythms can affect the estimate. Optional **First detected beat in
+bar** and **Timing adjustment (ms)** overrides live in the collapsed **Beat
+timing · Advanced** controls. Positive timing shifts contacts later. Analysis
+and settings are retained in Sessions and reused on load. The robot still plays
+its selected groove, rather than reproducing individual strikes from the drum
+stem. Loading or analyzing a track does not start drumming.
+
+Generated tracks without detected timing, and imported tracks explicitly set to
+**Timing mode → Manual BPM**, use a grid estimated from requested generation BPM
+or uploaded **Track BPM**, starting at the file's beginning.
+Mapped BPM and playback-speed changes keep the
+drumming session running, including while speed is ramping. Upcoming hits follow
+the latest tempo; contacts already sent retain their timing within the short
+planning horizon (up to 950 ms). Abrupt changes can briefly shift alignment or
+skip hits to preserve the one-hit-per-second limit for each arm. Stops, manual
+track changes, and seeks cancel the old timing and resynchronize. Natural loops
+with detected timing keep the drumming session running and schedule the next
+loop's beat positions. The BPM-estimated clock also resets its timing on loops.
 There is no independent drum tempo and no microphone analysis in this version.
 
 The new scheduler, source following and cancellation behavior are verified using
@@ -378,6 +404,16 @@ including positions outside the normal strike ranges. Pressing it while torque
 is already on also returns the arms to rest. The controller confirms all four
 arms have stopped within their strike ranges and within 20 ticks of rest before
 reporting success.
+
+The controller preloads the fixed rest targets, enables and confirms torque,
+then sends the two-second movement profile and rest target again while the
+motors are powered. This ensures the move is commanded even if a motor does
+not retain a goal while unpowered or resets it at torque-on. Starting position
+does not block this rest movement. Every write must be acknowledged; failed
+writes are never retried. Settings are read back after the powered command for
+diagnostics, and measured arrival and stopped arms determine success. A timeout
+reports the arms still away from rest and any differing settings. Communication
+errors, motor faults, and emergency stop still stop preparation immediately.
 
 Then use **Test strike** for kick, snare, ride, or hi-hat. Each test raises the
 arm to its configured rest position over 500 ms,

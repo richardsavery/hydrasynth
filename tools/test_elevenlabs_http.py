@@ -5,10 +5,11 @@ import json
 from pathlib import Path
 import tempfile
 import threading
+import time
 import unittest
 
 from hydra_dashboard import DashboardHTTPServer, SnapshotStore, handler_for
-from elevenlabs_service import FileResponse
+from elevenlabs_service import FileResponse, MAX_CUSTOM_AUDIO_BYTES
 
 
 class MusicHTTPTests(unittest.TestCase):
@@ -17,11 +18,14 @@ class MusicHTTPTests(unittest.TestCase):
         self.audio = Path(self.temp.name) / "test.mp3"
         self.audio.write_bytes(b"0123456789")
         self.calls = []
+        self.window_closed = threading.Event()
         owner = self
 
         class Service:
             def dispatch(self, method, path, payload=None):
                 owner.calls.append((method, path, payload))
+                if "?start=" in path:
+                    return 200, FileResponse(owner.audio, "audio/wav", temporary=True, on_close=owner.window_closed.set)
                 if path.endswith("/audio"):
                     return 200, FileResponse(owner.audio, "audio/mpeg", None)
                 return 200, {"ok": True}
@@ -85,6 +89,28 @@ class MusicHTTPTests(unittest.TestCase):
             "Content-Type": "application/json", "Content-Length": str(13 * 1024 * 1024)})[0], 413)
         self.assertEqual(self.calls, [])
 
+    def test_custom_audio_upload_dispatches_bounded_raw_bytes_at_same_origin(self):
+        path = "/api/elevenlabs/uploads?filename=My%20track.wav&request_id=" + "c" * 32
+        audio = b"RIFF\x00\x01\xff\x00binary-audio"
+        for content_type in ("application/octet-stream", "audio/wav"):
+            status, _, _ = self.request("POST", path, audio, {
+                "Content-Type": content_type, "Origin": f"http://127.0.0.1:{self.port}",
+            })
+            self.assertEqual(status, 200)
+            self.assertEqual(self.calls[-1], ("POST", path, audio))
+        self.calls.clear()
+        for headers, expected in (
+            ({"Content-Type": "application/octet-stream", "Origin": "https://example.com"}, 403),
+            ({"Content-Type": "audio/wav", "Sec-Fetch-Site": "cross-site"}, 403),
+            ({"Content-Type": "audio/wav", "Host": f"attacker.example:{self.port}"}, 403),
+            ({"Content-Type": "application/json"}, 415),
+            ({"Content-Type": "application/octet-stream", "Transfer-Encoding": "chunked"}, 415),
+            ({"Content-Type": "application/octet-stream", "Content-Length": str(MAX_CUSTOM_AUDIO_BYTES + 1)}, 413),
+            ({"Content-Type": "application/octet-stream", "Content-Length": "0"}, 413),
+        ):
+            self.assertEqual(self.request("POST", path, b"", headers)[0], expected)
+        self.assertEqual(self.calls, [])
+
     def test_audio_ranges_and_head(self):
         path = "/api/elevenlabs/generations/test/audio"
         for range_header, expected in (("bytes=2-5", b"2345"), ("bytes=7-", b"789"), ("bytes=-3", b"789")):
@@ -100,6 +126,19 @@ class MusicHTTPTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(headers["Content-Length"], "10")
         self.assertEqual(body, b"")
+
+    def test_stream_window_is_deleted_after_http_delivery(self):
+        status, headers, body = self.request("GET", "/api/elevenlabs/generations/test/audio?start=0&duration=10")
+        self.assertEqual(status, 200)
+        self.assertEqual(headers["Content-Type"], "audio/wav")
+        self.assertEqual(body, b"0123456789")
+        # Reading Content-Length bytes may finish just before the server's
+        # response-finally cleanup runs on its request thread.
+        deadline = time.monotonic() + 1
+        while self.audio.exists() and time.monotonic() < deadline:
+            time.sleep(0.005)
+        self.assertFalse(self.audio.exists())
+        self.assertTrue(self.window_closed.wait(timeout=1))
 
 
 if __name__ == "__main__":

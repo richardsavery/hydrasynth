@@ -71,7 +71,11 @@ globalThis.HydraRapResponse = (() => {
       ...(typeof pending.text === "string" ? { text: pending.text } : { recorded: true }) } : null;
     return { ...draft(), response_id: selected, pending: savedPending };
   }
-  function flush() { if (initialized) { try { localStorage.setItem(KEY, JSON.stringify(getState())); } catch (_) {} } }
+  function flush({ strict = false } = {}) {
+    if (!initialized) return;
+    try { localStorage.setItem(KEY, JSON.stringify(getState())); }
+    catch (error) { if (strict) throw error; }
+  }
   async function request(path, body) {
     const abort = new AbortController(), parent = controller?.signal;
     let timedOut = false;

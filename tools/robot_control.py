@@ -467,9 +467,10 @@ class RobotControlService:
             ids = (20, 21, 22, 25, 26, 27) if group == "ribs" else (0, 1, 2, 3)
             commands = [{"address": "Dynamixel", "args": [motor_id, "torque", int(torque)]} for motor_id in ids]
             if group == "drums" and torque:
-                commands = [{"address": "Dynamixel", "args": [motor_id, "profile_ms", DRUM_TORQUE_REST_MS,
-                                                              "goal", MOTORS_BY_ID[motor_id]["rest"]]}
-                            for motor_id in ids] + commands
+                rest_commands = [{"address": "Dynamixel", "args": [motor_id, "profile_ms", DRUM_TORQUE_REST_MS,
+                                                                   "goal", MOTORS_BY_ID[motor_id]["rest"]]}
+                                 for motor_id in ids]
+                commands = rest_commands + commands + copy.deepcopy(rest_commands)
         torque_off = torque is False
         if not dry_run and not torque_off:
             with self._emergency_lock:

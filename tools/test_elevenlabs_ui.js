@@ -6,7 +6,17 @@ const path = require("node:path");
 const vm = require("node:vm");
 const context = vm.createContext({});
 vm.runInContext(fs.readFileSync(path.join(__dirname, "../dashboard/elevenlabs.js"), "utf8"), context);
-const { sectionAt, canGenerate, matchesPlan, hasPendingWork } = context.HydraElevenLabs;
+const { sectionAt, canGenerate, matchesPlan, hasPendingWork, musicLabel } = context.HydraElevenLabs;
+
+const namedTrack = { id: "generation-12345678", requested_duration_seconds: 40,
+  generation_settings: { style: "  Quiet  cello & piano ", bpm: 85, key: "A minor" } };
+assert.equal(musicLabel(namedTrack), "Quiet cello & piano · 85 BPM · A minor · 40s · 12345678");
+assert.equal(musicLabel({ id: "original", duration_seconds: 20, settings: { style: "Slow strings", bpm: 60, key: "C major" } }),
+  "Slow strings · 60 BPM · C major · 20s · original");
+assert.equal(musicLabel({ ...namedTrack, generation_settings: undefined }, { settings: namedTrack.generation_settings }), musicLabel(namedTrack),
+  "original jobs inherit descriptive names from their saved plan");
+assert.notEqual(musicLabel(namedTrack), musicLabel({ ...namedTrack, id: "generation-87654321" }), "same-direction versions remain distinct");
+assert.match(musicLabel({ ...namedTrack, realtime: { generation_settings: { style: "Bright brass", bpm: 120, key: "F major" } } }), /^Bright brass · 120 BPM · F major/);
 
 // Seeking follows the requested audio timeline, independently of cropped source times.
 const sections = [
@@ -122,7 +132,7 @@ const savedJob = (plan) => ({ id: "saved-music", plan_id: plan.id, cache_key: pl
 
 // Exercise the real initialization, click, restore and fetch paths. These fake
 // server responses cannot reach ElevenLabs or spend credits.
-function creationHarness({ initialPlan, initialJob, stored = {}, missingAnalysis = false, ready: serviceReady = true } = {}) {
+function creationHarness({ initialPlan, initialJob, unlistedPlan, unlistedJob, stored = {}, missingAnalysis = false, ready: serviceReady = true } = {}) {
   const nodes = new Map(), requests = [], plans = initialPlan ? [clone(initialPlan)] : [], jobs = initialJob ? [clone(initialJob)] : [];
   let selection, planGate, rejectGeneration = false;
   const storage = new Map([["hydra.elevenlabs.workspace.v1", JSON.stringify(stored)]]);
@@ -147,7 +157,11 @@ function creationHarness({ initialPlan, initialJob, stored = {}, missingAnalysis
     if (method === "GET" && route === "/status") result = { ready: serviceReady };
     else if (method === "GET" && route === "/plans") result = { plans: clone(plans) };
     else if (method === "GET" && route === "/generations") result = { jobs: clone(jobs) };
-    else if (method === "GET" && route.startsWith("/plans/")) result = clone(plans.find((plan) => plan.id === route.slice(7)));
+    else if (method === "GET" && (route.startsWith("/plans/") || route.startsWith("/generations/"))) {
+      const records = route.startsWith("/plans/") ? [...plans, unlistedPlan] : [...jobs, unlistedJob];
+      result = records.find((record) => record?.id === route.split("/").at(-1));
+      if (!result) return { ok: false, status: 404, json: async () => ({ error: "Saved music not found" }) };
+    }
     else if (method === "GET" && route.startsWith("/analyses/")) {
       if (missingAnalysis) return { ok: false, status: 404, json: async () => ({ error: "Missing old analysis" }) };
       result = { id: route.slice(10), timeline: { times: [0, 1], signal: [0, 1], channels: {} } };
@@ -174,7 +188,7 @@ function creationHarness({ initialPlan, initialJob, stored = {}, missingAnalysis
   vm.runInContext(fs.readFileSync(path.join(__dirname, "../dashboard/elevenlabs.js"), "utf8"), context);
   context.HydraElevenLabs.init();
   for (const [id, value] of Object.entries({ style: defaults.style, bpm: "100", key: "D minor", palette: defaults.instrument_palette.join(", "), context: "high", seed: "", length: "20" })) node(id).value = value;
-  return { ui: context.HydraElevenLabs, node, workspace, requests, plans, jobs, storage,
+  return { ui: context.HydraElevenLabs, context, node, workspace, requests, plans, jobs, storage,
     get selection() { return selection; },
     delayPlan() { let release; planGate = new Promise((resolve) => { release = resolve; }); return release; },
     loseGenerationResponse() { rejectGeneration = true; },
@@ -184,6 +198,23 @@ function creationHarness({ initialPlan, initialJob, stored = {}, missingAnalysis
 }
 
 async function originalCreationTests() {
+  {
+    const saved = { planId: "not-opened", jobId: "saved-track", generationSettings: { ...defaults, style: "Remember this direction" }, durationSeconds: 60 };
+    const unopened = creationHarness({ stored: saved });
+    unopened.ui.flush({ strict: true });
+    assert.deepEqual(JSON.parse(unopened.storage.get("hydra.elevenlabs.workspace.v1")), saved,
+      "session capture preserves remembered music before the legacy workspace has loaded");
+    const h = creationHarness(); await h.ui.activate();
+    const previous = h.storage.get("hydra.elevenlabs.workspace.v1"), quota = new Error("Browser storage is full");
+    h.context.localStorage.setItem = () => { throw quota; };
+    assert.doesNotThrow(() => h.edit("style", "The current direction"), "ordinary editing remains available when autosave fails");
+    assert.equal(h.storage.get("hydra.elevenlabs.workspace.v1"), previous);
+    assert.throws(() => h.ui.flush({ strict: true }), error => error === quota,
+      "session capture cannot save a stale music direction");
+    h.context.localStorage.setItem = (key, value) => h.storage.set(key, value);
+    h.ui.flush({ strict: true });
+    assert.equal(JSON.parse(h.storage.get("hydra.elevenlabs.workspace.v1")).generationSettings.style, "The current direction");
+  }
   const h = creationHarness();
   await h.ui.activate();
   assert.equal(h.requests.some((request) => request.method === "POST"), false, "opening the page must never generate");
@@ -234,6 +265,38 @@ async function originalCreationTests() {
       assert.equal(restored.node("length").value, "60");
       assert.match(restored.node("generate").textContent, /Generate original/);
     } else assert.match(restored.node("generate").textContent, /Use saved music/);
+    assert.match(restored.node("saved-plan").innerHTML, /instrumental electronic music · 100 BPM · D minor · 20s/);
+    assert.match(restored.node("attempts").innerHTML, /instrumental electronic music · 100 BPM · D minor · 20s/);
+  }
+
+  const missingPlan = creationHarness({ initialPlan: cachedPlan, initialJob: cachedJob,
+    stored: { planId: "missing-plan", jobId: "missing-track", generationSettings: { ...defaults, style: "Unsent draft" } } });
+  await missingPlan.ui.activate();
+  assert.equal(missingPlan.selection.plan, null, "a missing saved plan cannot silently select the latest plan");
+  assert.equal(missingPlan.node("audio").src, undefined);
+  assert.match(missingPlan.node("notice").textContent, /Saved music missing-plan is unavailable/);
+  assert.equal(missingPlan.node("saved-plan").value, "missing-plan");
+  assert.match(missingPlan.node("saved-plan").innerHTML, /Saved music unavailable/);
+  missingPlan.edit("style", "Updated draft");
+  assert.equal(JSON.parse(missingPlan.storage.get("hydra.elevenlabs.workspace.v1")).planId, "missing-plan");
+  assert.equal(JSON.parse(missingPlan.storage.get("hydra.elevenlabs.workspace.v1")).jobId, "missing-track");
+
+  const missingAttempt = creationHarness({ initialPlan: cachedPlan, initialJob: cachedJob,
+    stored: { planId: cachedPlan.id, jobId: "missing-attempt", generationSettings: defaults } });
+  await missingAttempt.ui.activate();
+  assert.equal(missingAttempt.selection.currentJob, null, "a missing saved attempt cannot silently select another version");
+  assert.equal(missingAttempt.node("audio").src, undefined);
+  assert.match(missingAttempt.node("notice").textContent, /Saved track missing-attempt is unavailable/);
+  assert.equal(JSON.parse(missingAttempt.storage.get("hydra.elevenlabs.workspace.v1")).jobId, "missing-attempt");
+
+  const oldPlan = original("outside-recent-plans"), oldJob = { ...savedJob(oldPlan), id: "outside-recent-jobs" };
+  const older = creationHarness({ initialPlan: cachedPlan, initialJob: cachedJob, unlistedPlan: oldPlan, unlistedJob: oldJob,
+    stored: { planId: oldPlan.id, jobId: oldJob.id } });
+  await older.ui.activate();
+  assert.equal(older.selection.plan.id, oldPlan.id);
+  assert.equal(older.selection.currentJob.id, oldJob.id, "a saved reference outside recent-list limits still restores directly");
+  for (const harness of [missingPlan, missingAttempt, older]) {
+    assert.equal(harness.requests.some((request) => request.method === "POST"), false, "restoring missing or older saved music must not generate");
   }
 
   const legacyPlan = { ...original("legacy-plan"), origin: undefined, analysis_id: "old-analysis", dataset_id: "old-dataset", dataset_name: "movement.jsonl", cache_key: "legacy-key" };

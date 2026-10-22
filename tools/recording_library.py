@@ -28,6 +28,27 @@ MAX_FIELDS_PER_CHANNEL = 256
 MAX_SERIES_POINTS = 4000
 SERIES_CACHE_LIMIT = 48
 MAX_BATCH_SERIES = 192
+SKELETON_JOINTS = (
+    "nose", "neck", "right_shoulder", "right_elbow", "right_wrist",
+    "left_shoulder", "left_elbow", "left_wrist", "right_hip", "right_knee",
+    "right_ankle", "left_hip", "left_knee", "left_ankle", "right_eye",
+    "left_eye", "right_ear", "left_ear",
+)
+SKELETON_AXES = (("x", "X (forward)"), ("y", "Y (left)"), ("z", "Z (up)"))
+SKELETON_JOINT_INDEX = {joint: index for index, joint in enumerate(SKELETON_JOINTS)}
+SKELETON_REGIONS = {
+    "whole_body": tuple(range(18)),
+    "head": (0, 14, 15, 16, 17),
+    "torso": (1, 2, 5, 8, 11),
+    "left_arm": (5, 6, 7),
+    "right_arm": (2, 3, 4),
+    "left_leg": (11, 12, 13),
+    "right_leg": (8, 9, 10),
+}
+SKELETON_MOTION_IDS = {
+    *(f"skeleton:{joint}:speed" for joint in SKELETON_JOINTS),
+    *(f"skeleton:region:{region}:speed" for region in SKELETON_REGIONS),
+}
 
 
 def finite_number(value: Any) -> float | None:
@@ -88,6 +109,89 @@ def _shape(value: Any) -> list[int]:
     return result
 
 
+def _skeleton_values(message: dict[str, Any]) -> list[Any] | None:
+    """Recognize the ENACT camera-relative 18-joint skeleton contract."""
+    if message.get("channel") != "skeleton":
+        return None
+    if "shape" in message and _shape(message["shape"]) not in ([18, 3], [54]):
+        return None
+    data = message.get("data")
+    if not isinstance(data, list):
+        return None
+    if len(data) == 54 and all(not isinstance(value, list) for value in data):
+        return data
+    if len(data) == 18 and all(
+        isinstance(row, list) and len(row) == 3
+        and all(not isinstance(value, list) for value in row)
+        for row in data
+    ):
+        return [value for row in data for value in row]
+    return None
+
+
+def _skeleton_coordinate(message: dict[str, Any], field_id: str) -> float | None:
+    parts = field_id.split(":")
+    if len(parts) != 3 or parts[1] not in SKELETON_JOINT_INDEX or parts[2] not in ("x", "y", "z"):
+        return None
+    values = _skeleton_values(message)
+    if values is None:
+        return None
+    offset = SKELETON_JOINT_INDEX[parts[1]] * 3
+    joint = [finite_number(value) for value in values[offset:offset + 3]]
+    # Untracked joints are sent as zero triplets. Never turn missing tracking
+    # into a physical movement, or shift later coordinates past an invalid one.
+    if any(value is None for value in joint) or all(value == 0 for value in joint):
+        return None
+    return joint[("x", "y", "z").index(parts[2])]
+
+
+class _SkeletonMotion:
+    """Measure movement before downsampling, without bridging tracking gaps."""
+
+    def __init__(self) -> None:
+        self.at: float | None = None
+        self.clock: str | None = None
+        self.joints: list[list[float] | None] | None = None
+
+    def step(self, message: dict[str, Any], timestamp: float | None) -> dict[str, float]:
+        values = _skeleton_values(message)
+        if values is None or timestamp is None:
+            self.at = None
+            self.clock = None
+            self.joints = None
+            return {}
+        clock = "t_recv" if finite_number(message.get("t_recv")) is not None else (
+            "stamp" if finite_number(message.get("stamp")) is not None else "external")
+        joints = []
+        for offset in range(0, 54, 3):
+            joint = [finite_number(value) for value in values[offset:offset + 3]]
+            joints.append(joint if all(value is not None for value in joint)
+                          and any(value != 0 for value in joint) else None)
+        previous, previous_at = self.joints, self.at
+        dt = timestamp - previous_at if previous_at is not None and self.clock == clock else None
+        if previous is not None and dt is not None and 0 < dt < 0.001:
+            # Network batches can deliver two different positions almost at
+            # once. Keep a useful time baseline but invalidate lost joints.
+            self.joints = [old if current is not None else None
+                           for old, current in zip(previous, joints)]
+            return {}
+        self.joints, self.at, self.clock = joints, timestamp, clock
+        if previous is None or dt is None or not 0 < dt <= 0.5:
+            return {}
+        speeds = []
+        for old, current in zip(previous, joints):
+            speed = math.dist(old, current) / dt if old is not None and current is not None else None
+            speeds.append(speed if speed is not None and math.isfinite(speed) else None)
+        result = {f"skeleton:{joint}:speed": speed
+                  for joint, speed in zip(SKELETON_JOINTS, speeds) if speed is not None}
+        for region, members in SKELETON_REGIONS.items():
+            tracked = [speeds[index] for index in members if speeds[index] is not None]
+            if tracked:
+                # Average magnitudes, so opposite limb movements do not cancel.
+                result[f"skeleton:region:{region}:speed"] = sum(speed / len(tracked) for speed in tracked)
+        return result
+
+
 def _field_descriptor(
     identifier: str,
     name: str,
@@ -96,7 +200,7 @@ def _field_descriptor(
     shape: list[int] | None = None,
     label: str | None = None,
 ) -> dict[str, Any]:
-    reducers = ["value"] if kind in {"position", "velocity"} else [
+    reducers = ["value"] if kind in {"position", "velocity", "motion"} else [
         "mean",
         "rms",
         "minimum",
@@ -243,7 +347,8 @@ class RecordingLibrary:
     ) -> None:
         if len(fields) >= MAX_FIELDS_PER_CHANNEL:
             return
-        data = message.get("data")
+        skeleton_values = _skeleton_values(message)
+        data = skeleton_values if skeleton_values is not None else message.get("data")
         labels = message.get("labels")
         if isinstance(data, list):
             if isinstance(labels, list) and len(labels) == len(data):
@@ -266,6 +371,37 @@ class RecordingLibrary:
                     ),
                 )
 
+        if skeleton_values is not None:
+            # Keep the original array available for saved aggregate/index
+            # mappings, including skeleton frames that also carry labels.
+            if "data" in fields or len(fields) < MAX_FIELDS_PER_CHANNEL:
+                fields.setdefault(
+                    "data", _field_descriptor("data", "data", "array", shape=_shape(message.get("shape")))
+                )
+            for level, names in (("region", SKELETON_REGIONS), ("joint", SKELETON_JOINTS)):
+                for name in names:
+                    if len(fields) >= MAX_FIELDS_PER_CHANNEL:
+                        break
+                    identifier = f"skeleton:region:{name}:speed" if level == "region" else f"skeleton:{name}:speed"
+                    label = f"{name.replace('_', ' ').capitalize()} movement"
+                    description = "Combined XYZ movement speed in metres per second."
+                    if level == "region":
+                        description = "Average XYZ movement speed of tracked joints in metres per second."
+                    fields.setdefault(identifier, {
+                        **_field_descriptor(identifier, label, "motion", label=label),
+                        "unit": "m/s", "skeletonLevel": level, "description": description,
+                    })
+            for joint in SKELETON_JOINTS:
+                for axis, axis_label in SKELETON_AXES:
+                    if len(fields) >= MAX_FIELDS_PER_CHANNEL:
+                        break
+                    identifier = f"skeleton:{joint}:{axis}"
+                    label = f"{joint.replace('_', ' ').capitalize()} {axis_label}"
+                    fields.setdefault(identifier, {
+                        **_field_descriptor(identifier, label, "position", label=label),
+                        "unit": "m", "skeletonLevel": "axis",
+                    })
+
         velocity = message.get("velocity")
         if isinstance(velocity, list):
             if isinstance(labels, list) and len(labels) == len(velocity):
@@ -280,11 +416,16 @@ class RecordingLibrary:
                             identifier, f"{label} velocity", "velocity", label=label
                         ),
                     )
-            else:
+            elif "velocity" in fields or len(fields) < MAX_FIELDS_PER_CHANNEL:
                 fields.setdefault(
                     "velocity",
                     _field_descriptor("velocity", "velocity", "array"),
                 )
+
+        if skeleton_values is not None:
+            for identifier, field in fields.items():
+                if identifier in {"data", "velocity"} or identifier.startswith(("data:", "velocity:")):
+                    field["skeletonLevel"] = "raw"
 
         tensors = message.get("tensors")
         if not isinstance(tensors, dict):
@@ -380,6 +521,8 @@ class RecordingLibrary:
                     by_channel.setdefault(channel, []).append(key)
 
         if pending:
+            motion = _SkeletonMotion()
+            needs_motion = any(key[3] in SKELETON_MOTION_IDS for key in by_channel.get("skeleton", []))
             with open_recording(path) as stream:
                 for raw_line in stream:
                     try:
@@ -391,17 +534,17 @@ class RecordingLibrary:
                     channel = message.get("channel")
                     if not isinstance(channel, str):
                         continue
+                    timestamp = finite_number(message.get("t_recv"))
+                    if timestamp is None:
+                        timestamp = finite_number(message.get("stamp"))
+                    speeds = motion.step(message, timestamp) if channel == "skeleton" and needs_motion else {}
                     for key in by_channel.get(channel, []):
                         _recording, _modified, _channel, field_id, reducer, index, _limit = key
-                        value = self._extract_value(message, field_id, reducer, index)
+                        value = speeds.get(field_id) if field_id in SKELETON_MOTION_IDS else self._extract_value(message, field_id, reducer, index)
                         if value is None:
                             continue
-                        timestamp = finite_number(message.get("t_recv"))
-                        if timestamp is None:
-                            timestamp = finite_number(message.get("stamp"))
-                        if timestamp is None:
-                            timestamp = float(len(pending[key]))
-                        pending[key].append((timestamp, value))
+                        sample_time = timestamp if timestamp is not None else float(len(pending[key]))
+                        pending[key].append((sample_time, value))
             for key, values in pending.items():
                 _recording, _modified, channel, field_id, reducer, index, limit = key
                 results[key] = self._series_result(recording_id, channel, field_id, reducer, index, limit, values)
@@ -457,9 +600,15 @@ class RecordingLibrary:
         message: dict[str, Any], field_id: str, reducer: str, index: int
     ) -> float | None:
         raw_values: Any
+        if field_id.startswith("skeleton:"):
+            return _skeleton_coordinate(message, field_id)
         if field_id.startswith("data:") or field_id.startswith("velocity:"):
             key, raw_index = field_id.split(":", 1)
             values = message.get(key)
+            if key == "data":
+                skeleton_values = _skeleton_values(message)
+                if skeleton_values is not None:
+                    values = skeleton_values
             try:
                 item_index = int(raw_index)
             except ValueError:
@@ -474,6 +623,12 @@ class RecordingLibrary:
             raw_values = tensor.get("data") if isinstance(tensor, dict) else None
         else:
             raw_values = message.get(field_id)
+            if field_id == "data":
+                skeleton_values = _skeleton_values(message)
+                if skeleton_values is not None:
+                    raw_values = skeleton_values
+                    if reducer == "index":
+                        return finite_number(raw_values[index]) if 0 <= index < len(raw_values) else None
         if not isinstance(raw_values, list):
             return None
         values = [number for item in raw_values if (number := finite_number(item)) is not None]

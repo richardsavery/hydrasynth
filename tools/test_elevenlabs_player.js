@@ -28,7 +28,8 @@ class Source extends Node {
 }
 const buffer = (duration = 20, channels = 2) => ({ duration, numberOfChannels: channels, length: duration * 1000 });
 class FakeContext {
-  constructor() { this.currentTime = 0; this.sampleRate = 48000; this.sources = []; this.nodes = []; this.destination = {}; this.resumeCalls = 0; FakeContext.last = this; }
+  constructor() { this.currentTime = 0; this.sampleRate = 48000; this.sources = []; this.nodes = []; this.destination = {}; this.resumeCalls = 0;
+    this.audioWorklet = { addModule: async (url) => { this.streamModule = url; } }; FakeContext.last = this; }
   node(kind) { const node = new Node(kind); this.nodes.push(node); return node; }
   createGain() { return this.node("gain"); }
   createBiquadFilter() { return this.node("filter"); }
@@ -41,6 +42,24 @@ class FakeContext {
   async decodeAudioData(data) { if (data.fail) throw new Error("Corrupt audio"); return data.decoded || buffer(); }
   async resume() { this.resumeCalls++; }
   async close() { this.closed = true; }
+}
+class FakeStreamNode extends Node {
+  constructor(ctx, name, options) {
+    super("stream"); this.processorName = name; this.options = options;
+    this.parameters = new Map([["playbackRate", new Param(options.parameterData.playbackRate)]]);
+    this.port = { messages: [], onmessage: null, postMessage(message) { this.messages.push(message); }, start() {}, close() { this.closed = true; } };
+    ctx.nodes.push(this);
+  }
+}
+function pcmWindow(duration = 10) {
+  const frames = Math.round(duration * 48000), data = new ArrayBuffer(44 + frames * 4), view = new DataView(data);
+  const text = (at, value) => [...value].forEach((letter, index) => view.setUint8(at + index, letter.charCodeAt(0)));
+  text(0, "RIFF"); view.setUint32(4, data.byteLength - 8, true); text(8, "WAVE"); text(12, "fmt ");
+  view.setUint32(16, 16, true); view.setUint16(20, 1, true); view.setUint16(22, 2, true); view.setUint32(24, 48000, true);
+  view.setUint32(28, 192000, true); view.setUint16(32, 4, true); view.setUint16(34, 16, true);
+  text(36, "data"); view.setUint32(40, frames * 4, true);
+  for (let frame = 0; frame < frames; frame++) { view.setInt16(44 + frame * 4, 8192, true); view.setInt16(46 + frame * 4, -8192, true); }
+  return data;
 }
 const FakePitch = {
   async register(ctx) { ctx.pitchRegistrations = (ctx.pitchRegistrations || 0) + 1; },
@@ -56,12 +75,14 @@ const FakePitch = {
 };
 const context = vm.createContext({ console, AbortController, setTimeout, clearTimeout, Float32Array });
 vm.runInContext(fs.readFileSync(path.join(__dirname, "../dashboard/elevenlabs-player.js"), "utf8"), context);
+vm.runInContext(fs.readFileSync(path.join(__dirname, "../dashboard/robot-drums.js"), "utf8"), context);
 const { Player } = context.HydraElevenPlayer;
 const track = (id, extra = {}) => ({ id, audio_url: `/audio/${id}`, ...extra });
+const beatMetadata = { source: "mix", audio_sha256: "a".repeat(64), source_sha256: "a".repeat(64), bpm_min: 80, bpm_max: 140 };
 function fixture(options = {}) {
   const timers = new Map(), requests = [], assets = new Map();
   let nextTimer = 0;
-  const player = new Player({ AudioContext: FakeContext, Pitch: FakePitch,
+  const player = new Player({ AudioContext: FakeContext, AudioWorkletNode: FakeStreamNode, Pitch: FakePitch,
     setTimeout(callback, delay) { timers.set(++nextTimer, { callback, delay }); return nextTimer; },
     clearTimeout(id) { timers.delete(id); },
     fetch: async (url, request) => {
@@ -81,6 +102,244 @@ function fixture(options = {}) {
 function near(actual, expected, label, tolerance = 1e-8) { assert.ok(Math.abs(actual - expected) < tolerance, `${label}: ${actual} versus ${expected}`); }
 
 async function main() {
+  {
+    const complete = { ...beatMetadata, state: "complete", schema_version: 1, duration_seconds: 20,
+      bpm_median: 120, beats_seconds: [1, 1.5, 2], active_regions: [{ start_seconds: 1, end_seconds: 2.1 }] };
+    const invalidMaps = [undefined, { state: "queued" }, { state: "analyzing" }, { state: "failed" },
+      { ...complete, schema_version: 2 }, { ...complete, beats_seconds: [1, 1] },
+      { ...complete, beats_seconds: [1, 1.5, 20] }, { ...complete, duration_seconds: 30 },
+      { ...complete, active_regions: [{ start_seconds: 1.2, end_seconds: 2.1 }] },
+      { ...complete, active_regions: [{ start_seconds: .9, end_seconds: 1.1 }, { start_seconds: 1.4, end_seconds: 2.1 }] },
+      { ...complete, bpm_median: NaN }, { ...complete, audio_sha256: "b".repeat(64) },
+      { ...complete, first_beat_in_bar: 5 }, { ...complete, bar_phase_confidence: NaN }];
+    for (const analysis of invalidMaps) {
+      const options = { enabled: true }, { player } = fixture({ beatTracking: () => options });
+      await player.loadTrack(track("invalid-detected", { beat_analysis: analysis })); await player.start();
+      const clock = player.transportClock(120);
+      assert.equal(clock.valid, false, "enabled missing, pending, failed or malformed detection cannot fall back to manual BPM");
+      assert.equal(clock.bpm, null); assert.equal(clock.beatContacts.length, 0);
+      assert.match(clock.beatTrackingError, /retry beat alignment/);
+      assert.equal(clock.playing, true, "unavailable beat analysis does not block listening to the audio");
+      options.enabled = false;
+      assert.equal(player.transportClock(120).valid, true, "only explicit opt-out restores a fixed manual beat grid");
+      player.dispose();
+    }
+  }
+  {
+    const analysis = { ...beatMetadata, state: "complete", schema_version: 1, duration_seconds: 20,
+      bpm_median: 120, first_beat_in_bar: 4, bar_phase_confidence: .82,
+      beats_seconds: [1, 1.5, 2], active_regions: [{ start_seconds: 1, end_seconds: 2.1 }] };
+    const options = { enabled: true }, { player } = fixture({ beatTracking: () => options });
+    await player.loadTrack(track("automatic-groove-phase", { beat_analysis: analysis })); await player.start();
+    let contact = player.transportClock(null).beatContacts.find(item => item.key.endsWith(":0:0"));
+    assert.equal(contact.beat, 3, "the detected pickup position sets groove phase without a manual bar setting");
+    options.firstBeatInBar = 2;
+    contact = player.transportClock(null).beatContacts.find(item => item.key.endsWith(":0:0"));
+    assert.equal(contact.beat, 1, "an optional saved correction overrides the automatic estimate");
+    player.dispose();
+  }
+  {
+    const analysis = { ...beatMetadata, state: "complete", schema_version: 1, duration_seconds: 20,
+      bpm_median: 120, beats_seconds: [0, .5, 1], active_regions: [{ start_seconds: 0, end_seconds: 1.1 }] };
+    const { player } = fixture({ beatTracking: { enabled: true } });
+    await player.loadTrack(track("opening-beat", { beat_analysis: analysis }));
+    await player.start({ leadSeconds: 1.2 });
+    const clock = player.transportClock(null), first = clock.beatContacts.find(item => item.beat === 0);
+    near(first.at, 1.22, "startup preparation leaves time to schedule a beat at file time zero");
+    near(player.currentPosition, 0, "preparation does not seek into or trim the file");
+    assert.equal(clock.playing, true, "the follower can prepare before the first audio sample");
+    player.dispose();
+  }
+  {
+    const analysis = { ...beatMetadata, state: "complete", schema_version: 1, duration_seconds: 20, bpm_median: 110,
+      beats_seconds: [2, 2.5, 3.1, 3.9, 7, 7.4, 7.85],
+      active_regions: [{ start_seconds: 1.9, end_seconds: 4.1 }, { start_seconds: 6.9, end_seconds: 8.1 }] };
+    const options = { enabled: true, offsetSeconds: 0.1, firstBeatInBar: 3 };
+    const { player } = fixture({ beatTracking: () => options, Pitch: { ...FakePitch, latencySeconds: () => .25 } });
+    await player.loadTrack(track("detected-map", { beat_analysis: analysis })); await player.start();
+    const ctx = FakeContext.last;
+    let clock = player.transportClock(null);
+    assert.equal(clock.valid, true, "a detected map does not need a manually supplied BPM");
+    assert.equal(clock.estimated, false);
+    assert.equal(clock.beatContacts.length, 0, "leading silence never acquires an extrapolated grid");
+    ctx.currentTime = 1.6; clock = player.transportClock(null);
+    const first = clock.beatContacts.find(contact => contact.beat === 2);
+    near(first.at, 2.37, "first detected beat includes file offset, manual timing and processor latency");
+    ctx.currentTime = 3; player.updateControls({ rate: 1.25 });
+    clock = player.transportClock(null);
+    assert.ok(clock.beatContacts.length > 3, "variable-tempo intervals provide subdivisions");
+    for (const contact of clock.beatContacts) {
+      const [, , indexText, partText] = contact.key.split(":"), index = Number(indexText), part = Number(partText);
+      const expectedSource = analysis.beats_seconds[index] + .1 + (part ? (analysis.beats_seconds[index + 1] - analysis.beats_seconds[index]) * part / 4 : 0);
+      near(player._clockAt(player._active, contact.at - .25).position, expectedSource, "every contact inverts the audible rate ramp exactly");
+    }
+    player.updateControls({ rate: 1 }); ctx.currentTime = 5;
+    assert.equal(player.transportClock(null).beatContacts.length, 0, "no quarter beats are invented across an inactive region");
+    ctx.currentTime = 10;
+    assert.equal(player.transportClock(null).beatContacts.length, 0, "the last detected beat is not extended into an outro");
+    options.enabled = false;
+    assert.equal(player.transportClock(null).valid, false, "disabling detection restores manual-tempo requirements");
+    assert.equal(player.transportClock(120).estimated, true);
+    player.dispose();
+  }
+  {
+    const analysis = { ...beatMetadata, state: "complete", schema_version: 1, duration_seconds: 6, bpm_median: 120,
+      beats_seconds: [.2, .7, 1.3, 2, 3.5, 4], active_regions: [{ start_seconds: .1, end_seconds: 4.1 }] };
+    const { player, assets, tick } = fixture({ beatTracking: { enabled: true, firstBeatInBar: 1 } });
+    assets.set("/audio/detected-loop", { decoded: buffer(6) });
+    await player.loadTrack(track("detected-loop", { beat_analysis: analysis })); await player.start();
+    const ctx = FakeContext.last, initial = player.transportClock(null);
+    tick(5.6);
+    assert.equal(player._transition, null, "detected loops use the complete file instead of an early crossfade");
+    const before = player.transportClock(null), upcoming = before.beatContacts.find(contact => contact.beat === 0);
+    near(upcoming.at, 6.22, "the next loop's first beat can be scheduled before its boundary");
+    assert.ok(upcoming.key.includes(":1:0:0"));
+    ctx.currentTime = 6.3;
+    assert.equal(player.transportClock(null).transportToken, initial.transportToken, "natural loops retain the prepared hardware session");
+    assert.notEqual(player.transportClock(null).mapToken, initial.mapToken, "each loop still has a distinct contact identity");
+    player.setSourceValid(false); player.setSourceValid(true);
+    assert.notEqual(player.transportClock(null).transportToken, initial.transportToken, "an actual input interruption invalidates queued robot contacts");
+    player.dispose();
+  }
+  {
+    const analysis = { ...beatMetadata, state: "complete", schema_version: 1, duration_seconds: 20, bpm_median: 120,
+      beats_seconds: Array.from({ length: 40 }, (_, index) => index * .5), active_regions: [{ start_seconds: 0, end_seconds: 20 }] };
+    const { player, tick } = fixture({ beatTracking: { enabled: true } });
+    await player.loadTrack(track("detected-old", { beat_analysis: analysis })); await player.start();
+    await player.queueTrack(track("detected-new", { beat_analysis: analysis }));
+    tick(18);
+    const transition = player._transition, before = player.transportClock(null);
+    assert.ok(transition);
+    assert.ok(before.beatContacts.every(contact => !contact.key.startsWith(`${transition.old.syncId}:`) || contact.at <= transition.start),
+      "old map contacts stop at the incoming deck's audible handoff");
+    assert.ok(before.beatContacts.some(contact => contact.key.startsWith(`${transition.next.syncId}:`)), "the armed incoming map supplies future contacts");
+    FakeContext.last.currentTime = transition.start + .01;
+    assert.equal(player.transportClock(null).transportToken, before.transportToken, "a detected handoff does not cancel already scheduled incoming contacts");
+    assert.ok(player.transportClock(null).beatContacts.every(contact => contact.key.startsWith(`${transition.next.syncId}:`)));
+    player.dispose();
+  }
+  {
+    const analysis = { ...beatMetadata, state: "complete", schema_version: 1, duration_seconds: 6, bpm_median: 110,
+      beats_seconds: [1.1, 1.6, 2.2, 2.7, 4, 4.65],
+      active_regions: [{ start_seconds: 1, end_seconds: 2.8 }, { start_seconds: 3.9, end_seconds: 4.8 }] };
+    const { player, tick } = fixture({ beatTracking: { enabled: true }, Pitch: { ...FakePitch, latencySeconds: () => .25 },
+      fetch: async () => ({ ok: true, headers: { get: () => null }, arrayBuffer: async () => pcmWindow(6) }) });
+    await player.loadTrack(track("detected-stream", { origin: "uploaded", audio: { duration_seconds: 6 }, beat_analysis: analysis }));
+    player.updateControls({ rate: 1.2 }); await player.start();
+    const ctx = FakeContext.last, starts = [], stops = [], hits = [], ready = token => ({ ok: true, performance: { token, state: "ready" } });
+    const drums = context.HydraRobotDrums.createEngine({
+      settings: { density: 100 }, now: () => ctx.currentTime * 1000,
+      clock() { const clock = player.transportClock(null); return { ...clock, running: clock.playing && clock.valid,
+        at: ctx.currentTime * 1000, token: clock.transportToken, beatContacts: clock.beatContacts.map(contact => ({ ...contact, at: contact.at * 1000 })) }; },
+      setInterval: () => 1, clearInterval() {}, hardware: {
+        snapshot: () => ({ drumsReady: true, drumTorqueEnabled: true, emergencyStopped: false }),
+        startDrumming(payload) { starts.push(payload); return Promise.resolve(ready(payload.token)); },
+        scheduleDrums(payload) { hits.push(...payload.events); return Promise.resolve(ready(payload.token)); },
+        stopDrumming(payload) { stops.push(payload); return Promise.resolve({ ok: true }); }
+      }
+    });
+    await drums.start();
+    for (let index = 1; index <= 220; index++) { tick(index * .05); drums.tick(); await new Promise(resolve => setImmediate(resolve)); }
+    assert.equal(starts.length, 1, "a streamed upload keeps one ready robot session through silence and two loops");
+    assert.equal(stops.length, 0);
+    assert.ok(hits.length > 15);
+    assert.ok(hits.some(hit => hit.id.includes(":1:0:0:")), "the robot receives beat zero in the next natural loop");
+    for (const hit of hits) {
+      const [, cycleText, indexText, partText] = hit.id.split(":").slice(-5, -1);
+      const cycle = Number(cycleText), index = Number(indexText), part = Number(partText);
+      const source = analysis.beats_seconds[index] + (part ? (analysis.beats_seconds[index + 1] - analysis.beats_seconds[index]) * part / 4 : 0);
+      const expected = Math.round((.33 + (cycle * 6 + source) / 1.2) * 1000);
+      assert.equal(hit.contactAt, expected, "the robot's actual scheduled contact follows source beats, playback rate and audible latency");
+    }
+    await drums.stop(); player.dispose();
+  }
+  {
+    const requests = [], length = 75.25;
+    const { player } = fixture({ fetch: async (url, options) => {
+      requests.push({ url, options });
+      const start = Number(new URL(url, "http://localhost").searchParams.get("start"));
+      return { ok: true, headers: { get: () => null }, arrayBuffer: async () => pcmWindow(Math.min(10, length - start)) };
+    } });
+    const stems = ["Bass", "Drums", "Guitar", "Piano", "Other", "Vocals"].map((name) => ({ name, audio_url: `/long/${name}`, duration_seconds: length }));
+    await player.loadTrack(track("long-upload", { origin: "uploaded", audio: { duration_seconds: length }, stems, generation_settings: { bpm: 220 } }), { requireStems: true });
+    assert.equal(player.streaming, true);
+    assert.equal(player.duration, length);
+    assert.equal(requests.length, 18, "prepare only three ten-second windows per stem, independent of full song length");
+    assert.ok(requests.every(({ url }) => url.includes("duration=10&sample_rate=48000") && !url.includes("/audio/long-upload")));
+    assert.equal(player._cache.size, 0, "uploaded songs never enter the full-file decoding cache");
+    assert.equal(player._prepared.initial.size, 3);
+    near(player.decodedBytes, 30 * 48000 * 8 * 6, "initial stream memory is bounded");
+    await player.start();
+    const deck = player._active, source = deck.stream.node;
+    assert.equal(source.processorName, "hydra-streamed-audio");
+    assert.equal(source.options.numberOfOutputs, 6, "all six stems come from a single synchronized source");
+    assert.equal(player._prepared.initial.size, 1, "only the first window is pinned for loops");
+    assert.deepEqual(source.port.messages.map((message) => message.index), [0, 1, 2]);
+    assert.equal(source.port.messages[0].parts[0][0][0], 0.25);
+    assert.equal(source.port.messages[0].parts[0][1][0], -0.25);
+    assert.equal(player.transportClock(null).valid, false, "uploaded audio never claims a generator BPM or automatic detection");
+    assert.equal(player.transportClock(123).baseBpm, 123, "manual source BPM is used for uploaded tracks");
+    player.updateControls({ rate: 1.25, pitch: 3, stemControls: { Vocals: { pitch: -2 } } });
+    assert.equal(deck.parts[5].pitch.parameters.get("pitchSemitones").value, 1);
+    assert.ok(deck.parts.every((part) => part.source.playbackRate === source.parameters.get("playbackRate")), "every stem uses exactly the same rate parameter");
+    source.port.onmessage({ data: { type: "need", indices: [3], buffered: [1, 2] } });
+    source.port.onmessage({ data: { type: "need", indices: [3], buffered: [1, 2] } });
+    await deck.stream.serial;
+    assert.equal(requests.length, 24, "duplicate requests cannot duplicate a pending window fetch");
+    assert.equal(source.port.messages.at(-1).index, 3);
+    assert.ok(player.decodedBytes <= 40 * 48000 * 8 * 6, "one loop window plus three moving windows bounds decoded memory");
+    source.port.onmessage({ data: { type: "underrun" } });
+    assert.equal(player.status, "error");
+    assert.equal(player.transportClock(123).playing, false, "an underrun stops every stem and the musical clock together");
+    assert.match(player._error, /synchronized/);
+    assert.equal(source.port.closed, true);
+    assert.equal(source.disconnected, true);
+    assert.equal(deck.stream.controller.signal.aborted, true);
+    player.dispose();
+  }
+  {
+    let waiting = false, abandonedSignal;
+    const { player } = fixture({ fetch: async (_url, options) => {
+      if (waiting) return new Promise((_resolve, reject) => {
+        abandonedSignal = options.signal;
+        options.signal.addEventListener("abort", () => reject(Object.assign(new Error("Aborted"), { name: "AbortError" })));
+      });
+      return { ok: true, headers: { get: () => null }, arrayBuffer: async () => pcmWindow() };
+    } });
+    await player.loadTrack(track("cancel-stream", { origin: "uploaded", audio: { duration_seconds: 3600 } }));
+    await player.start();
+    const deck = player._active;
+    waiting = true;
+    deck.stream.node.port.onmessage({ data: { type: "need", indices: [3], buffered: [1, 2] } });
+    await Promise.resolve();
+    player.stop();
+    await deck.stream.serial;
+    assert.equal(abandonedSignal.aborted, true, "stopping aborts active window fetches");
+    assert.equal(player.status, "stopped", "late aborted fetches cannot turn an intentional stop into an error");
+    player.dispose();
+  }
+  {
+    let waiting = false;
+    const { player, timers } = fixture({ fetch: async (_url, { signal }) => {
+      if (waiting) return new Promise((_resolve, reject) => signal.addEventListener("abort", () => reject(new Error("Aborted"))));
+      return { ok: true, headers: { get: () => null }, arrayBuffer: async () => pcmWindow() };
+    } });
+    await player.loadTrack(track("timeout-stream", { origin: "uploaded", audio: { duration_seconds: 3600 } }));
+    await player.start();
+    waiting = true;
+    const deck = player._active;
+    deck.stream.node.port.onmessage({ data: { type: "need", indices: [3], buffered: [1, 2] } });
+    await Promise.resolve();
+    const timeout = [...timers.values()].find((timer) => timer.delay === 60000);
+    assert.ok(timeout);
+    timeout.callback();
+    await deck.stream.serial;
+    assert.equal(player.status, "error", "a refill timeout cannot leave the UI playing while its source is silent");
+    assert.match(player._error, /timed out/);
+    assert.equal(deck.stream.controller.signal.aborted, true);
+    assert.equal(player.transportClock(120).playing, false);
+    player.dispose();
+  }
   {
     let created = 0;
     const { player, tick, timers } = fixture({ Pitch: { ...FakePitch, create(...args) {
@@ -252,6 +511,7 @@ async function main() {
     assert.equal(player.currentTrack.id, "rap-current", "the timer has not promoted the pending deck yet");
     assert.equal(next.baseBpm, 140, "the voice clock follows the audible incoming deck before its UI promotion");
     assert.notEqual(next.token, before.token);
+    assert.notEqual(next.transportToken, before.transportToken, "live beat followers also resynchronize to an incoming track");
     player.dispose();
   }
   {
@@ -271,22 +531,63 @@ async function main() {
     assert.equal(clock.estimated, true, "requested BPM is never described as audio beat detection");
     player.updateControls({ rate: 1.25 });
     assert.notEqual(player.transportClock(120).token, clock.token, "rate changes invalidate a rendered voice schedule");
+    assert.equal(player.transportClock(120).transportToken, clock.transportToken, "mapped rate changes preserve a live beat follower's session");
     ctx.currentTime = 1.10;
     near(player.transportClock(120).bpm, 150, "the voice clock includes mapped playback rate");
     player.setSourceValid(false);
     assert.equal(player.transportClock(120).valid, false, "stale accompaniment also gates the voice");
     player.setSourceValid(true);
+    assert.notEqual(player.transportClock(120).transportToken, clock.transportToken, "a source interruption invalidates old robot timing even after recovery");
     assert.equal(player.transportClock(NaN).valid, false);
     player.updateControls({ rate: 1 });
-    const beforeLoop = player.transportClock(120).token;
+    const beforeLoop = player.transportClock(120);
     tick(21);
-    assert.notEqual(player.transportClock(120).token, beforeLoop, "audio-thread fallback loops invalidate phase even if the UI timer is late");
-    const beforeStop = player.transportClock(120).token;
+    assert.notEqual(player.transportClock(120).token, beforeLoop.token, "audio-thread fallback loops invalidate phase even if the UI timer is late");
+    assert.notEqual(player.transportClock(120).transportToken, beforeLoop.transportToken, "looping also changes the live beat follower's phase");
+    const beforeStop = player.transportClock(120);
     player.stop();
     assert.equal(player.transportClock(120).playing, false);
-    assert.notEqual(player.transportClock(120).token, beforeStop);
+    assert.notEqual(player.transportClock(120).token, beforeStop.token);
+    assert.notEqual(player.transportClock(120).transportToken, beforeStop.transportToken);
     player.dispose();
     assert.equal(player.transportClock(120).valid, false);
+  }
+  {
+    const { player, assets } = fixture({ Pitch: { ...FakePitch, latencySeconds: () => 0.25 } });
+    assets.set("/audio/mapped-robot", { decoded: buffer(60) });
+    await player.loadTrack(track("mapped-robot", { generation_settings: { bpm: 120 } }));
+    await player.start();
+    const ctx = FakeContext.last, starts = [], stops = [], hits = [];
+    const ready = token => ({ ok: true, performance: { token, state: "ready" } });
+    const drums = context.HydraRobotDrums.createEngine({
+      settings: { density: 100, instruments: [0, 1, 2, 3] }, now: () => ctx.currentTime * 1000,
+      clock() {
+        const clock = player.transportClock(120);
+        return { ...clock, running: clock.playing && clock.valid, at: ctx.currentTime * 1000, token: clock.transportToken };
+      },
+      setInterval: () => 1, clearInterval() {},
+      hardware: {
+        snapshot: () => ({ drumsReady: true, drumTorqueEnabled: true, emergencyStopped: false }),
+        startDrumming(payload) { starts.push(payload); return Promise.resolve(ready(payload.token)); },
+        scheduleDrums(payload) { hits.push(...payload.events); return Promise.resolve(ready(payload.token)); },
+        stopDrumming(payload) { stops.push(payload); return Promise.resolve({ ok: true }); }
+      }
+    });
+    await drums.start();
+    for (let index = 1; index <= 240; index++) {
+      ctx.currentTime = index * 0.05;
+      player.updateControls({ rate: 1 + 0.24 * Math.sin(index / 4) });
+      assert.equal(player.transportClock(120).rateChanging, true, "the mapped speed never settles in this regression");
+      drums.tick();
+      await new Promise(resolve => setImmediate(resolve));
+    }
+    assert.equal(starts.length, 1, "the audible clock's buffered ramps do not restart drum preparation");
+    assert.equal(stops.length, 0);
+    assert.equal(drums.snapshot().running, true);
+    assert.ok(hits.length > 20, "Keirzo keeps scheduling hits while the real player clock changes continuously");
+    assert.ok(hits.some(hit => hit.contactAt > 11000), "drumming continues throughout the mapped performance");
+    await drums.stop();
+    player.dispose();
   }
   {
     const { player, timers, tick } = fixture();
@@ -424,8 +725,10 @@ async function main() {
     await player.loadTrack(track("original-clock")); await player.start();
     await player.queueTrack(track("audible-before-ui")); tick(17.9);
     const pending = player._transition;
+    assert.equal(player.transportTrack.id, "original-clock");
     FakeContext.last.currentTime = pending.start + 0.01;
     assert.equal(player.currentTrack.id, "original-clock", "simulate audio starting between scheduler ticks");
+    assert.equal(player.transportTrack.id, "audible-before-ui", "tempo metadata follows the audible deck before a delayed UI tick promotes it");
     assert.equal(player.clearQueuedTrack(), false);
     assert.equal(player.currentTrack.id, "audible-before-ui", "clearing synchronizes metadata to the real audio clock before generating another song");
     assert.deepEqual(transitions, ["audible-before-ui"]);

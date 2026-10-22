@@ -28,10 +28,12 @@ class StudyHTTPTests(unittest.TestCase):
         class Service:
             def dispatch(self, method, path, document):
                 calls.append((method, path, document))
+                if isinstance(document, bytes):
+                    return 201, {"id": "b" * 32, "state": "complete", "origin": "uploaded", "name": "My recording"}
                 return 200, {"id": "a" * 32, "state": "queued", "request_id": document.get("request_id")}
 
         self.server = DashboardHTTPServer(("127.0.0.1", 0),
-            handler_for(SnapshotStore("demo"), study=self.study, rap_response=Service()))
+            handler_for(SnapshotStore("demo"), study=self.study, rap_response=Service(), elevenlabs=Service()))
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
         self.port = self.server.server_address[1]
@@ -48,9 +50,10 @@ class StudyHTTPTests(unittest.TestCase):
         try:
             outgoing = {"Origin": f"http://127.0.0.1:{self.port}", "X-Study-Session": self.session_id}
             if document is not None:
-                outgoing["Content-Type"] = "application/json"
+                outgoing["Content-Type"] = "application/octet-stream" if isinstance(document, bytes) else "application/json"
             outgoing.update(headers or {})
-            connection.request(method, path, json.dumps(document) if document is not None else None, outgoing)
+            body = document if isinstance(document, bytes) else json.dumps(document) if document is not None else None
+            connection.request(method, path, body, outgoing)
             response = connection.getresponse()
             return response.status, dict(response.getheaders()), response.read()
         finally:
@@ -91,6 +94,28 @@ class StudyHTTPTests(unittest.TestCase):
         self.assertEqual(self.request("GET", "/study-recorder.js")[0], 200)
         self.assertEqual(self.request("GET", "/study-recorder.css")[0], 200)
         self.assertEqual(self.request("GET", "/events.sqlite3")[0], 404)
+
+    def test_custom_audio_upload_records_participant_origin_and_metadata_without_raw_bytes(self):
+        audio = b"RIFF\x00\xffprivate-audio-bytes-that-must-not-be-logged"
+        route = "/api/elevenlabs/uploads?filename=recording.wav&request_id=" + "b" * 32
+        status, _, body = self.request("POST", route, audio)
+        self.assertEqual(status, 201, body)
+        self.assertEqual(self.calls[-1], ("POST", route, audio))
+        status, _, body = self.request("GET", "/api/study/export")
+        self.assertEqual(status, 200)
+        with zipfile.ZipFile(io.BytesIO(body)) as archive:
+            raw_events = archive.read("events.jsonl")
+            self.assertNotIn(b"private-audio-bytes", raw_events)
+            events = [json.loads(line) for line in raw_events.splitlines()]
+            observed = next(event for event in events if event["type"] == "service.request_completed"
+                            and event["payload"].get("path") == "/api/elevenlabs/uploads")
+            self.assertEqual(observed["payload"]["request"], {"size_bytes": len(audio)})
+            self.assertEqual(observed["session_id"], self.session_id)
+            updates = [event for event in events if event["type"] == "generation.updated"]
+            self.assertEqual({event["session_id"] for event in updates}, {self.session_id})
+            manifest = json.loads(archive.read("manifest.json"))
+            self.assertEqual(manifest["job_origins"], [{"namespace": "elevenlabs", "job_id": "b" * 32,
+                                                      "origin_session_id": self.session_id}])
 
     def test_malformed_events_do_not_reach_generation_or_report_success(self):
         self.assertEqual(self.request("POST", "/api/study/events", {"events": [{"type": "ui.change"}]})[0], 400)

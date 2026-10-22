@@ -75,9 +75,10 @@ globalThis.HydraRapExperiment = (() => {
   function status(message, error = false) { $("status").textContent = message; $("status").classList.toggle("is-error", error); }
   function getState() { return initialized ? { ...draft(), experiment_id: selected, pending,
     metronome: $("metronome").checked, volume: Number($("volume").value) } : {}; }
-  function flush() {
+  function flush({ strict = false } = {}) {
     if (!initialized) return;
-    try { localStorage.setItem(KEY, JSON.stringify(getState())); } catch (_) {}
+    try { localStorage.setItem(KEY, JSON.stringify(getState())); }
+    catch (error) { if (strict) throw error; }
     onSave();
   }
   function setDraft(value = {}) {
