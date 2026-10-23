@@ -75,7 +75,7 @@ const context = vm.createContext({
   },
   testEvent: (value) => events.push(value)
 });
-for (const file of ["drums.js", "sonification.js", "parameters.js", "live.js", "drum-workspace.js", "session-library.js", "app.js"]) {
+for (const file of ["drums.js", "sonification.js", "parameters.js", "live.js", "drum-workspace.js", "session-library.js", "midi-safety.js", "app.js"]) {
   vm.runInContext(fs.readFileSync(path.join(__dirname, "../dashboard", file), "utf8"), context, { filename: file });
 }
 vm.runInContext(`
@@ -216,7 +216,7 @@ async function main() {
   state.playing = true;
   state.midiOutput = output;
   state.midiSustainOutputs.add(output);
-  state.midiNoteTimers.set(60, { output, timer: ++timerId });
+  state.midiNoteTimers.set(60, { output, note: 60, timer: ++timerId });
   timers.set(timerId, () => {});
   state.liveWanted = true;
   state.liveSocket = { close() { events.push("close-live"); } };

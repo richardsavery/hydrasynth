@@ -122,6 +122,30 @@ Each Mac creates its own study identity. The default study location is
 `~/Library/Application Support/Keirzo/study-data`; retain a custom `--study-dir`
 if one was already supplied. Do not copy another laptop's study database.
 
+## If the browser freezes or turns white
+
+Restart the dashboard after updating, then refresh the browser. Keep the backend
+running even when using browser MIDI through `make dashboard-sonify`: Hydrasynth
+playback needs its native MIDI watchdog. Refreshing alone leaves an older backend
+unchanged.
+
+Notes queue their timestamped MIDI note-offs when they start. During playback,
+the browser also checks in every 500 ms. After 2.5 seconds without a check-in,
+the backend uses CoreMIDI to release sustain and stop notes on the selected
+Hydrasynth and channel, independently of the page's JavaScript. The backend and
+MIDI connection must remain available. Reload after a freeze and press Play to
+restart playback.
+After a reload or starting playback in another dashboard tab, you may be asked
+to wait up to eight seconds for the previous page's queued note-offs to finish.
+Wait for the stated time, then press Play again. Stop/Play in the same page does
+not require this handover wait.
+
+Study capture batches writes and bounds upload passes to keep continuous input
+from building a browser-memory backlog. It retains every raw frame without
+sampling, and preserves existing recordings and the default study location.
+These changes address recording backlog and hanging notes, without guaranteeing
+that Chrome cannot crash for another reason.
+
 ## Advanced setup
 
 The Mac-specific entry point is `bash tools/setup_macos.sh`. The common

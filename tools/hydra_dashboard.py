@@ -37,6 +37,7 @@ from rap_response_service import RapResponseService
 from robot_control import RobotControlService
 from study_recording import StudyRecorder
 from study_backup import StudyBackup
+from midi_safety import MidiSafetyService
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -2832,6 +2833,7 @@ def handler_for(
     rap_response: RapResponseService | None = None,
     study: StudyRecorder | None = None,
     sessions: SessionAssets | None = None,
+    midi_safety: MidiSafetyService | None = None,
 ) -> type[BaseHTTPRequestHandler]:
     if sessions is None:
         audio_root = next((Path(service.root).parent for service in (elevenlabs, rap_response, rap_experiment, rap)
@@ -2844,6 +2846,9 @@ def handler_for(
         def do_GET(self) -> None:  # noqa: N802
             request_url = urlsplit(self.path)
             path = unquote(request_url.path)
+            if path.startswith("/api/midi-safety/"):
+                self._local_audio_request("GET", path, midi_safety, "MIDI safety")
+                return
             if path.startswith("/api/study/"):
                 self._local_audio_request("GET", path, study, "Study recording")
                 return
@@ -2990,6 +2995,7 @@ def handler_for(
                 "/index.html": "index.html",
                 "/styles.css": "styles.css",
                 "/app.js": "app.js",
+                "/midi-safety.js": "midi-safety.js",
                 "/study-recorder.js": "study-recorder.js",
                 "/study-recorder.css": "study-recorder.css",
                 "/workspace-shell.js": "workspace-shell.js",
@@ -3070,6 +3076,9 @@ def handler_for(
 
         def do_POST(self) -> None:  # noqa: N802
             path = unquote(urlsplit(self.path).path)
+            if path.startswith("/api/midi-safety/"):
+                self._local_audio_request("POST", path, midi_safety, "MIDI safety")
+                return
             if path.startswith("/api/sessions/"):
                 self._local_audio_request("POST", path, sessions, "Saved sessions")
                 return
@@ -3165,6 +3174,7 @@ def handler_for(
                 except ValueError:
                     length = 0
                 limit = (MAX_SESSION_ZIP if session_archive else MAX_CUSTOM_AUDIO_BYTES if audio_upload else
+                         2 * 1024 if label == "MIDI safety" else
                          4 * 1024 * 1024 if label == "Saved sessions" else
                          16 * 1024 if label == "Robot control" else
                          128 * 1024 if label in {"Rap", "Rap experiment"} else
@@ -3187,7 +3197,8 @@ def handler_for(
                     return
             try:
                 status, body = audio_service.dispatch(method, self.path, document)
-                if study is not None and audio_service is not study and audio_service is not sessions:
+                if (study is not None and audio_service is not study and audio_service is not sessions
+                        and audio_service is not midi_safety):
                     # The saved audio is referenced by the returned job. Avoid
                     # duplicating raw uploaded bytes into telemetry JSON.
                     observed_document = {"size_bytes": len(document)} if isinstance(document, bytes) else document
@@ -4045,6 +4056,7 @@ def main(argv: list[str] | None = None) -> int:
     signal.signal(signal.SIGINT, request_stop)
     signal.signal(signal.SIGTERM, request_stop)
 
+    midi_safety = MidiSafetyService(arguments.hydractl.resolve())
     try:
         catalog_payload = (
             json.dumps(
@@ -4066,9 +4078,11 @@ def main(argv: list[str] | None = None) -> int:
                 robot,
                 rap_response,
                 study,
+                midi_safety=midi_safety,
             ),
         )
     except OSError as error:
+        midi_safety.close()
         if broker is not None:
             broker.stop()
         service.stop()
@@ -4128,6 +4142,7 @@ def main(argv: list[str] | None = None) -> int:
         pass
     finally:
         server.server_close()
+        midi_safety.close()
         if broker is not None:
             broker.stop()
         service.stop()

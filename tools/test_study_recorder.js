@@ -12,6 +12,8 @@ function memoryQueue() {
   let serial = 0;
   const queue = { records: [], failWrites: false,
     async put(record) { if (this.failWrites) throw new Error("Quota exceeded"); const queue_id = ++serial; this.records.push(structuredClone({ ...record, queue_id })); return queue_id; },
+    async putMany(records) { if (this.failWrites) throw new Error("Quota exceeded"); return Promise.all(records.map(record => this.put(record))); },
+    async lastId() { return this.records.at(-1)?.queue_id || 0; },
     async first(count, excluded = new Set()) { return structuredClone(this.records.filter(row => !excluded.has(row.queue_id)).slice(0, count)); },
     async update(record) { this.records = this.records.map(row => row.queue_id === record.queue_id ? structuredClone(record) : row); },
     async rejections() { return structuredClone(this.records.filter(row => row.rejected)); },
@@ -36,7 +38,7 @@ function fixture(options = {}) {
     if (options.fetch) { const result = await options.fetch(url, init, value); if (result) return result; }
     return { ok: true, status: 200, json: async () => value };
   };
-  const recorder = createRecorder({ queue, sessionStorage, fetch, uuid, monotonic: () => 100, now: () => "2026-10-19T12:00:00.000Z", onState: value => states.push(value) });
+  const recorder = createRecorder({ queue, sessionStorage, fetch, uuid, monotonic: () => 100, now: () => "2026-10-19T12:00:00.000Z", onState: value => states.push(value), ...options.recorderOptions });
   return { queue, sessionStorage, calls, events, media, states, recorder, setOnline: value => { online = value; }, setAcknowledging: value => { acknowledging = value; } };
 }
 
@@ -45,20 +47,23 @@ function fakeIndexedDB() {
   const database = { records: [], next: 0, fail: false, transactions: [], createObjectStore() {}, close() {},
     transaction(name, mode) {
       const staged = structuredClone(database.records), tx = { mode, error: null };
+      let pendingRequests = 0;
       const store = {
         add(record) { const queue_id = ++database.next; staged.push(structuredClone({ ...record, queue_id })); return { result: queue_id }; },
         getAll(_query, count) { return { result: structuredClone(staged.slice(0, count)) }; },
         index() { return { getAll() { return { result: structuredClone(staged.filter(row => row.rejected)) }; } }; },
-        openCursor() {
+        openCursor(_query, direction) {
           const request = {}; let index = 0;
-          const advance = () => { const row = staged[index++]; request.result = row ? { key: row.queue_id, value: structuredClone(row), continue() { queueMicrotask(advance); } } : null; request.onsuccess(); };
-          queueMicrotask(advance); return request;
+          const rows = direction === "prev" ? staged.slice().reverse() : staged;
+          const advance = () => { pendingRequests--; const row = rows[index++]; request.result = row ? { key: row.queue_id, value: structuredClone(row), continue() { pendingRequests++; queueMicrotask(advance); } } : null; request.onsuccess?.(); };
+          pendingRequests++; queueMicrotask(advance); return request;
         },
         count() { return { result: staged.length }; },
         delete(id) { const index = staged.findIndex(row => row.queue_id === id); if (index !== -1) staged.splice(index, 1); }
       };
       tx.objectStore = () => store;
-      tx.commit = () => { if (database.fail) { tx.error = new Error("Transaction aborted"); tx.onabort(); } else { database.records = staged; tx.oncomplete(); } };
+      tx.abort = () => { tx.aborted = true; tx.error = new Error("Transaction aborted"); queueMicrotask(() => tx.onabort()); };
+      tx.commit = () => { if (tx.aborted) return; if (pendingRequests) { queueMicrotask(tx.commit); return; } if (database.fail) { tx.error = new Error("Transaction aborted"); tx.onabort(); } else { if (mode === "readwrite") database.records = staged; tx.oncomplete(); } };
       database.transactions.push(tx);
       return tx;
     }
@@ -69,6 +74,8 @@ function fakeIndexedDB() {
 async function main() {
   testMappingTracker();
   await testBrowserErrors();
+  await testSustainedCapture();
+  await testNotificationRate();
   {
     const h = fixture({ fetch: async (url, init) => url.endsWith("/media") && JSON.parse(init.body).metadata.role === "bad_capture" ?
       { ok: false, status: 413, json: async () => ({ error: "Capture exceeds limit" }) } : null });
@@ -264,6 +271,34 @@ async function main() {
     await tick(); indexedDB.database.transactions.at(-1).commit();
     assert.deepEqual((await selected).map(row => row.queue_id), [42], "IndexedDB cursor skips a rejected clip and reaches later events");
   }
+  {
+    const indexedDB = fakeIndexedDB(), queue = createIndexedDBQueue(indexedDB);
+    const records = Array.from({ length: 128 }, (_, sequence) => ({ kind: "event", data: { event_id: uuid(), sequence } }));
+    let committed = false;
+    const operation = queue.putMany(records).then(ids => { committed = true; return ids; });
+    await tick();
+    assert.equal(indexedDB.database.transactions.length, 1, "a complete batch uses one IndexedDB transaction");
+    assert.equal(committed, false);
+    assert.equal(indexedDB.database.records.length, 0);
+    indexedDB.database.transactions.at(-1).commit();
+    const ids = await operation;
+    assert.equal(ids.length, records.length);
+    assert.deepEqual(indexedDB.database.records.map(row => row.data), records.map(row => row.data));
+    indexedDB.database.fail = true;
+    const failed = queue.putMany(records);
+    await tick(); indexedDB.database.transactions.at(-1).commit();
+    await assert.rejects(failed, /aborted/);
+    assert.equal(indexedDB.database.records.length, records.length, "aborted batches cannot partly commit or lose the existing outbox");
+    indexedDB.database.fail = false;
+    const boundary = queue.lastId();
+    await tick(); indexedDB.database.transactions.at(-1).commit();
+    assert.equal(await boundary, ids.at(-1), "upload boundaries use the highest durable queue ID");
+    await assert.rejects(queue.putMany([records[0], { kind: "invalid", value() {} }]), /clone/);
+    const aborted = indexedDB.database.transactions.at(-1);
+    assert.equal(aborted.aborted, true, "a synchronous add failure aborts earlier additions in the same batch");
+    aborted.commit();
+    assert.equal(indexedDB.database.records.length, records.length);
+  }
   const html = fs.readFileSync(path.join(__dirname, "../dashboard/index.html"), "utf8");
   assert.match(html, /<details[^>]+id="study-panel"[^>]+\shidden[\s>]/, "researcher controls are hidden before JavaScript initializes");
   const observerHTML = fs.readFileSync(path.join(__dirname, "../dashboard/observer/index.html"), "utf8");
@@ -274,6 +309,91 @@ async function main() {
   await testBrowserInteractions({ pathname: "/observer/" });
   await testEmbeddedObserver();
   console.log("Study recorder: durable retry, acknowledgement, audio, sessions, background capture, researcher controls and redaction tests passed.");
+}
+
+async function testSustainedCapture() {
+  const queue = memoryQueue(), commits = [], batchSizes = [], write = queue.putMany.bind(queue);
+  queue.putMany = records => new Promise((resolve, reject) => {
+    batchSizes.push(records.length);
+    commits.push(async () => { try { resolve(await write(records)); } catch (error) { reject(error); } });
+  });
+  const h = fixture({ queue }), expected = [];
+  function produce(count) {
+    for (let index = 0; index < count; index++) {
+      const payload = { input_sequence: expected.length, samples: Array.from({ length: 32 }, (_, value) => value / 31) };
+      expected.push(payload); h.recorder.emit("input.frame", payload);
+    }
+  }
+  produce(256);
+  let finished = false;
+  const flushing = h.recorder.flush().then(() => { finished = true; });
+  await tick();
+  // Input never stops while this flush is running. More records also arrive
+  // during upload transactions, beyond the captured durable queue boundary.
+  for (let step = 0; step < 30 && !finished; step++) {
+    produce(128);
+    assert.ok(commits.length, "the shared drain continues committing during live input");
+    await commits.shift()(); await tick();
+  }
+  assert.ok(h.calls.some(call => call.url.endsWith("/events")), "continuous input cannot starve uploads waiting for an empty memory queue");
+  assert.equal(finished, true, "a flush finishes at a finite boundary while new events keep arriving");
+  await flushing;
+  const persisted = h.recorder.whenPersisted();
+  for (let step = 0; h.recorder.getState().memory_pending && step < 30; step++) {
+    assert.ok(commits.length); await commits.shift()(); await tick();
+  }
+  await persisted; await h.recorder.flush();
+  const actual = h.events.filter(event => event.type === "input.frame");
+  assert.deepEqual(actual.map(event => event.payload), expected, "every full raw frame reaches the server exactly in input order");
+  assert.equal(new Set(actual.map(event => event.event_id)).size, expected.length);
+  assert.equal(h.recorder.getState().pending, 0);
+  assert.equal(h.recorder.getState().memory_pending, 0);
+  assert.ok(batchSizes.every(count => count <= 128), "transactions have bounded work");
+  assert.ok(batchSizes.length < expected.length / 50, "bursts share transactions instead of allocating a write task per event");
+
+  queue.failWrites = true;
+  produce(256);
+  const failedPersist = h.recorder.whenPersisted(); await tick();
+  await commits.shift()(); await failedPersist;
+  assert.equal(h.recorder.getState().memory_pending, 256, "the complete failed batch and following events remain in memory");
+  assert.match(h.recorder.getState().storage_error, /Quota/);
+  const before = batchSizes.length;
+  produce(128); await tick();
+  assert.equal(batchSizes.length, before, "ongoing input does not create a retry storm after storage failure");
+  queue.failWrites = false;
+  const recovering = h.recorder.flush(); await tick();
+  for (let step = 0; h.recorder.getState().memory_pending && step < 10; step++) {
+    await commits.shift()(); await tick();
+  }
+  await recovering;
+  assert.deepEqual(h.events.filter(event => event.type === "input.frame").map(event => event.payload), expected, "recovery preserves failed records and later input without duplication");
+  assert.equal(h.recorder.getState().storage_error, "");
+  assert.equal(h.recorder.getState().pending, 0);
+}
+
+async function testNotificationRate() {
+  let clock = 0, timerId = 0;
+  const timers = new Map(), notifications = [];
+  const h = fixture({ recorderOptions: { monotonic: () => clock,
+    setTimeout(fn, delay) { timers.set(++timerId, { fn, due: clock + delay }); return timerId; },
+    onState(state) { notifications.push({ time: clock, state }); } } });
+  function advance(time) {
+    for (const [id, timer] of timers) if (timer.due <= time) {
+      clock = timer.due; timers.delete(id); timer.fn();
+    }
+    clock = time;
+  }
+  for (let index = 0; index < 500; index++) {
+    advance(index * 2); h.recorder.emit("input.frame", { value: index });
+    await tick();
+  }
+  await h.recorder.whenPersisted(); await h.recorder.flush(); advance(1250);
+  assert.ok(notifications.length <= 6, "500 Hz capture produces at most four state updates per second plus endpoints");
+  for (let index = 1; index < notifications.length; index++) {
+    assert.ok(notifications[index].time - notifications[index - 1].time >= 250, "state rendering is separated by at least 250 ms");
+  }
+  assert.equal(notifications.at(-1).state.pending, 0, "the trailing notification publishes the latest committed state");
+  assert.equal(h.events.filter(event => event.type === "input.frame").length, 500, "UI throttling never samples the captured stream");
 }
 
 function testMappingTracker() {
@@ -443,6 +563,12 @@ async function testBrowserErrors() {
 }
 
 async function testBrowserInteractions({ query = "", researcher = false, pathname = "/" } = {}) {
+  const uiTimers = new Map(); let timerId = 0;
+  const renderPending = () => {
+    for (const [id, timer] of uiTimers) if (timer.delay > 100 && timer.delay <= 250) {
+      uiTimers.delete(id); timer.fn();
+    }
+  };
   const listeners = new Map(), windowListeners = new Map(), elements = new Map(), requests = [], sessionStorage = storage(), localStorage = storage();
   let online = true, backendError = "", persistenceRequests = 0, persistenceChecks = 0;
   const backup = { enabled: true, destination: "/local-study/backups/browser-laptop", state: "idle", last_completed_at: "2026-10-19T12:00:00Z", last_error: "" };
@@ -471,7 +597,8 @@ async function testBrowserInteractions({ query = "", researcher = false, pathnam
       persist() { persistenceRequests++; return Promise.resolve(true); }
     } }, innerWidth: 1280, innerHeight: 800,
     location: { href: `http://localhost:8790${pathname}${query}#synth-mixer`, origin: "http://localhost:8790", pathname, hash: "#synth-mixer" },
-    history: { pushState() {}, replaceState() {} }, setTimeout: () => 1, clearTimeout() {}, setInterval() {},
+    history: { pushState() {}, replaceState() {} },
+    setTimeout(fn, delay) { uiTimers.set(++timerId, { fn, delay }); return timerId; }, clearTimeout(id) { uiTimers.delete(id); }, setInterval() {},
     addEventListener: (type, fn) => add(windowListeners, type, fn),
     async fetch(url, init = {}) {
       const body = init.body ? JSON.parse(init.body) : null; requests.push({ url, init, body });
@@ -540,11 +667,13 @@ async function testBrowserInteractions({ query = "", researcher = false, pathnam
   assert.deepEqual(snapshot.payload.settings, { "hydra.settings": { value: 2, transport_token: "track-one" } });
   assert.ok(!JSON.stringify(events).includes("private-key"));
   assert.equal(browser.HydraStudy.getState().pending, 0, "capture is acknowledged in the background with or without visible controls");
+  renderPending();
   assert.equal(elements.get("study-status").textContent, "Saved locally");
   assert.match(elements.get("study-backup-status").textContent, /^Backup written /);
   assert.equal(elements.get("study-backup-path").textContent, backup.destination);
   backup.last_error = "Backup destination is full"; backup.state = "error";
   await browser.HydraStudy.status();
+  renderPending();
   assert.equal(browser.HydraStudy.getState().backend_health_error, "", "backup failure is independent of local recording health");
   assert.equal(elements.get("study-status").textContent, "Saved locally · backup error");
   assert.match(elements.get("study-backup-warning").textContent, /Backup destination is full/);
@@ -552,12 +681,14 @@ async function testBrowserInteractions({ query = "", researcher = false, pathnam
   assert.equal(elements.get("study-panel").hidden, !researcher, "backup failure never interrupts the participant interface");
   backup.last_error = ""; backup.state = "writing";
   await browser.HydraStudy.status();
+  renderPending();
   assert.match(elements.get("study-backup-status").textContent, /^Writing backup/);
   assert.equal(elements.get("study-backup-warning").hidden, true);
   backup.state = "idle"; await browser.HydraStudy.status();
   online = false;
   text.value = "offline edit"; dispatch("input", text);
   await browser.HydraStudy.whenPersisted(); await browser.HydraStudy.flush();
+  renderPending();
   assert.ok(browser.HydraStudy.getState().pending > 0);
   assert.equal(elements.get("study-warning").hidden, false, "pending failure details remain available inside researcher controls");
   assert.match(elements.get("study-warning").textContent, /Offline/);
@@ -565,6 +696,7 @@ async function testBrowserInteractions({ query = "", researcher = false, pathnam
   online = true; await browser.HydraStudy.flush();
   assert.equal(browser.HydraStudy.getState().pending, 0);
   backendError = "Disk full"; await browser.HydraStudy.status();
+  renderPending();
   assert.equal(elements.get("study-status").textContent, "Recording error");
   assert.equal(elements.get("study-warning").textContent, "Disk full");
   assert.equal(elements.get("study-panel").hidden, !researcher);

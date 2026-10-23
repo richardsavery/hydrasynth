@@ -124,8 +124,8 @@ download caches and generated audio.
 Each laptop should create its own study directory and identity. Do not copy
 `var/` wholesale or copy another laptop's study database. New installs use
 `~/.local/share/keirzo/study-data` by default (or `$XDG_DATA_HOME`); an explicit
-`--study-dir` overrides this. The current development computer uses the
-explicit `var/study-data` directory. Transfer robot calibration only for the
+`--study-dir` overrides this. Keep the existing location when updating; no
+storage override is needed for the default. Transfer robot calibration only for the
 same physical robot. Browser microphone/MIDI permission is still a first-use
 step on each laptop.
 
@@ -169,7 +169,7 @@ so stopping the server before updating is a manual step.
 ## Run without hardware
 
 ```sh
-make dashboard-sonify DASHBOARD_ARGS='--study-dir var/study-data'
+make dashboard-sonify
 ```
 
 Open <http://127.0.0.1:8790/#synth-mixer>. Browser audio, the three bundled
@@ -194,7 +194,7 @@ After connecting the Hydrasynth:
 
 ```sh
 ./build/hydractl list
-make dashboard DASHBOARD_ARGS='--study-dir var/study-data'
+make dashboard
 ```
 
 This runs the native `hydractl serve` process, input monitoring and the local
@@ -214,6 +214,30 @@ analogue output to headphones, speakers or an audio interface separately.
 The server does not silently switch to another device after a disconnect.
 Stop/restart it after reconnecting the intended synth. Browser Web MIDI has
 its own connection/reconnection behavior and still requires browser permission.
+
+## If the browser freezes or turns white
+
+After updating, restart the dashboard terminal process and refresh the browser.
+Keep that process running, including when using `make dashboard-sonify` with
+**MIDI device** selected. Hydrasynth playback needs the updated backend's native
+MIDI watchdog; refreshing the page alone does not update an older server.
+
+Each played note queues a timestamped MIDI note-off when it starts. The browser
+also checks in with the backend every 500 ms during playback. After 2.5 seconds
+without a check-in, the backend uses ALSA to send sustain-off, all-notes-off and
+all-sound-off to the selected Hydrasynth and channel. This works independently
+of the page's JavaScript while the backend and MIDI connection remain available.
+Reload the page after a freeze and press Play to restart playback.
+After a reload or starting playback in another dashboard tab, you may be asked
+to wait up to eight seconds for the previous page's queued note-offs to finish.
+Wait for the stated time, then press Play again. Stop/Play in the same page does
+not require this handover wait.
+
+Live study records now save in batches, with bounded upload passes and fewer
+status redraws. Every raw frame is retained; batching does not sample or discard
+input. Existing recordings and the default study directory are preserved.
+These changes address recording backlog and hanging notes; they do not establish
+that every possible Chrome crash has been eliminated.
 
 ## Audio routing
 

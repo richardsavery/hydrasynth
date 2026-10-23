@@ -110,6 +110,7 @@ const state = {
   sessionReloading: false,
   midiNoteTimers: new Map(),
   midiSustainOutputs: new Set(),
+  midiNotes: null, midiGuard: null,
   activityPending: false,
   activityQueued: null,
   saved: loadSavedSettings()
@@ -1510,6 +1511,11 @@ async function togglePlayback() {
     const loaded = mixer || state.sourceMode === "live" ? [] : state.output === "drums"
       ? await loadDrumSeries() : await loadMappingSet(state.mappings);
     if (generation !== state.playbackGeneration) return;
+    if (state.output === "midi") {
+      const armed = await midiSafetyGuard().arm(state.midiOutput, MIDI_CHANNEL + 1);
+      if (generation !== state.playbackGeneration) return;
+      if (!armed) throw new Error("MIDI safety connection could not start. Press Play to retry.");
+    }
     mixer?.reset();
     if (state.output === "drums") {
       if (state.sourceMode !== "live") acceptDrumSeries(loaded);
@@ -1605,14 +1611,18 @@ async function runPlaybackTick() {
         if (state.output === "midi" && (state.patchChanging || state.currentPatch !== notePatch)) return;
         if ((activeSynthMixer() || state.sourceMode === "live") && !controlsAt(0).valid) { silenceStaleInput(); return; }
         try {
+          const emittedNotes = [];
           notes.forEach((note) => {
-            if (state.output === "midi") playMidiNote(note, hit.velocity, hit.duration);
-            else playAudioNote(note, hit.velocity, hit.duration, controls.cc, 1 / Math.sqrt(notes.length));
+            if (state.output === "midi") {
+              if (playMidiNote(note, hit.velocity, hit.duration) === false) return;
+            } else playAudioNote(note, hit.velocity, hit.duration, controls.cc, 1 / Math.sqrt(notes.length));
+            emittedNotes.push(note);
           });
+          if (!emittedNotes.length) return;
           const beatClock = globalThis.HydraBeatClock.snapshot("synth");
           globalThis.HydraRobotDrums?.recordNote({ beat: beatClock.beat, token: beatClock.token,
-            notes, velocity: hit.velocity });
-          publishSignalLabActivity({ progress, notes: notes.map((number) => ({ number, velocity: hit.velocity, duration_ms: hit.duration })) });
+            notes: emittedNotes, velocity: hit.velocity });
+          publishSignalLabActivity({ progress, notes: emittedNotes.map((number) => ({ number, velocity: hit.velocity, duration_ms: hit.duration })) });
         } catch (error) {
           stopPlayback();
           state.playbackError = error.message || "The audio or MIDI output became unavailable";
@@ -1877,6 +1887,7 @@ function startParameterPump() {
       const controls = activeSynthMixer() || state.sourceMode === "live" ? controlsAt(0) : null;
       if (controls && !controls.valid) silenceStaleInput();
       else if (state.output === "midi" && state.midiOutput && !state.patchChanging) {
+        midiSafetyGuard().assertReady(state.midiOutput);
         const settings = controls || readPlaybackControls();
         state.midiPacer.update(controls ? controls.parameters : state.currentParameterCommands);
         state.parameterCarry += settings.midiRate / 50;
@@ -1960,7 +1971,7 @@ async function flushSignalLabActivity() {
   }
 }
 
-function stopPlayback() {
+function stopPlayback({ releaseMidi = true } = {}) {
   const wasPlaying = state.playing || state.preparing;
   const mappingRevision = wasPlaying ? mappingPlaybackStudy(false, "stopped") : null;
   if (wasPlaying) recordStudyEvent("synth.transport.stopped", { generation: state.playbackGeneration,
@@ -1985,7 +1996,10 @@ function stopPlayback() {
   state.patchTimers.forEach((resolve, timer) => { window.clearTimeout(timer); resolve(false); });
   state.patchTimers.clear();
   if (dom["apply-patch"]) dom["apply-patch"].disabled = false;
-  stopActiveMidiNotes();
+  stopActiveMidiNotes({ release: releaseMidi });
+  state.midiGuard?.stop().catch((error) => {
+    recordStudyEvent("midi.safety_disarm_failed", { message: error.message });
+  });
   stopAudioVoices();
   state.drumEngine?.stop();
   state.drumMotion?.reset();
@@ -2317,25 +2331,39 @@ function updateMidiStatus() {
   renderPlaybackAvailability();
 }
 
+function midiSafetyGuard() {
+  if (!globalThis.HydraMidiSafety) throw new Error("MIDI safety did not load. Reload the dashboard before playing.");
+  state.midiGuard ||= globalThis.HydraMidiSafety.createGuard({
+    now: () => performance.now(), schedule: (fn, ms) => window.setTimeout(fn, ms), cancel: id => window.clearTimeout(id),
+    onFailure(error) {
+      // A stale lease can mean another tab now owns the instrument. Its native
+      // guard has already released our notes; do not panic the new owner.
+      stopPlayback({ releaseMidi: error.status !== 409 });
+      state.playbackError = error.message || "MIDI safety connection was lost.";
+      recordStudyEvent("midi.safety_stopped", { message: state.playbackError });
+      showToast(state.playbackError);
+    }
+  });
+  return state.midiGuard;
+}
+
+function midiNoteScheduler() {
+  if (!globalThis.HydraMidiSafety) throw new Error("MIDI safety did not load. Reload the dashboard before playing.");
+  state.midiNotes ||= globalThis.HydraMidiSafety.createNotes({ active: state.midiNoteTimers,
+    sustain: state.midiSustainOutputs, channel: MIDI_CHANNEL, now: () => performance.now(),
+    schedule: (fn, ms) => window.setTimeout(fn, ms), cancel: id => window.clearTimeout(id) });
+  return state.midiNotes;
+}
+
 function playMidiNote(note, velocity, durationMs) {
-  const output = state.midiOutput;
-  if (!output) return;
-  const existing = state.midiNoteTimers.get(note);
-  if (existing) {
-    window.clearTimeout(existing.timer);
-    existing.output.send([0x80 | MIDI_CHANNEL, note, 0]);
-  }
-  output.send([0x90 | MIDI_CHANNEL, note, velocity]);
-  const timer = window.setTimeout(() => {
-    state.midiNoteTimers.delete(note);
-    try { output.send([0x80 | MIDI_CHANNEL, note, 0]); }
-    catch (error) { stopPlayback(); showToast(error.message || "MIDI output disconnected"); }
-  }, durationMs);
-  state.midiNoteTimers.set(note, { timer, output });
+  if (!state.midiOutput) return false;
+  midiSafetyGuard().assertReady(state.midiOutput);
+  return midiNoteScheduler().play(state.midiOutput, note, velocity, durationMs);
 }
 
 function sendMidiCc(ccValues) {
   if (!state.midiOutput) return;
+  midiSafetyGuard().assertReady(state.midiOutput);
   ccValues.forEach((value, cc) => state.midiOutput.send([0xB0 | MIDI_CHANNEL, cc, value]));
   if (ccValues.has(64)) {
     if (ccValues.get(64) > 0) state.midiSustainOutputs.add(state.midiOutput);
@@ -2343,26 +2371,15 @@ function sendMidiCc(ccValues) {
   }
 }
 
-function stopActiveMidiNotes() {
-  const outputs = new Set([...state.midiNoteTimers.values()].map((item) => item.output));
-  for (const output of state.midiSustainOutputs) outputs.add(output);
-  for (const output of outputs) {
-    try { output.send([0xB0 | MIDI_CHANNEL, 64, 0]); }
-    catch (_error) { /* Disconnected outputs cannot sustain new notes. */ }
-  }
-  state.midiSustainOutputs.clear();
-  state.midiNoteTimers.forEach(({ timer, output }, note) => {
-    window.clearTimeout(timer);
-    try { output.send([0x80 | MIDI_CHANNEL, note, 0]); }
-    catch (_error) { /* The original output may already have disconnected. */ }
-  });
-  state.midiNoteTimers.clear();
+function stopActiveMidiNotes(options) {
+  if (state.midiNotes || state.midiNoteTimers.size || state.midiSustainOutputs.size) midiNoteScheduler().stop(options);
 }
 
 function panicMidi() {
   stopActiveMidiNotes();
-  state.midiOutput?.send([0xB0 | MIDI_CHANNEL, 64, 0]);
-  state.midiOutput?.send([0xB0 | MIDI_CHANNEL, 123, 0]);
+  for (const cc of [64, 123, 120]) {
+    try { state.midiOutput?.send([0xB0 | MIDI_CHANNEL, cc, 0]); } catch (_) {}
+  }
 }
 
 function setOutput(output) {

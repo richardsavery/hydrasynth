@@ -5,7 +5,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const vm = require("node:vm");
 const timers = new Map();
-let timerId = 0;
+let timerId = 0, now = 0;
 const element = (value = "") => ({ value, checked: false, hidden: false, disabled: false,
   children: [], classList: { add() {}, remove() {}, toggle() {} }, setAttribute() {},
   parentElement: { classList: { toggle() {} } } });
@@ -14,10 +14,10 @@ const context = vm.createContext({
   window: { setTimeout(callback, delay) { const id = ++timerId; timers.set(id, { callback, delay }); return id; },
     clearTimeout(id) { timers.delete(id); } },
   localStorage: { getItem() { return null; }, setItem() {} },
-  performance: { now() { return 0; } }, Intl, URLSearchParams,
+  performance: { now() { return now; } }, Intl, URLSearchParams,
   fetch: async () => ({ ok: true }),
 });
-for (const file of ["drums.js", "sonification.js", "parameters.js", "live.js", "drum-workspace.js", "app.js"]) {
+for (const file of ["drums.js", "sonification.js", "parameters.js", "live.js", "drum-workspace.js", "midi-safety.js", "app.js"]) {
   vm.runInContext(fs.readFileSync(path.join(__dirname, "../dashboard", file), "utf8"), context);
 }
 vm.runInContext("globalThis.player = {state, dom, controlsAt, runPlaybackTick, stopPlayback, playMidiNote, stopActiveMidiNotes, togglePlayback, Music, CONTROL_IDS, sendMidiPatch, selectMidiPatch, changeSoundAtBoundary, loadMappingSourceSeries, learnedMappingRange, resetMappingSourceRange, usableFixedRange};", context);
@@ -61,15 +61,17 @@ async function main() {
   state.sourceMode = "recording";
 
   const messages = [];
+  state.midiGuard = { assertReady() {}, stop: async () => {} };
   const first = { send(message) { messages.push(["first", ...message]); } };
   const second = { send(message) { messages.push(["second", ...message]); } };
   state.midiOutput = first;
   context.player.playMidiNote(60, 90, 1000);
   state.midiOutput = second;
   context.player.stopActiveMidiNotes();
-  assert.deepEqual(messages, [["first", 0x90, 60, 90], ["first", 0xB0, 64, 0], ["first", 0x80, 60, 0]],
+  assert.deepEqual(messages, [["first", 0x90, 60, 90], ["first", 0x80, 60, 0], ["first", 0xB0, 64, 0], ["first", 0x80, 60, 0]],
     "Stop releases sustain and notes on the original MIDI output");
   assert.equal(timers.size, 0);
+  now = 1001;
 
   state.midiOutput = first;
   state.output = "midi";

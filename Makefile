@@ -66,10 +66,10 @@ endif
 dashboard: $(MIDI_TARGET)
 	$(PYTHON) tools/hydra_dashboard.py $(DASHBOARD_ARGS)
 
-dashboard-demo:
+dashboard-demo: $(MIDI_TARGET)
 	$(PYTHON) tools/hydra_dashboard.py --demo $(DASHBOARD_ARGS)
 
-dashboard-sonify:
+dashboard-sonify: $(MIDI_TARGET)
 	$(PYTHON) tools/hydra_dashboard.py --demo $(if $(RECORDINGS_DIR),--recordings-dir "$(RECORDINGS_DIR)",) $(DASHBOARD_ARGS)
 
 dashboard-command:
@@ -77,6 +77,7 @@ dashboard-command:
 
 dashboard-test:
 	$(PYTHON) -B tools/hydra_dashboard.py --self-test
+	$(PYTHON) -B tools/test_midi_safety.py
 	$(PYTHON) -B tools/test_study_recording.py
 	$(PYTHON) -B tools/test_study_backup.py
 	$(PYTHON) -B tools/test_study_merge_cli.py
@@ -181,6 +182,7 @@ dashboard-test:
 	$(NODE) tools/test_workspace_integration.js
 	$(NODE) tools/test_workspace_startup.js
 	$(NODE) tools/test_midi_connection.js
+	$(NODE) tools/test_midi_safety.js
 	$(NODE) --check dashboard/observer/app.js
 	$(NODE) tools/test_observer_semantics.js
 

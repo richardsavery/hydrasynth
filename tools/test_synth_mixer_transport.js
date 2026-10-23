@@ -9,7 +9,7 @@ const vm = require("node:vm");
 // controls and live values. No browser audio, MIDI hardware, or network needed.
 const timers = new Map(), writes = new Map(), notes = [], effects = [], voiceUpdates = [];
 const evaluationOptions = [];
-let timerId = 0, resets = 0, stops = 0, readyReason = "", valid = true;
+let timerId = 0, now = 0, resets = 0, stops = 0, readyReason = "", valid = true;
 let values = [{ destination: "pitch", value: 72 }, { destination: "velocity", value: 101 },
   { destination: "cutoff", value: 40 }];
 const settings = { tempo: 132, stepsPerBeat: 2, previewVoice: "warm", waveType: "sawtooth",
@@ -25,7 +25,7 @@ const context = vm.createContext({
     clearTimeout(id) { timers.delete(id); }
   },
   localStorage: { getItem() { return null; }, setItem(key, value) { writes.set(key, value); } },
-  performance: { now: () => 0 },
+  performance: { now: () => now },
   fetch: async () => { throw new Error("Synth mixer transport must not fetch original mappings"); },
   HydraSynthMixer: {
     getControls: () => settings, evaluate: (output, options) => {
@@ -37,7 +37,7 @@ const context = vm.createContext({
   recordEffects: (cc) => effects.push(new Map(cc)),
   recordStop: () => { stops++; }
 });
-for (const file of ["drums.js", "sonification.js", "parameters.js", "live.js", "drum-workspace.js", "app.js"]) {
+for (const file of ["drums.js", "sonification.js", "parameters.js", "live.js", "drum-workspace.js", "midi-safety.js", "app.js"]) {
   vm.runInContext(fs.readFileSync(path.join(__dirname, "../dashboard", file), "utf8"), context, { filename: file });
 }
 context.catalog = JSON.parse(fs.readFileSync(path.join(__dirname, "../data/hydrasynth_parameters.json")));
@@ -47,6 +47,7 @@ vm.runInContext(`
     effectivePreviewVoice, togglePlayback, stopPlayback, runPlaybackTick, startParameterPump,
     playbackUnavailableReason, saveSettings, selectSonificationWorkspace, changeSoundAtBoundary, selectMidiPatch };
   ensureAudioEngine = async () => {};
+  midiSafetyGuard = () => ({ arm: async () => true, assertReady() {} });
   playAudioNote = (...args) => recordNote(...args);
   updateAudioEffects = cc => recordEffects(cc);
   stopAudioVoices = () => { recordStop(); state.activeVoices.clear(); };
@@ -73,6 +74,7 @@ const fire = async (id) => {
   const timer = timers.get(id);
   assert.ok(timer, `Expected timer ${id}`);
   timers.delete(id);
+  now += timer.delay;
   await timer.callback();
   await Promise.resolve();
 };

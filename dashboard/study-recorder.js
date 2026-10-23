@@ -129,13 +129,23 @@
       const db = await open();
       return new Promise((resolve, reject) => {
         const tx = db.transaction("outbox", mode);
-        const request = operation(tx.objectStore("outbox"));
+        let request;
         tx.oncomplete = () => resolve(request?.result);
         tx.onerror = tx.onabort = () => reject(tx.error || request?.error || new Error("Study storage transaction failed"));
+        try { request = operation(tx.objectStore("outbox")); }
+        catch (error) { tx.abort(); reject(error); }
       });
     }
     return {
       put: record => transaction("readwrite", store => store.add(record)),
+      putMany: records => transaction("readwrite", store => {
+        const requests = records.map(record => store.add(record));
+        return { get result() { return requests.map(request => request.result); } };
+      }),
+      lastId: () => transaction("readonly", store => {
+        const request = store.openCursor(null, "prev");
+        return { get result() { return request.result?.key || 0; } };
+      }),
       first: (limit = 40, excluded = new Set()) => transaction("readonly", store => {
         if (!excluded.size) return store.getAll(undefined, limit);
         const selected = [], cursor = store.openCursor();
@@ -159,7 +169,10 @@
     const now = options.now || (() => new Date().toISOString());
     const monotonic = options.monotonic || (() => performance.now());
     const started = monotonic(), clientId = uuid();
-    let session, sequence = 0, writeChain = Promise.resolve(), activeFlush = null, pendingMemory = [];
+    let session, sequence = 0, activeDrain = null, activeFlush = null, pendingMemory = [];
+    let acceptedWrites = 0, committedWrites = 0, flushBoundary = 0, persistenceWaiters = [];
+    let notificationTimer = null, lastNotification = -Infinity;
+    const schedule = options.setTimeout || setTimeout;
     let serverAvailable = false, storageError = "", networkError = "", backendHealthError = "", inFlight = false, pendingCount = 0, deviceId = null, backup = null;
     const rejectedRecords = new Map(), rejectedUntil = new Map();
     try { session = JSON.parse(options.sessionStorage?.getItem(SESSION_KEY) || "null"); } catch (_) { /* A new session is safer than invalid context. */ }
@@ -175,19 +188,59 @@
         saving: inFlight, server_available: serverAvailable, storage_error: storageError, network_error: networkError, backend_health_error: backendHealthError,
         rejected_count: rejectedRecords.size, rejected_error: rejectedRecords.values().next().value || "", backup };
     }
-    function notify() { options.onState?.(state()); }
+    function notify() {
+      if (!options.onState || notificationTimer !== null) return;
+      const delay = Math.max(0, 250 - (monotonic() - lastNotification));
+      const publish = () => { notificationTimer = null; lastNotification = monotonic(); options.onState(state()); };
+      if (!delay) publish();
+      else { notificationTimer = schedule(publish, delay); notificationTimer?.unref?.(); }
+    }
+    function settlePersistence(error) {
+      const remaining = [];
+      for (const waiter of persistenceWaiters) {
+        if (error) waiter.reject(error);
+        else if (waiter.target <= committedWrites) waiter.resolve();
+        else remaining.push(waiter);
+      }
+      persistenceWaiters = remaining;
+    }
+    function drain() {
+      if (activeDrain) return;
+      // One task owns the drain, regardless of the incoming event rate. IndexedDB
+      // commits whole batches; a failed batch stays in memory in its original order.
+      activeDrain = Promise.resolve().then(async () => {
+        let failure;
+        try {
+          await ready;
+          while (pendingMemory.length) {
+            const batch = pendingMemory.slice(0, 128);
+            await queue.putMany(batch);
+            pendingMemory.splice(0, batch.length); pendingCount += batch.length;
+            committedWrites += batch.length; storageError = "";
+            settlePersistence(); notify();
+          }
+        } catch (error) {
+          storageError = String(error.message || error); failure = error;
+        } finally {
+          activeDrain = null;
+          if (failure) settlePersistence(failure);
+          notify();
+          // An arrival after the last empty check must not get stranded. Storage
+          // failures retry on flush, not for every input event.
+          if (pendingMemory.length && !storageError) drain();
+        }
+      });
+    }
     function persist(record) {
       // Keep the original record in memory until the transaction has committed.
-      pendingMemory.push(record); notify();
-      const operation = writeChain.then(async () => {
-        while (pendingMemory.length) {
-          const first = pendingMemory[0];
-          await queue.put(first);
-          pendingMemory.shift(); pendingCount++;
-        }
-        storageError = ""; notify();
-      }).catch(error => { storageError = String(error.message || error); notify(); throw error; });
-      writeChain = operation.catch(() => {});
+      pendingMemory.push(record); acceptedWrites++; notify();
+      if (!storageError) drain();
+      return acceptedWrites;
+    }
+    function persistedThrough(target = acceptedWrites) {
+      if (target <= committedWrites) return Promise.resolve();
+      const operation = new Promise((resolve, reject) => persistenceWaiters.push({ target, resolve, reject }));
+      drain();
       return operation;
     }
     function emit(type, payload = {}) {
@@ -210,9 +263,9 @@
           const chunk = { ...event, event_id: uuid(), sequence: ++sequence, type: "recording.event_chunk",
             payload: { logical_event_id: event.event_id, original_type: event.type, chunk_index: index, chunk_count: fragments.length,
               original_byte_length: byteLength, json_fragment: fragments[index] } };
-          persist({ kind: "event", data: chunk }).catch(() => {});
+          persist({ kind: "event", data: chunk });
         }
-      } else persist({ kind: "event", data: event }).catch(() => {});
+      } else persist({ kind: "event", data: event });
       return event.event_id;
     }
     async function storeAudio(audio, metadata = {}) {
@@ -221,7 +274,7 @@
       const blob = audio instanceof Blob ? audio : new Blob([audio], { type: metadata.mime_type || metadata.content_type || "audio/wav" });
       const details = clean({ ...metadata, ...context, mime_type: metadata.mime_type || metadata.content_type || blob.type || "audio/wav",
         byte_length: blob.size, occurred_at: now() });
-      await persist({ kind: "media", data: { media_id: mediaId, session_id: context.session_id, metadata: details }, audio: blob });
+      await persistedThrough(persist({ kind: "media", data: { media_id: mediaId, session_id: context.session_id, metadata: details }, audio: blob }));
       emit("recording.audio_queued", { ...context, media_id: mediaId, metadata: details });
       void flush();
       return mediaId;
@@ -231,7 +284,7 @@
       if (code.length > 100 || /[\u0000-\u001f]/.test(code)) throw new Error("Use a participant code of at most 100 characters");
       emit("session.end", { reason: "new_participant" });
       session = { session_id: uuid(), participant_code: code };
-      persist({ kind: "session", data: { ...session } }).catch(() => {});
+      persist({ kind: "session", data: { ...session } });
       rememberSession();
       emit("session.start", { participant_code: code });
       notify(); void flush();
@@ -266,22 +319,22 @@
       return response.json();
     }
     async function flush(options = {}) {
-      if (activeFlush) return activeFlush;
+      if (activeFlush) {
+        // A caller that queued more data during a previous pass still gets a
+        // pass covering its own records, without duplicate concurrent uploads.
+        return acceptedWrites > flushBoundary ? activeFlush.then(() => flush(options)) : activeFlush;
+      }
+      flushBoundary = acceptedWrites;
       activeFlush = (async () => {
         inFlight = true; notify();
         try {
-          await writeChain;
-          if (pendingMemory.length) {
-            const operation = writeChain.then(async () => {
-              while (pendingMemory.length) { await queue.put(pendingMemory[0]); pendingMemory.shift(); pendingCount++; }
-              storageError = "";
-            });
-            writeChain = operation.catch(error => { storageError = String(error.message || error); });
-            await operation;
-          }
+          // New input cannot extend this wait indefinitely. Also bound the upload
+          // pass to a durable queue ID, so a busy stream cannot monopolize a flush.
+          await persistedThrough(flushBoundary);
+          const lastId = await queue.lastId();
           const rejectedThisFlush = new Set([...rejectedUntil].filter(([, until]) => until > Date.now()).map(([id]) => id));
           while (true) {
-            const rows = await queue.first(40, rejectedThisFlush);
+            const rows = (await queue.first(40, rejectedThisFlush)).filter(row => row.queue_id <= lastId);
             if (!rows.length) break;
             const first = rows[0];
             let acknowledged = [];
@@ -323,9 +376,12 @@
             } else { throw new Error("Unknown study outbox record; retained for recovery"); }
             await queue.remove(acknowledged);
             acknowledged.forEach(id => { rejectedRecords.delete(id); rejectedUntil.delete(id); });
-            pendingCount = await queue.count(); serverAvailable = true; networkError = ""; notify();
+            pendingCount = Math.max(0, pendingCount - acknowledged.length); serverAvailable = true; networkError = ""; notify();
             if (options.keepalive) break;
           }
+          // Other tabs share this outbox. Reconcile their writes/removals once
+          // per pass, rather than doing a full count after every upload batch.
+          pendingCount = await queue.count();
         } catch (error) {
           serverAvailable = false; networkError = String(error.message || error);
         } finally { inFlight = false; activeFlush = null; notify(); }
@@ -338,13 +394,12 @@
       pendingCount = count; rejected.forEach(row => { rejectedRecords.set(row.queue_id, row.rejected_error); rejectedUntil.set(row.queue_id, row.retry_after || 0); }); notify();
     }).catch(error => { storageError = String(error.message || error); notify(); });
     // Count old records before appending, so pending counts remain accurate after a reload.
-    writeChain = ready;
-    persist({ kind: "session", data: { ...session } }).catch(() => {});
+    persist({ kind: "session", data: { ...session } });
     rememberSession();
     emit("client.open", { user_agent: options.userAgent || "", page: options.page || "", participant_code: session.participant_code || "" });
     return { emit, storeAudio, newSession, flush, status, ready,
       getContext: () => ({ session_id: session.session_id, client_id: clientId }), getState: state,
-      whenPersisted: () => writeChain };
+      whenPersisted: () => persistedThrough().catch(() => {}) };
   }
 
   function controlValue(element) {
@@ -433,6 +488,7 @@
       try { sessionStorage = root.sessionStorage; } catch (_) { /* The recorder reports unavailable session persistence. */ }
       recorder = createRecorder({ queue: createIndexedDBQueue(root.indexedDB), fetch: rawFetch,
         uuid: () => root.crypto.randomUUID(), sessionStorage, onState: render,
+        setTimeout: root.setTimeout.bind(root),
         userAgent: root.navigator.userAgent, page: root.location.pathname + root.location.hash });
     }
 
