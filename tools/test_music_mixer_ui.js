@@ -71,6 +71,8 @@ const context = vm.createContext({
   HydraRap: { create() { throw new Error("Music mixer must not mount a rap player"); } },
   HydraMusicMixerVoice: { create() { throw new Error("Music mixer must not mount a voice player"); } },
   HydraMusicMixerGeneration: { create: (options) => { generationOptions = options; onGenerationUpdate = options.onUpdate; return {
+    snapshot() { return { phase: "idle", enabled: false, canClearPending: true }; },
+    clearPending() { generationCalls.push("clearPending"); onGenerationUpdate({ phase: "idle", enabled: false, canClearPending: false }); return true; },
     update() {}, settingsChanged() { promptChanges++; }, stop() { generationCalls.push("stop"); },
     startNew() { generationCalls.push("startNew"); }, resume() { generationCalls.push("resume"); }
   }; } },
@@ -118,6 +120,7 @@ assert.match(root.innerHTML, /id="mm-next-mode" data-next-field/);
 assert.match(root.innerHTML, />Loop<.*>Generate similar<.*>Generate new<.*>Choose old</);
 assert.deepEqual(copy(generationOptions.getNextTrack()), { mode: "new", trackId: "" });
 assert.equal(element("next-track-field").hidden, true);
+assert.equal(element("clear-pending").hidden, false, "a restored request can be cleared without another generation attempt");
 assert.equal(generationOptions.getSettings().continuity_mode, "fresh");
 assert.equal(planRequests.at(-1).continuity_mode, undefined, "continuation controls are excluded from the original-plan settings validator");
 pushSnapshot({ fields, buses: [], channels: [] });
@@ -517,6 +520,21 @@ assert.equal(config.channels[0].routes[0].strength, 0.55);
 context.HydraMusicMixer.flush();
 assert.equal(savedWorkspace.config.channels[0].routes[0].strength, 0.55);
 
+{
+  const before = generationCalls.length, confirmations = [];
+  onGenerationUpdate({ phase: "error", enabled: true, canClearPending: true });
+  assert.equal(element("clear-pending").hidden, false);
+  context.confirm = message => { confirmations.push(message); return false; };
+  const event = { target: { id: "mm-clear-pending", closest() { return this; } } };
+  handlers.click(event);
+  assert.equal(generationCalls.length, before, "canceling leaves the pending request intact");
+  assert.match(confirmations[0], /may still finish and use credits/);
+  context.confirm = () => true;
+  handlers.click(event);
+  assert.deepEqual(generationCalls.slice(before), ["clearPending"], "clearing never starts or retries generation");
+  assert.equal(element("clear-pending").hidden, true);
+  assert.match(element("notice").textContent, /Pending request cleared/);
+}
 console.log("Music mixer UI: inputs, saved controls, next-track choices, shared signal refresh, immutable mapping history, playback attribution and recorder failure isolation passed.");
 
 async function savedTrackRestoreTests() {

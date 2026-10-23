@@ -515,7 +515,21 @@
     }
     for (const name of ["hashchange", "popstate"]) root.addEventListener(name, () => navigation(name));
     for (const name of ["focus", "blur"]) root.addEventListener(name, () => recorder.emit(`client.${name}`, { frame_path: root.location.pathname }));
-    root.addEventListener("error", event => recorder.emit("client.error", { message: event.message, filename: event.filename, line: event.lineno, column: event.colno, stack: event.error?.stack || null }));
+    root.addEventListener("error", event => {
+      const target = event.target;
+      if (target?.tagName) {
+        const script = target.tagName === "SCRIPT", stylesheet = target.tagName === "LINK" && String(target.rel || "").toLowerCase().split(/\s+/).includes("stylesheet");
+        if (!script && !stylesheet) return;
+        let pathname = null;
+        try {
+          const url = new URL(script ? target.src : target.href, document.baseURI || root.location.href);
+          if (["http:", "https:"].includes(url.protocol)) pathname = url.pathname;
+        } catch (_) { /* Never retain a raw resource URL, which may contain credentials. */ }
+        recorder.emit("client.resource_error", { resource_type: script ? "script" : "stylesheet", path: pathname });
+        return;
+      }
+      recorder.emit("client.error", { message: event.message, filename: event.filename, line: event.lineno, column: event.colno, stack: event.error?.stack || null });
+    }, true); // Resource failures do not bubble; runtime errors still pass through once.
     root.addEventListener("unhandledrejection", event => recorder.emit("client.unhandled_rejection", { message: String(event.reason?.message || event.reason), stack: event.reason?.stack || null }));
     root.addEventListener("online", () => { recorder.emit("client.online", {}); if (!parentRecorder) void recorder.status().then(() => recorder.flush()); });
     root.addEventListener("offline", () => recorder.emit("client.offline", {}));

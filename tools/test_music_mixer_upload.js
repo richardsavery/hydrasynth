@@ -32,6 +32,7 @@ function harness(options = {}) {
     setTimeout(callback) { timers.set(++timerId, callback); return timerId; }, clearTimeout(id) { timers.delete(id); },
     localStorage: { getItem: key => storage.get(key) || null, setItem: (key, value) => storage.set(key, value), removeItem: key => storage.delete(key) },
     HydraMusicMixerGeneration: { create(options) { return {
+      snapshot() { return { phase: "idle", enabled: false }; },
       update() {}, settingsChanged() {}, stop() { generationCalls.push("stop"); snapshot.running = false; snapshot.starting = false; emit(copy(snapshot)); }, deactivate() {},
       async recall(track) { generationCalls.push("recall"); await engine.setTrack(track); },
       resume() { generationCalls.push("resume"); snapshot.starting = snapshot.beatTiming?.state === "preparing"; snapshot.running = !snapshot.starting; emit(copy(snapshot)); }, startNew() { generationCalls.push("startNew"); }

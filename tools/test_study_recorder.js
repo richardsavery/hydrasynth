@@ -68,6 +68,7 @@ function fakeIndexedDB() {
 
 async function main() {
   testMappingTracker();
+  await testBrowserErrors();
   {
     const h = fixture({ fetch: async (url, init) => url.endsWith("/media") && JSON.parse(init.body).metadata.role === "bad_capture" ?
       { ok: false, status: 413, json: async () => ({ error: "Capture exceeds limit" }) } : null });
@@ -400,6 +401,45 @@ function testMappingTracker() {
     assert.doesNotThrow(() => h.tracker.playback(null, { running: true }));
     assert.equal(h.tracker.current(), null);
   }
+}
+
+async function testBrowserErrors() {
+  const parent = fixture(), listeners = [];
+  const browser = {
+    parent: { location: { origin: "http://localhost:8790" }, HydraStudy: parent.recorder },
+    location: { origin: "http://localhost:8790", href: "http://localhost:8790/observer/", pathname: "/observer/", hash: "" },
+    document: { readyState: "loading", baseURI: "http://localhost:8790/assets/", addEventListener() {} },
+    history: { pushState() {}, replaceState() {} },
+    addEventListener(type, callback, options) { listeners.push({ type, callback, capture: options === true || options?.capture === true }); },
+    async fetch() { assert.fail("recording browser errors must not fetch resources"); }
+  };
+  installBrowser(browser);
+  const error = (target, details = {}) => {
+    // Resource errors reach window only during capture; a runtime ErrorEvent targets window itself.
+    for (const listener of listeners) if (listener.type === "error" && (target === browser || listener.capture)) listener.callback({ target, ...details });
+  };
+  error({ tagName: "SCRIPT", src: "https://private-user:private-password@example.org/app.js?token=private-token#private-fragment" });
+  error({ tagName: "LINK", rel: "alternate STYLESHEET", href: "mixer.css?token=private-token#private-fragment" });
+  error({ tagName: "SCRIPT", src: "data:text/javascript,private-script-body" });
+  error({ tagName: "LINK", rel: "stylesheet", href: "http://[invalid-private-host" });
+  error({ tagName: "IMG", src: "private-image-url" });
+  error({ tagName: "AUDIO", src: "private-audio-url" });
+  error({ tagName: "LINK", rel: "icon", href: "private-icon-url" });
+  error({ tagName: "LINK", rel: "preload", href: "private-preload-url" });
+  error(browser, { message: "Workspace failed", filename: "/app.js", lineno: 12, colno: 4, error: { stack: "Error: Workspace failed\n    at /app.js:12:4" } });
+  await parent.recorder.whenPersisted(); await parent.recorder.flush();
+  const resources = parent.events.filter(event => event.type === "client.resource_error");
+  assert.deepEqual(resources.map(event => [event.payload.resource_type, event.payload.path]), [
+    ["script", "/app.js"], ["stylesheet", "/assets/mixer.css"], ["script", null], ["stylesheet", null]
+  ], "capture missing scripts and stylesheets without recording other resource errors");
+  assert.ok(!JSON.stringify(resources).includes("private-"), "resource diagnostics omit credentials, query strings, fragments, and non-HTTP URLs");
+  const runtime = parent.events.filter(event => event.type === "client.error");
+  assert.equal(runtime.length, 1, "runtime JavaScript errors are still recorded exactly once");
+  assert.equal(runtime[0].payload.message, "Workspace failed");
+  assert.equal(runtime[0].payload.filename, "/app.js");
+  assert.equal(runtime[0].payload.line, 12);
+  assert.equal(runtime[0].payload.column, 4);
+  assert.equal(runtime[0].payload.stack, "Error: Workspace failed\n    at /app.js:12:4");
 }
 
 async function testBrowserInteractions({ query = "", researcher = false, pathname = "/" } = {}) {

@@ -60,7 +60,12 @@ globalThis.HydraElevenLabs = (() => {
     catch (error) { if (strict) throw error; /* Server persistence still works without browser storage. */ }
   }
   function flush(options) { if (state.initialized && state.loaded) remember(options); }
-  function remembered() { try { return JSON.parse(localStorage.getItem(STORAGE_KEY) || "{}"); } catch (_) { return {}; } }
+  function remembered() {
+    try {
+      const saved = JSON.parse(localStorage.getItem(STORAGE_KEY) || "{}");
+      return saved && typeof saved === "object" && !Array.isArray(saved) ? saved : {};
+    } catch (_) { return {}; }
+  }
   function notice(text, error = false) {
     $("notice").textContent = text;
     $("notice").classList.toggle("is-error", error);

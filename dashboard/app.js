@@ -30,7 +30,7 @@ function captureLegacyStudyMappings(reason = "settings_changed") {
 function mappingPlaybackStudy(running = state.playing, reason = "output") {
   try {
     const workspace = state.playbackWorkspace || state.workspaceView;
-    if (workspace === "synth-mixer") return globalThis.HydraSynthMixer?.mappingStudyContext?.() || null;
+    if (workspace === "synth-mixer") return workspaceModule("HydraSynthMixer")?.mappingStudyContext?.() || null;
     if (!["synth-legacy", "drums", null].includes(workspace)) return null;
     const tracker = legacyStudyTracker(workspace || "synth-legacy");
     if (!tracker) return null;
@@ -144,72 +144,137 @@ document.addEventListener("DOMContentLoaded", () => {
   }).finally(() => { state.connectionsReady = true; });
 });
 
+const workspaceFailures = new Map();
+const WORKSPACE_SECTIONS = {
+  elevenlabs: ["elevenlabs-workspace", "Generated music"],
+  mixer: ["music-mixer-workspace", "Music mixer"],
+  "synth-mixer": ["synth-mixer-workspace", "Synth mixer"],
+  "rap-experiment": ["rap-experiment-workspace", "Rap experiment"],
+  "rap-response": ["rap-response-workspace", "Rap response"],
+  "robot-setup": ["robot-setup-workspace", "Keirzo setup"],
+  "robot-control": ["robot-control-workspace", "Keirzo control"]
+};
+
+function workspaceModule(name) {
+  return workspaceFailures.has(name) ? null : globalThis[name];
+}
+
+function initializeWorkspace(view, name, initialize) {
+  if (workspaceFailures.has(name)) return;
+  const [id, title] = WORKSPACE_SECTIONS[view];
+  const container = document.getElementById(id);
+  try {
+    if (!container) throw new Error("The workspace section did not load.");
+    if (typeof globalThis[name]?.init !== "function") throw new Error("The workspace script did not load.");
+    initialize();
+    // A missing engine can make init return early without throwing. Do not let
+    // navigation expose the otherwise empty section as a blank page.
+    if (container.childElementCount === 0) throw new Error("The workspace controls did not load.");
+  } catch (error) {
+    workspaceFailures.set(name, { view, error });
+    const message = error?.message || String(error);
+    console.error(`${title} could not start:`, error);
+    recordStudyEvent("client.workspace_error", { workspace: view, message, stack: error?.stack || null });
+    if (!container) return;
+    const panel = document.createElement("div");
+    panel.className = "workspace-intro workspace-recovery";
+    panel.setAttribute("role", "alert");
+    const heading = document.createElement("h1"); heading.textContent = title;
+    const explanation = document.createElement("p");
+    explanation.textContent = "This workspace could not start. Reload the page to try again. Your saved settings are kept, and other workspaces are still available.";
+    const detail = document.createElement("p"); detail.className = "workspace-recovery-detail"; detail.textContent = message;
+    const actions = document.createElement("div"); actions.className = "workspace-recovery-actions";
+    const reload = document.createElement("button");
+    reload.type = "button"; reload.textContent = "Reload page";
+    reload.addEventListener("click", () => window.location.reload());
+    const connections = document.createElement("a");
+    connections.href = "#connections"; connections.dataset.workspace = "connections";
+    connections.textContent = "Open Connections";
+    actions.append(reload, connections);
+    panel.append(heading, explanation, detail, actions);
+    container.replaceChildren(panel);
+  }
+}
+
 function bindSonificationWorkspaces() {
-  const sourceBridge = globalThis.HydraElevenSource?.create({
-    getState: () => state, loadSeries: loadSourceSeries
+  initializeWorkspace("elevenlabs", "HydraElevenLabs", () => {
+    const sourceBridge = globalThis.HydraElevenSource?.create({
+      getState: () => state, loadSeries: loadSourceSeries
+    });
+    workspaceModule("HydraElevenLabs").init({ sourceBridge });
   });
-  globalThis.HydraElevenLabs?.init({ sourceBridge });
-  const mixerInput = globalThis.HydraElevenSource?.create({
-    getState: () => state, loadSeries: loadSourceSeries
+  initializeWorkspace("mixer", "HydraMusicMixer", () => {
+    const mixerInput = globalThis.HydraElevenSource?.create({
+      getState: () => state, loadSeries: loadSourceSeries
+    });
+    const mixerBridge = mixerInput && {
+      ...mixerInput,
+      describe: () => ({ ...mixerInput.describe(),
+        revision: `${state.sourceMode}|${state.recording?.id}|${state.selectionGeneration}|${state.liveGeneration}` })
+    };
+    workspaceModule("HydraMusicMixer").init({
+      container: document.getElementById("music-mixer-workspace"), sourceBridge: mixerBridge
+    });
   });
-  const mixerBridge = mixerInput && {
-    ...mixerInput,
-    describe: () => ({ ...mixerInput.describe(),
-      revision: `${state.sourceMode}|${state.recording?.id}|${state.selectionGeneration}|${state.liveGeneration}` })
-  };
-  globalThis.HydraMusicMixer?.init({
-    container: document.getElementById("music-mixer-workspace"), sourceBridge: mixerBridge
+  initializeWorkspace("rap-experiment", "HydraRapExperiment", () => {
+    workspaceModule("HydraRapExperiment").init({ container: document.getElementById("rap-experiment-workspace") });
   });
-  globalThis.HydraRapExperiment?.init({ container: document.getElementById("rap-experiment-workspace") });
   const quietForRapResponse = ({ output_mode } = {}) => {
     // An isolated rap uses the current backing transport, including while
     // recording the listener's message. Only standalone mixes take it over.
     if (output_mode === "vocals") return;
     stopPlayback();
-    globalThis.HydraSynthMixer?.deactivate();
-    globalThis.HydraMusicMixer?.deactivate();
-    globalThis.HydraRapExperiment?.deactivate();
-    globalThis.HydraElevenLabs?.deactivate();
+    workspaceModule("HydraSynthMixer")?.deactivate();
+    workspaceModule("HydraMusicMixer")?.deactivate();
+    workspaceModule("HydraRapExperiment")?.deactivate();
+    workspaceModule("HydraElevenLabs")?.deactivate();
   };
-  globalThis.HydraRapResponse?.init({ container: document.getElementById("rap-response-workspace"),
+  initializeWorkspace("rap-response", "HydraRapResponse", () => workspaceModule("HydraRapResponse").init({ container: document.getElementById("rap-response-workspace"),
     onBeforeListen: quietForRapResponse, onBeforePlay: quietForRapResponse,
     getBackingClock: () => {
-      const music = globalThis.HydraMusicMixer?.transportClock?.();
+      const music = workspaceModule("HydraMusicMixer")?.transportClock?.();
       if (music?.playing) return { ...music, label: "Music mixer" };
       const synth = synthRapClock();
       if (synth?.playing) return { ...synth, label: "Synth mixer" };
       return music || synth;
     },
     unlockBacking: async () => {
-      const music = globalThis.HydraMusicMixer?.transportClock?.();
+      const music = workspaceModule("HydraMusicMixer")?.transportClock?.();
       if (music?.playing) await music.context?.resume();
       else if (synthRapClock().playing) await ensureAudioEngine();
-    } });
-  globalThis.HydraRobotControl?.init({ container: document.getElementById("robot-setup-workspace") });
-  globalThis.HydraRobotLive?.init({ container: document.getElementById("robot-control-workspace"),
-    hardware: globalThis.HydraRobotControl, clock: source => globalThis.HydraBeatClock.snapshot(source) });
-  const synthInput = globalThis.HydraElevenSource?.create({
-    getState: () => state, loadSeries: loadSourceSeries
+    } }));
+  initializeWorkspace("robot-setup", "HydraRobotControl", () => {
+    workspaceModule("HydraRobotControl").init({ container: document.getElementById("robot-setup-workspace") });
   });
-  globalThis.HydraSynthMixer?.init({
-    container: document.getElementById("synth-mixer-workspace"),
-    sourceBridge: synthInput && { ...synthInput, describe: () => ({ ...synthInput.describe(),
-      revision: `${state.sourceMode}|${state.recording?.id}|${state.selectionGeneration}|${state.liveGeneration}` }) },
-    getDestinations: () => Music.DESTINATIONS,
-    transport: {
-      selectPatch: (bank, number) => {
-        if (state.synthOutput !== "midi") throw new Error("Select MIDI output in Connections first.");
-        return selectMidiPatch({ bank, number }, "synth-mixer");
-      },
-      start: () => state.workspaceView === "synth-mixer" ? togglePlayback() : Promise.resolve(),
-      stop: () => { if (state.playbackWorkspace === "synth-mixer") { state.playbackError = null; stopPlayback(); } },
-      status: () => ({ playing: state.playbackWorkspace === "synth-mixer" && state.playing,
-        preparing: state.playbackWorkspace === "synth-mixer" && state.preparing,
-        patchChanging: state.patchChanging,
-        output: state.synthOutput, midiReady: Boolean(state.midiOutput), currentPatch: state.currentPatch, error: state.playbackError,
-        ...readMidiConnectionControls(),
-        readyReason: state.workspaceView === "synth-mixer" ? playbackUnavailableReason() : "" })
-    }
+  initializeWorkspace("robot-control", "HydraRobotLive", () => {
+    if (!workspaceModule("HydraRobotControl")) throw new Error("Keirzo setup could not start.");
+    workspaceModule("HydraRobotLive").init({ container: document.getElementById("robot-control-workspace"),
+      hardware: workspaceModule("HydraRobotControl"), clock: source => globalThis.HydraBeatClock.snapshot(source) });
+  });
+  initializeWorkspace("synth-mixer", "HydraSynthMixer", () => {
+    const synthInput = globalThis.HydraElevenSource?.create({
+      getState: () => state, loadSeries: loadSourceSeries
+    });
+    workspaceModule("HydraSynthMixer").init({
+      container: document.getElementById("synth-mixer-workspace"),
+      sourceBridge: synthInput && { ...synthInput, describe: () => ({ ...synthInput.describe(),
+        revision: `${state.sourceMode}|${state.recording?.id}|${state.selectionGeneration}|${state.liveGeneration}` }) },
+      getDestinations: () => Music.DESTINATIONS,
+      transport: {
+        selectPatch: (bank, number) => {
+          if (state.synthOutput !== "midi") throw new Error("Select MIDI output in Connections first.");
+          return selectMidiPatch({ bank, number }, "synth-mixer");
+        },
+        start: () => state.workspaceView === "synth-mixer" ? togglePlayback() : Promise.resolve(),
+        stop: () => { if (state.playbackWorkspace === "synth-mixer") { state.playbackError = null; stopPlayback(); } },
+        status: () => ({ playing: state.playbackWorkspace === "synth-mixer" && state.playing,
+          preparing: state.playbackWorkspace === "synth-mixer" && state.preparing,
+          patchChanging: state.patchChanging,
+          output: state.synthOutput, midiReady: Boolean(state.midiOutput), currentPatch: state.currentPatch, error: state.playbackError,
+          ...readMidiConnectionControls(),
+          readyReason: state.workspaceView === "synth-mixer" ? playbackUnavailableReason() : "" })
+      }
+    });
   });
   globalThis.HydraWorkspace?.init({
     onNavigate: selectSonificationWorkspace,
@@ -230,13 +295,13 @@ function captureSessionState() {
   if (!state.connectionsReady) throw new Error("Wait for the saved settings to finish loading, then save the session.");
   if (!saveSettings()) throw new Error("Could not save the current controls. Free browser storage and try again.");
   saveConnectionPreferences();
-  globalThis.HydraSynthMixer?.flush();
-  globalThis.HydraMusicMixer?.flush();
-  globalThis.HydraRapExperiment?.flush({ strict: true });
-  globalThis.HydraRapResponse?.flush({ strict: true });
-  globalThis.HydraElevenLabs?.flush?.({ strict: true });
+  workspaceModule("HydraSynthMixer")?.flush();
+  workspaceModule("HydraMusicMixer")?.flush();
+  workspaceModule("HydraRapExperiment")?.flush({ strict: true });
+  workspaceModule("HydraRapResponse")?.flush({ strict: true });
+  workspaceModule("HydraElevenLabs")?.flush?.({ strict: true });
   globalThis.HydraElevenRealtime?.flush?.({ strict: true });
-  const robotSettings = globalThis.HydraRobotLive?.snapshot?.()?.settings;
+  const robotSettings = workspaceModule("HydraRobotLive")?.snapshot?.()?.settings;
   if (robotSettings) localStorage.setItem("hydra-robot-live-settings-v1", JSON.stringify(robotSettings));
   if (globalThis.HydraRobotDrums?.snapshot?.()?.settings) {
     localStorage.setItem("hydra-robot-drums-v1", JSON.stringify(globalThis.HydraRobotDrums.exportState()));
@@ -246,14 +311,14 @@ function captureSessionState() {
 function stopSessionPlayback() {
   if (!state.connectionsReady) throw new Error("Wait for the saved settings to finish loading, then load the session.");
   stopPlayback();
-  globalThis.HydraSynthMixer?.deactivate();
-  globalThis.HydraMusicMixer?.deactivate();
-  globalThis.HydraRapExperiment?.deactivate();
-  globalThis.HydraRapResponse?.deactivate();
-  globalThis.HydraRobotLive?.stop();
+  workspaceModule("HydraSynthMixer")?.deactivate();
+  workspaceModule("HydraMusicMixer")?.deactivate();
+  workspaceModule("HydraRapExperiment")?.deactivate();
+  workspaceModule("HydraRapResponse")?.deactivate();
+  workspaceModule("HydraRobotLive")?.stop();
   const drumsStopped = globalThis.HydraRobotDrums?.stop();
-  const hardwareStopped = globalThis.HydraRobotControl?.deactivate();
-  globalThis.HydraElevenLabs?.deactivate();
+  const hardwareStopped = workspaceModule("HydraRobotControl")?.deactivate();
+  workspaceModule("HydraElevenLabs")?.deactivate();
   disconnectLive();
   return Promise.all([drumsStopped, hardwareStopped]);
 }
@@ -275,18 +340,18 @@ function reloadSession(route) {
 function stopDashboardOnUnload() {
   if (state.sessionReloading) return;
   disconnectLive(); stopPlayback(); panicMidi();
-  globalThis.HydraSynthMixer?.deactivate(); globalThis.HydraMusicMixer?.deactivate();
-  globalThis.HydraRapExperiment?.deactivate(); globalThis.HydraElevenLabs?.deactivate();
-  globalThis.HydraRapResponse?.deactivate();
-  globalThis.HydraRobotLive?.stop();
-  Promise.resolve(globalThis.HydraRobotControl?.deactivate()).catch(() => {});
+  workspaceModule("HydraSynthMixer")?.deactivate(); workspaceModule("HydraMusicMixer")?.deactivate();
+  workspaceModule("HydraRapExperiment")?.deactivate(); workspaceModule("HydraElevenLabs")?.deactivate();
+  workspaceModule("HydraRapResponse")?.deactivate();
+  workspaceModule("HydraRobotLive")?.stop();
+  Promise.resolve(workspaceModule("HydraRobotControl")?.deactivate()).catch(() => {});
 }
 
 function selectSonificationWorkspace(view, previous) {
   if (state.sessionReloading) return;
   if (view === state.workspaceView) return;
   // Microphone capture and automatic replies only belong to the visible tab.
-  if (previous === "rap-response") globalThis.HydraRapResponse?.deactivate();
+  if (previous === "rap-response") workspaceModule("HydraRapResponse")?.deactivate();
   // Navigation only changes visibility. The transport keeps its original
   // controls, output and pending preparation until explicitly stopped.
   state.workspaceView = view;
@@ -295,13 +360,13 @@ function selectSonificationWorkspace(view, previous) {
   }
   renderSoundControls();
   renderOutputMode();
-  if (view === "elevenlabs") globalThis.HydraElevenLabs?.activate();
-  if (view === "mixer") globalThis.HydraMusicMixer?.activate();
-  if (view === "synth-mixer") globalThis.HydraSynthMixer?.activate();
-  if (view === "rap-experiment") globalThis.HydraRapExperiment?.activate();
-  if (view === "rap-response") globalThis.HydraRapResponse?.activate();
-  if (view === "robot-setup" || view === "robot-control") globalThis.HydraRobotControl?.activate();
-  if (view === "robot-control") globalThis.HydraRobotLive?.activate();
+  if (view === "elevenlabs") workspaceModule("HydraElevenLabs")?.activate();
+  if (view === "mixer") workspaceModule("HydraMusicMixer")?.activate();
+  if (view === "synth-mixer") workspaceModule("HydraSynthMixer")?.activate();
+  if (view === "rap-experiment") workspaceModule("HydraRapExperiment")?.activate();
+  if (view === "rap-response") workspaceModule("HydraRapResponse")?.activate();
+  if (view === "robot-setup" || view === "robot-control") workspaceModule("HydraRobotControl")?.activate();
+  if (view === "robot-control") workspaceModule("HydraRobotLive")?.activate();
   if ((view === "synth-legacy" || view === "drums") && state.recording && !state.playing && !state.preparing) loadFocusedSeries();
   updateConnectionSummary();
 }
@@ -598,7 +663,7 @@ function readMusicalControls() {
 
 function activeSynthMixer() {
   const workspace = state.playing || state.preparing ? state.playbackWorkspace : state.workspaceView;
-  return workspace === "synth-mixer" ? globalThis.HydraSynthMixer : null;
+  return workspace === "synth-mixer" ? workspaceModule("HydraSynthMixer") : null;
 }
 
 function readMidiConnectionControls() {
@@ -1371,6 +1436,9 @@ function updateSourceSummary() {
 }
 
 function playbackUnavailableReason() {
+  if ([...workspaceFailures.values()].some(({ view }) => view === state.workspaceView)) {
+    return "This workspace could not start. Reload the page to try again.";
+  }
   const mixer = activeSynthMixer();
   if (mixer) {
     if (state.synthOutput === "midi" && !state.midiOutput) return "Connect a MIDI device in Connections before playing.";
@@ -1950,7 +2018,7 @@ function synthRapClock() {
   const playing = state.playbackWorkspace === "synth-mixer" && state.playing;
   // Standalone Synth rap also uses this clock while its sequencer is stopped.
   // Its tempo belongs to the Synth mixer even when another tab is visible.
-  const bpm = anchor?.bpm || Number(globalThis.HydraSynthMixer?.getControls?.()?.tempo) || Number(readMusicalControls().tempo) || 96;
+  const bpm = anchor?.bpm || Number(workspaceModule("HydraSynthMixer")?.getControls?.()?.tempo) || Number(readMusicalControls().tempo) || 96;
   return { context, destination: context?.destination || null,
     playing, valid: !state.liveSilenced && (!playing || Boolean(anchor)), bpm, baseBpm: bpm, rate: 1,
     beat: anchor ? anchor.beat + Math.max(0, performance.now() / 1000 - anchor.at) * bpm / 60 : 0,
@@ -1961,7 +2029,7 @@ globalThis.HydraSynthRapTransport = { unlock: () => ensureAudioEngine(), clock: 
 globalThis.HydraBeatClock = {
   snapshot(source = "synth") {
     const mixer = source === "mixer";
-    const clock = mixer ? globalThis.HydraMusicMixer?.transportClock?.() : synthRapClock();
+    const clock = mixer ? workspaceModule("HydraMusicMixer")?.transportClock?.() : synthRapClock();
     const running = mixer ? Boolean(clock?.playing && clock.valid !== false)
       : Boolean(state.playing && state.output !== "drums" && !state.liveSilenced && state.synthBeatClock);
     const sampledAt = performance.now();

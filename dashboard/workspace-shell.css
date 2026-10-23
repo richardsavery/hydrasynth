@@ -29,6 +29,13 @@ body[data-workspace="robot-control"] .connection-strip { display: none; }
 .connections-workspace { max-width: 1160px; min-height: calc(100vh - 167px); margin: 0 auto; padding: 38px 32px 48px; }
 .workspace-intro h1 { margin: 0; font-size: 30px; font-weight: 600; letter-spacing: -.03em; }
 .workspace-intro p { margin: 10px 0 27px; color: var(--muted); font-size: 14px; line-height: 1.6; }
+.workspace-recovery { width: calc(100% - 48px); max-width: 780px; margin: 32px auto; padding: 28px; border: 1px solid var(--line); border-radius: 10px; background: var(--ink-2); }
+.workspace-recovery .workspace-recovery-detail { font-size: 12px; overflow-wrap: anywhere; }
+.workspace-recovery-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; }
+.workspace-recovery-actions button, .workspace-recovery-actions a { display: inline-block; padding: 10px 15px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); color: var(--text); font: 600 13px/1.4 var(--sans); text-decoration: none; cursor: pointer; }
+.workspace-recovery-actions button { border-color: var(--accent-strong); background: var(--panel-selected); color: var(--accent); }
+.workspace-recovery-actions button:hover, .workspace-recovery-actions a:hover { border-color: var(--accent-strong); }
+.workspace-recovery-actions button:focus-visible, .workspace-recovery-actions a:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
 .connection-cards { display: grid; grid-template-columns: 1.12fr 1fr; align-items: start; gap: 24px; }
 .connection-card { min-width: 0; padding: 24px; border: 1px solid var(--line); border-radius: 10px; background: var(--ink-2); }
 .connection-card-heading { display: flex; align-items: center; gap: 11px; margin-bottom: 22px; }

@@ -372,7 +372,82 @@ class ServiceTests(unittest.TestCase):
         status, body = self.service.dispatch("POST", "/api/elevenlabs/generations", {"plan_id": self.plan["id"]})
         self.assertEqual(status, 503)
         self.assertIn("FFmpeg", body["error"])
+        self.assertEqual(body["code"], "generation_not_submitted")
+        self.assertEqual(self.service.jobs(), [])
+        self.assertTrue(self.service._queue.empty())
         self.assertEqual(len(self.client.calls), 0)
+
+    def test_missing_key_generation_can_be_retried_without_an_unknown_job(self):
+        self.service._api_key = ""
+        payload = {"plan_id": self.plan["id"], "variation": True}
+        status, body = self.service.dispatch("POST", "/api/elevenlabs/generations", payload)
+        self.assertEqual(status, 503)
+        self.assertEqual(body["code"], "generation_not_submitted")
+        self.assertIn("ELEVENLABS_API_KEY", body["error"])
+        self.assertEqual(self.service.jobs(), [])
+        self.assertTrue(self.service._queue.empty())
+        self.assertEqual(list((self.service.root / "jobs").iterdir()), [])
+        self.assertEqual(self.client.calls + self.client.stem_calls, [])
+        self.service._api_key = "test-secret-123"
+        status, job = self.service.dispatch("POST", "/api/elevenlabs/generations", payload)
+        self.assertEqual(status, 202)
+        self.assertEqual(job["state"], "queued")
+        self.assertEqual(len(self.service.jobs()), 1)
+        self.assertEqual(self.service._queue.qsize(), 1)
+
+    def test_missing_key_continuation_retains_an_idempotent_retry(self):
+        self.service._api_key = ""
+        payload = {"kind": "prompt", "plan_id": self.plan["id"], "source_job_id": None,
+                   "session_id": "missing_key_test", "sequence": 0, "duration_seconds": 20,
+                   "settings": {"style": "spacious jazz"}}
+        status, body = self.service.dispatch("POST", "/api/elevenlabs/continuations", payload)
+        self.assertEqual(status, 503)
+        self.assertEqual(body["code"], "generation_not_submitted")
+        self.assertEqual(self.service.jobs(), [])
+        self.assertTrue(self.service._queue.empty())
+        self.assertEqual(list((self.service.root / "jobs").iterdir()), [])
+        self.assertEqual(self.client.calls + self.client.stem_calls, [])
+        self.service._api_key = "test-secret-123"
+        status, job = self.service.dispatch("POST", "/api/elevenlabs/continuations", payload)
+        repeated_status, repeated = self.service.dispatch("POST", "/api/elevenlabs/continuations", payload)
+        self.assertEqual((status, repeated_status), (202, 202))
+        self.assertEqual(repeated["id"], job["id"])
+        self.assertTrue(repeated["reused"])
+        self.assertEqual(len(self.service.jobs()), 1)
+        self.assertEqual(self.service._queue.qsize(), 1)
+
+    def test_shutdown_rejections_confirm_no_generation_was_submitted(self):
+        self.service._closed = True
+        try:
+            for route, payload in (
+                ("generations", {"plan_id": self.plan["id"]}),
+                ("continuations", {"kind": "prompt", "plan_id": self.plan["id"], "source_job_id": None,
+                                   "session_id": "shutdown_test", "sequence": 0, "duration_seconds": 20,
+                                   "settings": {"style": "spacious jazz"}}),
+            ):
+                with self.subTest(route=route):
+                    status, body = self.service.dispatch("POST", "/api/elevenlabs/" + route, payload)
+                    self.assertEqual(status, 503)
+                    self.assertEqual(body["code"], "generation_not_submitted")
+            self.assertEqual(self.service.jobs(), [])
+            self.assertTrue(self.service._queue.empty())
+            self.assertEqual(self.client.calls + self.client.stem_calls, [])
+        finally:
+            self.service._closed = False
+
+    def test_unclassified_server_errors_do_not_claim_generation_was_rejected(self):
+        payload = {"plan_id": self.plan["id"]}
+        with mock.patch.object(self.service, "create_generation", side_effect=ServiceError("Unavailable", 503)):
+            status, body = self.service.dispatch("POST", "/api/elevenlabs/generations", payload)
+        self.assertEqual(status, 503)
+        self.assertNotIn("code", body)
+        # A storage/server failure may occur after saving a job; callers must
+        # recover it instead of treating every server error as a safe retry.
+        with mock.patch.object(self.service._queue, "put", side_effect=OSError("Queue unavailable")):
+            status, body = self.service.dispatch("POST", "/api/elevenlabs/generations", payload)
+        self.assertEqual(status, 500)
+        self.assertNotIn("code", body)
+        self.assertEqual(len(self.service.jobs()), 1)
 
     def test_duplicate_submissions_and_variation_double_click_reuse_inflight(self):
         jobs = []
@@ -845,6 +920,42 @@ class ClientTests(unittest.TestCase):
                     self.client.generate(example_plan()["request"], self.output)
             self.assertEqual(caught.exception.state, state)
             self.assertNotIn("do-not-leak", str(caught.exception))
+            self.assertEqual(opener.open.call_count, 1)
+
+    def test_api_key_id_rejection_explains_secret_without_exposing_provider_details(self):
+        for status in (400, 401):
+            body = json.dumps({"detail": {"status": "api_key_id_used_as_api_key",
+                                          "message": "Echoed key do-not-leak and private prompt"}}).encode()
+            failure = error.HTTPError(PROVIDER_URL, status, "do-not-leak", {}, io.BytesIO(body))
+            opener = mock.Mock()
+            opener.open.side_effect = failure
+            with mock.patch("elevenlabs_service.request.build_opener", return_value=opener):
+                with self.assertRaises(GenerationError) as caught:
+                    self.client.generate(example_plan()["request"], self.output)
+            self.assertEqual(caught.exception.state, "failed")
+            self.assertIn("API key ID instead of the secret API key", str(caught.exception))
+            self.assertIn("restart the dashboard", str(caught.exception))
+            self.assertNotIn("do-not-leak", str(caught.exception))
+            self.assertNotIn("private prompt", str(caught.exception))
+            self.assertEqual(opener.open.call_count, 1)
+            self.assertFalse(self.output.exists())
+            self.assertTrue(failure.fp.closed)
+
+    def test_unrecognized_or_malformed_error_details_keep_safe_http_message(self):
+        bodies = [b"do-not-leak", b"[]", b'{"detail": "do-not-leak"}',
+                  b'{"detail": {"status": ["do-not-leak"], "message": "private prompt"}}',
+                  b'{"detail": {"status": "do-not-leak", "message": "private prompt"}}',
+                  b" " * (64 * 1024) + b'{"detail": {"status": "api_key_id_used_as_api_key"}}']
+        for body in bodies:
+            failure = error.HTTPError(PROVIDER_URL, 400, "do-not-leak", {}, io.BytesIO(body))
+            opener = mock.Mock()
+            opener.open.side_effect = failure
+            with mock.patch("elevenlabs_service.request.build_opener", return_value=opener):
+                with self.assertRaises(GenerationError) as caught:
+                    self.client.generate(example_plan()["request"], self.output)
+            self.assertEqual(str(caught.exception), "ElevenLabs returned HTTP 400.")
+            self.assertEqual(caught.exception.state, "failed")
+            self.assertTrue(failure.fp.closed)
             self.assertEqual(opener.open.call_count, 1)
 
     def test_certificate_verification_failure_is_known_unsent_setup_failure(self):

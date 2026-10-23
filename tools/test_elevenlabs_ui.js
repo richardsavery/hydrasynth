@@ -198,6 +198,13 @@ function creationHarness({ initialPlan, initialJob, unlistedPlan, unlistedJob, s
 }
 
 async function originalCreationTests() {
+  for (const stored of [null, false, 3, "old settings", []]) {
+    const h = creationHarness({ stored });
+    await h.ui.activate();
+    assert.equal(h.requests.some(request => request.method === "POST"), false,
+      "invalid stored settings cannot prevent startup or submit generation requests");
+    assert.equal(h.node("generate").disabled, false);
+  }
   {
     const saved = { planId: "not-opened", jobId: "saved-track", generationSettings: { ...defaults, style: "Remember this direction" }, durationSeconds: 60 };
     const unopened = creationHarness({ stored: saved });

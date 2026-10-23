@@ -13,7 +13,7 @@ globalThis.HydraMusicMixerGeneration = (() => {
       body: body === undefined ? undefined : JSON.stringify(body) });
     let data;
     try { data = await response.json(); } catch (_) { throw new Error("The music service returned an unreadable response."); }
-    if (!response.ok) throw Object.assign(new Error(data.error || data.message || `Music request failed (${response.status}).`), { status: response.status });
+    if (!response.ok) throw Object.assign(new Error(data.error || data.message || `Music request failed (${response.status}).`), { status: response.status, code: data.code });
     return data;
   }
   function wait(milliseconds, signal) {
@@ -51,7 +51,7 @@ globalThis.HydraMusicMixerGeneration = (() => {
         currentId: current?.id || null, error: error || ((generates() || restartOriginal) && latestDirection.error) || null, busy: busy || savedBusy,
         nextMode: latestChoice.mode, selectedTrackId: latestChoice.trackId, savedBusy: savedBusy || savedLaunching,
         nextPrompt: pending?.direction?.settings?.style || pending?.body?.settings?.style || null,
-        retryAt, recovering: Boolean(pending && !enabled) };
+        retryAt, recovering: Boolean(pending && !enabled), canClearPending: canClearPending() };
     }
     function emit() { onUpdate(snapshot()); }
     function persist() {
@@ -70,6 +70,9 @@ globalThis.HydraMusicMixerGeneration = (() => {
       else { retryTimer = null; retryAt = null; }
     }
     const serviceBusy = (cause) => cause?.status === 409 && /^Another music or stem request is pending\./.test(cause.message || "");
+    function canClearPending() {
+      return Boolean(pending && !pending.jobId && !busy && (!enabled || phase === "error"));
+    }
     function fail(cause) {
       if (cause?.draft) { error = null; phase = "waiting-prompt"; emit(); return; }
       error = cause?.message || String(cause); phase = "error";
@@ -264,7 +267,7 @@ globalThis.HydraMusicMixerGeneration = (() => {
         // Preserve unknown submissions for GET recovery, never fresh retries.
         if (run === epoch && pending === intent) {
           if (serviceBusy(cause)) intent.serviceBusy = true;
-          else if (cause.status >= 400 && cause.status < 500) intent.stage = "failed";
+          else if (cause.code === "generation_not_submitted" || cause.status >= 400 && cause.status < 500) intent.stage = "failed";
           persist();
         }
         throw cause;
@@ -488,6 +491,12 @@ globalThis.HydraMusicMixerGeneration = (() => {
       clearTimer("prompt"); clearTimer("retry"); editing = false; restartOriginal = false; busyRetries = 0;
       phase = "idle"; error = null; engine.stop(preserveUnlocked); emit();
     }
+    function clearPending() {
+      if (!canClearPending()) return false;
+      // Explicitly abandon only the browser's recovery journal. Server jobs
+      // and saved music remain intact; clearing must never submit new work.
+      stop(); pending = null; persist(); emit(); return true;
+    }
     async function recall(track, { preserveUnlocked = false } = {}) {
       stop(preserveUnlocked);
       if (pending?.kind === "original") { pending.saveOnly = true; persist(); }
@@ -505,7 +514,7 @@ globalThis.HydraMusicMixerGeneration = (() => {
       }
       fill();
     }
-    return { startNew, resume, stop, deactivate: stop, retry, recall, update, settingsChanged, snapshot };
+    return { startNew, resume, stop, deactivate: stop, retry, clearPending, recall, update, settingsChanged, snapshot };
   }
   return { create };
 })();

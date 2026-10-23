@@ -179,6 +179,7 @@ dashboard-test:
 	$(NODE) tools/test_dashboard_semantics.js
 	$(NODE) tools/test_workspace_shell.js
 	$(NODE) tools/test_workspace_integration.js
+	$(NODE) tools/test_workspace_startup.js
 	$(NODE) tools/test_midi_connection.js
 	$(NODE) --check dashboard/observer/app.js
 	$(NODE) tools/test_observer_semantics.js

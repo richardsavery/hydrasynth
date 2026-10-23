@@ -35,7 +35,7 @@ function harness(options = {}) {
     stop(preserveUnlocked = false) { calls.push({ audio: "stop", preserveUnlocked }); running = false; queuedTrack = null; emit(); }
   };
   const storage = { getItem: (key) => saved.get(key), setItem: (key, value) => saved.set(key, value), removeItem: (key) => saved.delete(key) };
-  const context = vm.createContext({ AbortController, Math, Date });
+  const context = vm.createContext({ AbortController, Math, Date, fetch: options.fetch });
   vm.runInContext(fs.readFileSync(`${__dirname}/../dashboard/music-mixer-generation.js`, "utf8"), context);
   coordinator = context.HydraMusicMixerGeneration.create({ engine, storage, getSettings: () => {
     if (options.getSettings) return options.getSettings(settings);
@@ -50,7 +50,7 @@ function harness(options = {}) {
       signal.addEventListener("abort", () => task.reject(Object.assign(new Error("stopped"), { name: "AbortError" })), { once: true });
       return task.promise;
     },
-    async request(path, request = {}) {
+    request: options.fetch ? undefined : async function(path, request = {}) {
       calls.push({ path, method: request.method || "GET", body: request.body ? plain(request.body) : undefined });
       if (options.request) { const result = await options.request(path, request); if (result !== undefined) return result; }
       if (path === "/plans") return { id: "new-plan" };
@@ -769,6 +769,61 @@ async function main() {
     assert.equal(restored.paid().length, 0, "an uncertain original request is recovered by GET without another charge");
     assert.equal(restored.engine.snapshot().track.id, uploaded.id);
     assert.equal(restored.engine.snapshot().queuedTrack.id, recovered.id); restored.coordinator.stop();
+  }
+  {
+    let rejected = true, submissions = 0, reads = 0;
+    const fetch = async (url, options) => {
+      const path = url.replace("/api/elevenlabs", "");
+      let body, status = 200;
+      if (path === "/plans") body = { id: "new-plan" };
+      else if (options.method === "POST") {
+        submissions++;
+        if (rejected) { status = 503; body = { error: "Set ELEVENLABS_API_KEY", code: "generation_not_submitted" }; }
+        else body = job(`accepted-${submissions}`);
+      } else { reads++; body = { jobs: [] }; }
+      return { ok: status === 200, status, json: async () => body };
+    };
+    const first = harness({ fetch });
+    assert.equal(await first.coordinator.startNew(), false);
+    assert.equal(JSON.parse(first.saved.get("hydra.music-mixer.pending.v1")).stage, "failed");
+    first.coordinator.stop(); rejected = false;
+    const before = [submissions, reads], restored = harness({ fetch, saved: first.saved });
+    await settle(); assert.deepEqual([submissions, reads], before, "configuring a key and reloading never submits automatically");
+    assert.equal(await restored.coordinator.retry(), true); await settle();
+    assert.equal(submissions, 3, "explicit retry replaces the rejected attempt and prepares one spare");
+    assert.equal(restored.engine.snapshot().running, true);
+    restored.coordinator.stop();
+  }
+  for (const status of [500, 503]) {
+    const h = harness({ request(path, options) {
+      if (path === "/generations" && options.method === "POST") throw Object.assign(new Error("Service unavailable"), { status });
+    } });
+    await h.coordinator.startNew();
+    assert.equal(JSON.parse(h.saved.get("hydra.music-mixer.pending.v1")).stage, "submitting");
+    await h.coordinator.retry(); await settle();
+    assert.equal(h.paid().length, 1, "unmarked server failures remain ambiguous and cannot automatically resubmit");
+    h.coordinator.stop();
+    const restored = harness({ saved: h.saved });
+    assert.equal(restored.coordinator.snapshot().canClearPending, true);
+    restored.saved.set("another-workspace", "keep me");
+    assert.equal(restored.coordinator.clearPending(), true);
+    assert.equal(restored.saved.has("hydra.music-mixer.pending.v1"), false);
+    assert.equal(restored.saved.get("another-workspace"), "keep me");
+    assert.equal(restored.coordinator.snapshot().canClearPending, false);
+    assert.equal(restored.coordinator.snapshot().enabled, false);
+    assert.equal(restored.calls.some(call => call.path), false, "clearing the local journal neither deletes server jobs nor submits work");
+  }
+  {
+    const response = defer(), h = harness({ request(path, options) {
+      if (path === "/generations" && options.method === "POST") return response.promise;
+    } });
+    const started = h.coordinator.startNew(); await settle();
+    assert.equal(h.coordinator.clearPending(), false, "an active submission cannot be cleared");
+    response.resolve(job("accepted", { state: "queued" })); await settle();
+    h.coordinator.stop(); await started;
+    assert.equal(h.coordinator.snapshot().canClearPending, false);
+    assert.equal(h.coordinator.clearPending(), false, "a confirmed saved job must retain its recovery journal");
+    assert.equal(JSON.parse(h.saved.get("hydra.music-mixer.pending.v1")).jobId, "accepted");
   }
   console.log("Mixer generation tests passed");
 }

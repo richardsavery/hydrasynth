@@ -10,7 +10,7 @@ import tempfile
 import threading
 import time
 import unittest
-from unittest.mock import Mock, patch
+from unittest.mock import DEFAULT, Mock, patch
 import robot_serial
 
 from robot_serial import (BAUDRATES, DRUM_BOUNDS, DRUM_DEFAULT_DEVICE, DRUM_IDS,
@@ -55,6 +55,7 @@ class FakeSerialTest(unittest.TestCase):
         identity_patch = patch("robot_serial.robot_devices.device_identity", return_value=None)
         self.device_identity = identity_patch.start()
         self.addCleanup(identity_patch.stop)
+        filesystem_exists = robot_serial.os.path.exists
         self.mocks = {}
         for name, value in (("_ports", [DRUM_PREFERRED_DEVICE, HEAD_DEVICE]),
                             ("_dependency_available", True), ("os.path.exists", True),
@@ -62,6 +63,12 @@ class FakeSerialTest(unittest.TestCase):
             context = patch("robot_serial." + name, return_value=value)
             self.mocks[name] = context.start()
             self.addCleanup(context.stop)
+        # Python 3.14's Path.exists uses os.path.exists too. Fake serial nodes
+        # only, so calibration-file checks still inspect the real filesystem.
+        self.mocks["os.path.exists"].side_effect = lambda path: (
+            DEFAULT if isinstance(path, str) and robot_serial._DEVICE_PATTERN.fullmatch(path)
+            else filesystem_exists(path)
+        )
         self.drums = DrumController()
         self.head = HeadController(calibration_path=None)
         self.addCleanup(self.drums.close)

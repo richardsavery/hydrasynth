@@ -139,9 +139,10 @@ class FileResponse:
 
 
 class ServiceError(Exception):
-    def __init__(self, message: str, status: int = 400):
+    def __init__(self, message: str, status: int = 400, *, code: str | None = None):
         super().__init__(message)
         self.status = status
+        self.code = code
 
 
 class GenerationError(Exception):
@@ -325,10 +326,20 @@ class ElevenLabsClient:
                     song_id = None
                 return {"provider_content_type": media_type, "provider_song_id": song_id, "size_bytes": total}
         except error.HTTPError as exc:
-            # A provider error body can echo credentials or request content. Never
-            # surface it in the UI, persisted jobs, or exceptions.
+            # Inspect only a bounded machine-readable code. Provider messages
+            # can echo credentials or request content and must never be surfaced.
             status = exc.code
-            exc.close()
+            provider_code = None
+            try:
+                body = json.loads(exc.read(64 * 1024))
+                detail = body.get("detail") if isinstance(body, dict) else None
+                if isinstance(detail, dict):
+                    provider_code = detail.get("status")
+            except Exception:
+                # Unreadable error details must not hide the HTTP status.
+                pass
+            finally:
+                exc.close()
             messages = {
                 401: "ElevenLabs rejected the API key. Check the backend .env configuration.",
                 402: "ElevenLabs requires sufficient credits or a supported account plan.",
@@ -338,6 +349,10 @@ class ElevenLabsClient:
             }
             uncertain = status >= 500 or status == 408
             message = messages.get(status, "ElevenLabs returned HTTP %s." % status)
+            if status in {400, 401} and provider_code == "api_key_id_used_as_api_key":
+                message = ("ElevenLabs received an API key ID instead of the secret API key. "
+                           "Copy the full secret shown when creating a key, update the backend .env, "
+                           "and restart the dashboard.")
             if uncertain:
                 message += " The provider outcome is unknown; another attempt may incur another charge."
             raise GenerationError(message, "unknown" if uncertain else "failed") from None
@@ -745,7 +760,7 @@ class ElevenLabsService:
                     existing["reused"] = True
                     return existing
             if self._closed:
-                raise ServiceError("The generation service is shutting down.", 503)
+                raise ServiceError("The generation service is shutting down.", 503, code="generation_not_submitted")
             if self._provider_busy():
                 raise ServiceError("Another music or stem request is pending. Keep playing the current track and wait for it to finish.", 409)
             if saved:
@@ -935,7 +950,7 @@ class ElevenLabsService:
             raise ServiceError("variation must be true or false.")
         with self._lock:
             if self._closed:
-                raise ServiceError("The generation service is shutting down.", 503)
+                raise ServiceError("The generation service is shutting down.", 503, code="generation_not_submitted")
             matches = [json.loads(row[0]) for row in self._db.execute(
                 "SELECT body FROM jobs WHERE cache_key=? ORDER BY created_at DESC", (plan["cache_key"],)
             ).fetchall()]
@@ -955,7 +970,9 @@ class ElevenLabsService:
                 raise ServiceError("Another music or stem request is pending. Wait until it finishes.", 409)
             setup = self.status()
             if not setup["ready"]:
-                raise ServiceError(" ".join(setup["setup_errors"]), 503)
+                # No job or provider request exists for this attempt. Preserve
+                # that distinction from an ambiguous server/connection failure.
+                raise ServiceError(" ".join(setup["setup_errors"]), 503, code="generation_not_submitted")
             identifier = uuid.uuid4().hex
             job_dir = self.root / "jobs" / identifier
             job_dir.mkdir()
@@ -1411,7 +1428,10 @@ class ElevenLabsService:
                         return 200, self.export(self._read("plans", job["plan_id"]), job)
             raise ServiceError("Endpoint not found.", 404)
         except ServiceError as exc:
-            return exc.status, {"error": self._redact(str(exc))}
+            body = {"error": self._redact(str(exc))}
+            if exc.code is not None:
+                body["code"] = exc.code
+            return exc.status, body
         except (ValueError, TypeError, KeyError) as exc:
             return 400, {"error": self._redact(str(exc))}
         except (OSError, sqlite3.Error):
