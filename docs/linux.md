@@ -233,11 +233,18 @@ to wait up to eight seconds for the previous page's queued note-offs to finish.
 Wait for the stated time, then press Play again. Stop/Play in the same page does
 not require this handover wait.
 
-Live study records now save in batches, with bounded upload passes and fewer
-status redraws. Every raw frame is retained; batching does not sample or discard
-input. Existing recordings and the default study directory are preserved.
-These changes address recording backlog and hanging notes; they do not establish
-that every possible Chrome crash has been eliminated.
+Study recording is disabled by default while diagnosing the remaining crashes.
+Restart the dashboard, then refresh the page to apply this to the browser as well
+as the backend. Disabled mode does not open the study outbox, capture events or
+clips, or retry pending uploads. Existing study data and queued browser records
+are retained; the default study directory is unchanged. The MIDI watchdog remains
+enabled. `--no-study-recording` is also accepted for an explicit disabled launch.
+
+To resume study capture and automatic backups later, use
+`make dashboard-sonify DASHBOARD_ARGS='--study-recording'`. Enabled capture saves
+every raw frame in batches; it does not sample or discard input. Disabling
+recording isolates one source of load; it does not establish that every possible
+Chrome crash has been eliminated.
 
 ## Audio routing
 

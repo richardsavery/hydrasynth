@@ -2846,6 +2846,13 @@ def handler_for(
         def do_GET(self) -> None:  # noqa: N802
             request_url = urlsplit(self.path)
             path = unquote(request_url.path)
+            if path == "/dashboard-config.js":
+                # Deferred scripts run in document order, so both the main page
+                # and Observer know whether capture is enabled before installing it.
+                config = json.dumps({"study_recording": study is not None}, separators=(",", ":"))
+                payload = f"globalThis.HydraDashboardConfig = Object.freeze({config});\n".encode("utf-8")
+                self._send(200, payload, "application/javascript; charset=utf-8", "no-store")
+                return
             if path.startswith("/api/midi-safety/"):
                 self._local_audio_request("GET", path, midi_safety, "MIDI safety")
                 return
@@ -3918,10 +3925,14 @@ def parse_arguments(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--no-broker", action="store_true")
     parser.add_argument("--study-dir", type=Path, default=default_study_directory(),
                         help="Local study data directory (or KEIRZO_STUDY_DIR); defaults to the user's application data folder.")
-    parser.add_argument("--no-study-recording", action="store_true",
-                        help="Disable study recording for development runs.")
+    recording = parser.add_mutually_exclusive_group()
+    recording.add_argument("--study-recording", action="store_true",
+                           help="Enable browser and backend study capture and local backups (disabled by default).")
+    recording.add_argument("--no-study-recording", dest="study_recording", action="store_false",
+                           help="Disable browser and backend study capture (the default); existing data is retained.")
+    parser.set_defaults(study_recording=False)
     parser.add_argument("--no-study-backups", action="store_true",
-                        help="Disable automatic local study backup bundles; live recording remains enabled.")
+                        help="Disable automatic local study backup bundles when --study-recording is enabled.")
     parser.add_argument(
         "--broker-socket", type=Path, default=DEFAULT_BROKER_SOCKET
     )
@@ -3986,7 +3997,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"error: unable to initialize rap response storage: {error}", file=sys.stderr)
         return 1
     study = None
-    if not arguments.no_study_recording:
+    if arguments.study_recording:
         try:
             study = StudyRecorder(arguments.study_dir.expanduser(), app_version=study_app_version(),
                                   asset_roots={"elevenlabs": elevenlabs.root, "rap": rap.root,
@@ -4104,6 +4115,8 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Study recording: {arguments.study_dir.expanduser()}", flush=True)
         if study_backup is not None:
             print(f"Study backups: {study_backup.status()['destination']}", flush=True)
+    else:
+        print("Study recording: disabled (use --study-recording to enable)", flush=True)
     print(
         f"Hydrasynth dashboard: http://{arguments.host}:{arguments.port}"
         f" ({'demo' if arguments.demo else 'live'})",

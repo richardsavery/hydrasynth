@@ -56,7 +56,7 @@
       <details id="study-panel" class="study-panel" data-study-ui hidden>
         <summary>Study <span id="study-status" class="study-status" data-state="pending" role="status" aria-live="polite">Starting…</span></summary>
         <div class="study-panel-content">
-          <p>Researcher controls. Interactions and microphone clips save automatically on this laptop.</p>
+          <p id="study-description">Researcher controls. Interactions and microphone clips save automatically when study recording is enabled.</p>
           <dl><dt>Participant</dt><dd id="study-session">Starting session</dd><dt>Laptop</dt><dd id="study-device">Connecting to local storage</dd></dl>
           <dl><dt>Backups</dt><dd><span id="study-backup-status">Checking automatic backups</span><small id="study-backup-path" class="study-backup-path"></small></dd></dl>
           <label for="study-participant">Next participant code (optional)</label>
@@ -415,6 +415,7 @@
   </section>
 
   <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+  <script src="/dashboard-config.js" defer></script>
   <script src="study-recorder.js" defer></script>
   <script src="drums.js" defer></script>
   <script src="sonification.js" defer></script>

@@ -73,6 +73,7 @@ function fakeIndexedDB() {
 
 async function main() {
   testMappingTracker();
+  await testRecordingDisabled();
   await testBrowserErrors();
   await testSustainedCapture();
   await testNotificationRate();
@@ -301,7 +302,9 @@ async function main() {
   }
   const html = fs.readFileSync(path.join(__dirname, "../dashboard/index.html"), "utf8");
   assert.match(html, /<details[^>]+id="study-panel"[^>]+\shidden[\s>]/, "researcher controls are hidden before JavaScript initializes");
+  assert.match(html, /<script src="\/dashboard-config\.js" defer><\/script>\s*<script src="study-recorder\.js" defer>/, "server configuration precedes browser capture");
   const observerHTML = fs.readFileSync(path.join(__dirname, "../dashboard/observer/index.html"), "utf8");
+  assert.match(observerHTML, /<script src="\/dashboard-config\.js" defer><\/script>\s*<script src="\/study-recorder\.js" defer>/, "standalone and embedded Observer use the same recording switch");
   assert.match(observerHTML, /<script src="\/study-recorder\.js" defer><\/script>\s*<script src="app\.js" defer>/, "standalone and embedded Observer initialize capture before app handlers");
   await testBrowserInteractions();
   await testBrowserInteractions({ query: "?researcher=1", researcher: true });
@@ -523,9 +526,52 @@ function testMappingTracker() {
   }
 }
 
+async function testRecordingDisabled() {
+  for (const configured of [false, undefined]) for (const embedded of [false, true]) {
+    const elements = new Map(), readyListeners = [], fetches = [];
+    for (const id of ["study-panel", "study-status", "study-description", "study-session", "study-device", "study-backup-status",
+      "study-participant", "study-new-session", "study-export", "study-warning", "study-backup-warning"]) {
+      elements.set(id, { hidden: true, dataset: {}, attributes: { href: "/api/study/export" },
+        removeAttribute(name) { delete this.attributes[name]; }, setAttribute(name, value) { this.attributes[name] = value; } });
+    }
+    const browser = {
+      HydraDashboardConfig: configured === undefined ? undefined : { study_recording: configured },
+      document: { readyState: embedded ? "complete" : "loading", getElementById: id => elements.get(id),
+        addEventListener(type, callback) { assert.equal(type, "DOMContentLoaded", "disabled capture installs no interaction listeners"); readyListeners.push(callback); },
+        querySelectorAll() { assert.fail("disabled capture must not inspect controls"); } },
+      location: { href: `http://localhost:8790/${embedded ? "observer/" : "?researcher=1"}` },
+      parent: embedded ? { get HydraStudy() { assert.fail("disabled frames cannot borrow an enabled parent's recorder"); } } : undefined,
+      fetch: async (...args) => { fetches.push(args); return { ok: true }; },
+      history: { pushState() {}, replaceState() {} },
+      addEventListener() { assert.fail("disabled capture installs no window listeners"); },
+      setTimeout() { assert.fail("disabled capture schedules no tasks"); },
+      setInterval() { assert.fail("disabled capture schedules no retries or snapshots"); },
+      MutationObserver: class { constructor() { assert.fail("disabled capture must not observe DOM mutations"); } }
+    };
+    for (const key of ["indexedDB", "sessionStorage", "localStorage", "crypto", "navigator"]) {
+      Object.defineProperty(browser, key, { get() { assert.fail(`disabled capture must not access ${key} or modify existing data`); } });
+    }
+    const originalFetch = browser.fetch, originalPush = browser.history.pushState, originalReplace = browser.history.replaceState;
+    installBrowser(browser); readyListeners.forEach(callback => callback()); await tick();
+    assert.equal(browser.HydraStudy, undefined, "semantic event hooks remain inactive");
+    assert.equal(browser.fetch, originalFetch); assert.equal(browser.history.pushState, originalPush); assert.equal(browser.history.replaceState, originalReplace);
+    assert.equal(fetches.length, 0, "disabled mode makes no health check, upload or queued-data replay requests");
+    assert.equal(elements.get("study-status").textContent, "Disabled");
+    assert.equal(elements.get("study-status").dataset.state, "disabled");
+    assert.equal(elements.get("study-panel").hidden, embedded);
+    assert.equal(elements.get("study-warning").hidden, true);
+    assert.equal(elements.get("study-new-session").disabled, true);
+    assert.equal(elements.get("study-export").attributes.href, undefined);
+    await browser.fetch("/api/midi-safety/heartbeat", { method: "POST", body: "{}" });
+    assert.equal(fetches[0][0], "/api/midi-safety/heartbeat", "ordinary app requests, including MIDI safety, remain untouched");
+    assert.equal(fetches[0][1].headers, undefined);
+  }
+}
+
 async function testBrowserErrors() {
   const parent = fixture(), listeners = [];
   const browser = {
+    HydraDashboardConfig: { study_recording: true },
     parent: { location: { origin: "http://localhost:8790" }, HydraStudy: parent.recorder },
     location: { origin: "http://localhost:8790", href: "http://localhost:8790/observer/", pathname: "/observer/", hash: "" },
     document: { readyState: "loading", baseURI: "http://localhost:8790/assets/", addEventListener() {} },
@@ -591,7 +637,7 @@ async function testBrowserInteractions({ query = "", researcher = false, pathnam
   const document = { readyState: "loading", body: { dataset: { workspace: "synth-mixer" } },
     getElementById: id => elements.get(id) || null, querySelectorAll: () => [slider, text, password],
     addEventListener: (type, fn) => add(listeners, type, fn) };
-  const browser = { document, indexedDB, crypto: { randomUUID: uuid }, sessionStorage, localStorage,
+  const browser = { HydraDashboardConfig: { study_recording: true }, document, indexedDB, crypto: { randomUUID: uuid }, sessionStorage, localStorage,
     navigator: { userAgent: "Test browser", language: "en", storage: {
       persisted() { persistenceChecks++; return Promise.resolve(false); },
       persist() { persistenceRequests++; return Promise.resolve(true); }
@@ -727,6 +773,7 @@ async function testEmbeddedObserver() {
     closest(selector) { return selector === "[data-study-ui]" ? null : this; }, getAttribute: () => null };
   const parentWindow = { location: { origin: "http://localhost:8790" }, HydraStudy: parent.recorder };
   const browser = {
+    HydraDashboardConfig: { study_recording: true },
     parent: parentWindow,
     location: { origin: "http://localhost:8790", href: "http://localhost:8790/observer/?embedded=1&researcher=1", pathname: "/observer/", hash: "" },
     document: { readyState: "loading", body: { dataset: {} }, getElementById: () => null, querySelectorAll: () => [source],

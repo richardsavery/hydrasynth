@@ -435,6 +435,26 @@
   function installBrowser(root) {
     const document = root.document;
     if (!document || !root.fetch) return;
+    // Capture is explicitly enabled by the server before this deferred script.
+    // In disabled mode leave the old outbox untouched: no IndexedDB access,
+    // session creation, capture hooks, fetch/history wrappers, or retry timers.
+    // The same gate applies to standalone and embedded Observer pages.
+    if (root.HydraDashboardConfig?.study_recording !== true) {
+      function showDisabled() {
+        const $ = id => document.getElementById(id);
+        if ($("study-panel")) $("study-panel").hidden = new URL(root.location.href).searchParams.get("researcher") !== "1";
+        if ($("study-status")) { $("study-status").textContent = "Disabled"; $("study-status").dataset.state = "disabled"; }
+        if ($("study-description")) $("study-description").textContent = "Study recording is disabled. Previously saved study data is retained.";
+        if ($("study-device")) $("study-device").textContent = "Recording disabled";
+        if ($("study-session")) $("study-session").textContent = "No active study session";
+        if ($("study-backup-status")) $("study-backup-status").textContent = "Automatic study backups disabled";
+        for (const id of ["study-participant", "study-new-session"]) if ($(id)) $(id).disabled = true;
+        if ($("study-export")) { $("study-export").removeAttribute("href"); $("study-export").setAttribute("aria-disabled", "true"); }
+        for (const id of ["study-warning", "study-backup-warning"]) if ($(id)) $(id).hidden = true;
+      }
+      if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", showDisabled, { once: true }); else showDisabled();
+      return;
+    }
     const rawFetch = root.fetch.bind(root), previous = new WeakMap();
     let parentRecorder = null;
     try {
@@ -443,7 +463,7 @@
       }
     } catch (_) { /* A cross-origin parent cannot share its recorder. */ }
     // A presentation mode for researcher controls, not an authentication boundary.
-    // All recording runs in both modes; participant sessions never need to opt in here.
+    // When enabled at launch, recording runs in both participant and researcher views.
     const researcherMode = !parentRecorder && new URL(root.location.href).searchParams.get("researcher") === "1";
     let snapshotTimer = null, recorder;
     const $ = id => document.getElementById(id);

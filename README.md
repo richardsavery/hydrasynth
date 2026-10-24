@@ -49,6 +49,10 @@ Open **<http://127.0.0.1:8790/#synth-mixer>** and leave the terminal open.
 Try **Connections → Browser audio → Test sound**.
 When finished, stop playback, then press **Ctrl+C** in the terminal.
 
+Study recording is disabled by default while investigating browser freezes.
+Existing study data stays saved. To explicitly enable capture and local backups,
+start with `make dashboard-sonify DASHBOARD_ARGS='--study-recording'`.
+
 ## Update an existing laptop
 
 Stop playback and press **Ctrl+C** in the server terminal. From the existing

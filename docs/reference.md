@@ -330,7 +330,12 @@ versions; already submitted jobs can finish separately.
 
 ### Academic study recording
 
-The dashboard records study data and creates local backup bundles automatically.
+Study recording is disabled by default while investigating browser freezes.
+Enable it explicitly with `make dashboard-sonify DASHBOARD_ARGS='--study-recording'`.
+This enables browser/backend capture and automatic local backup bundles.
+With recording disabled, the browser does not open the study outbox, collect
+events or clips, or replay pending uploads. Existing data and queued records are
+retained for a later recording-enabled run. The MIDI watchdog remains active.
 The normal participant view has no Study controls or save/export steps.
 For researcher controls, open <http://127.0.0.1:8790/?researcher=1>.
 The **Study** panel shows recording health, backup status and folder, the laptop's
@@ -401,8 +406,9 @@ Live study data is outside the source checkout and cloud-sync folders by default
   tools in this repository support macOS and Linux).
 
 Override with `KEIRZO_STUDY_DIR` or `--study-dir /path/to/local/study-data`.
-`--no-study-recording` is available for development runs; `--no-study-backups`
-disables only the automatic backup bundles. Copy the application
+`--no-study-recording` explicitly selects the default disabled mode.
+`--no-study-backups` disables only automatic backup bundles when recording has
+been enabled with `--study-recording`. Copy the application
 to each laptop, but let each installation create its own study directory and
 device ID. Keep laptop clocks synchronized before data collection; timestamps
 alone cannot correct clock drift between different laptops.

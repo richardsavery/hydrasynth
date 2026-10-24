@@ -140,7 +140,13 @@ to wait up to eight seconds for the previous page's queued note-offs to finish.
 Wait for the stated time, then press Play again. Stop/Play in the same page does
 not require this handover wait.
 
-Study capture batches writes and bounds upload passes to keep continuous input
+Study recording is disabled by default while investigating browser freezes.
+Restart the dashboard and refresh existing tabs to disable capture in the browser
+as well as the backend. Saved study data is retained, and MIDI safety stays active.
+Use `make dashboard-sonify DASHBOARD_ARGS='--study-recording'` to explicitly
+enable recording again.
+
+When enabled, study capture batches writes and bounds upload passes to keep continuous input
 from building a browser-memory backlog. It retains every raw frame without
 sampling, and preserves existing recordings and the default study location.
 These changes address recording backlog and hanging notes, without guaranteeing

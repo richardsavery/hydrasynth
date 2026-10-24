@@ -12,7 +12,7 @@ from unittest.mock import patch
 import uuid
 import zipfile
 
-from hydra_dashboard import DashboardHTTPServer, SnapshotStore, default_study_directory, handler_for
+from hydra_dashboard import DashboardHTTPServer, SnapshotStore, default_study_directory, handler_for, parse_arguments
 from study_recording import StudyRecorder
 
 
@@ -127,6 +127,38 @@ class StudyHTTPTests(unittest.TestCase):
             self.assertEqual(default_study_directory(), Path("/private/tmp/study-fixture"))
         with patch.dict(os.environ, {}, clear=True):
             self.assertNotIn("OneDrive", str(default_study_directory()))
+
+    def test_study_capture_requires_explicit_launch_flag(self):
+        self.assertFalse(parse_arguments([]).study_recording)
+        self.assertFalse(parse_arguments(["--no-study-recording"]).study_recording)
+        self.assertTrue(parse_arguments(["--study-recording"]).study_recording)
+        self.assertFalse(parse_arguments(["--no-study-backups"]).study_recording)
+        self.assertTrue(parse_arguments(["--study-recording", "--no-study-backups"]).study_recording)
+
+    def test_browser_configuration_matches_server_capture_state(self):
+        status, headers, body = self.request("GET", "/dashboard-config.js")
+        self.assertEqual(status, 200)
+        self.assertIn("javascript", headers["Content-Type"])
+        self.assertEqual(headers["Cache-Control"], "no-store")
+        self.assertIn(b'"study_recording":true', body)
+
+        # A separate server without a recorder must explicitly disable browser
+        # capture too. It cannot leave an enabled outbox retrying unavailable APIs.
+        server = DashboardHTTPServer(("127.0.0.1", 0), handler_for(SnapshotStore("demo")))
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        connection = http.client.HTTPConnection("127.0.0.1", server.server_address[1], timeout=10)
+        try:
+            connection.request("GET", "/dashboard-config.js")
+            response = connection.getresponse()
+            self.assertEqual(response.status, 200)
+            self.assertEqual(response.getheader("Cache-Control"), "no-store")
+            self.assertIn(b'"study_recording":false', response.read())
+        finally:
+            connection.close()
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=5)
 
 
 if __name__ == "__main__":

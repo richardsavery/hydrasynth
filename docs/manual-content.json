@@ -60,7 +60,7 @@
       },
       {
         "type": "note",
-        "text": "The application records study events automatically unless explicitly disabled for a development run. Read the study chapter before involving participants. The ordinary participant interface hides the researcher controls; it does not disable recording."
+        "text": "Study recording is disabled by default while browser freezes are investigated. Start with --study-recording to explicitly enable capture and local backups. Read the study chapter before involving participants. The researcher query option changes which controls are visible; it does not enable recording."
       }
     ]
   },
@@ -1820,7 +1820,7 @@
     "blocks": [
       {
         "type": "p",
-        "text": "Study recording and local backup creation are enabled automatically. Participants do not have to press Record for ordinary interaction logging or perform a save/export step. Explicit microphone recording remains an intentional user action. Researcher controls are shown at http://127.0.0.1:8790/?researcher=1. This query option changes the presentation and is not an authentication mechanism."
+        "text": "Study recording and local backup creation are disabled by default. Start the dashboard with --study-recording to enable them, then refresh the browser. When enabled, ordinary interaction logging runs automatically. Explicit microphone recording remains an intentional user action. Researcher controls are shown at http://127.0.0.1:8790/?researcher=1. This query option changes the presentation and is not an authentication mechanism."
       },
       {
         "type": "figure",
@@ -1874,7 +1874,7 @@
       },
       {
         "type": "p",
-        "text": "For development, --no-study-recording disables recording entirely. --no-study-backups disables only the automatic backup bundles; it leaves primary recording enabled. Do not add either flag to participant launch commands by habit. Keep laptop clocks synchronised before a session; timestamp alignment cannot repair unknown clock drift after the fact."
+        "text": "--no-study-recording explicitly selects the default disabled mode. Refresh existing dashboard tabs after changing recording mode. Disabled mode leaves previously saved study data and queued browser records untouched. --no-study-backups disables only automatic backup bundles when --study-recording is enabled. Keep laptop clocks synchronised before a session; timestamp alignment cannot repair unknown clock drift after the fact."
       }
     ]
   },
