@@ -511,7 +511,7 @@ static int encode_three(
     int channel,
     uint8_t message[3]
 ) {
-    uint8_t status;
+    uint8_t status = 0;
     if (
         status_byte(base, channel, &status) != 0 ||
         validate_7bit("MIDI data byte", data1) != 0 ||
@@ -554,6 +554,23 @@ static int send_cc(
         return -1;
     }
     return send_three(port, destination, 0xB0, cc, value, channel);
+}
+
+static int send_channel_panic(
+    HydraMIDI *port,
+    HydraMIDIEndpoint destination,
+    int channel
+) {
+    int failures = send_cc(port, destination, 64, 0, channel) != 0;
+    /* The CLI has no note ledger for messages sent by a crashed browser.
+     * Release every pitch explicitly, even if a previous send fails. ASM's
+     * CC120 is ARP Octave, not the generic MIDI All Sound Off command. */
+    for (int note = 0; note < 128; note++) {
+        if (send_three(port, destination, 0x80, note, 0, channel) != 0)
+            failures++;
+    }
+    if (send_cc(port, destination, 123, 0, channel) != 0) failures++;
+    return failures ? -1 : 0;
 }
 
 static int encode_nrpn(
@@ -1811,28 +1828,9 @@ static int server_emergency_channel_cleanup(
 ) {
     pthread_mutex_lock(&context->midi_lock);
     pthread_mutex_lock(&context->state_lock);
-    int failures = 0;
-    if (
-        send_cc(
-            context->output_port, context->destination, 64, 0, channel
-        ) != 0
-    ) {
-        failures++;
-    }
-    if (
-        send_cc(
-            context->output_port, context->destination, 123, 0, channel
-        ) != 0
-    ) {
-        failures++;
-    }
-    if (
-        send_cc(
-            context->output_port, context->destination, 120, 0, channel
-        ) != 0
-    ) {
-        failures++;
-    }
+    int failures = send_channel_panic(
+        context->output_port, context->destination, channel
+    ) != 0;
     if (failures == 0) {
         memset(
             context->active_notes[channel - 1], 0,
@@ -1886,12 +1884,6 @@ static int server_panic(
         }
         if (send_cc(
             context->output_port, context->destination, 123, 0, channel
-        ) != 0) {
-            channel_cleanup_ok = false;
-            failures++;
-        }
-        if (send_cc(
-            context->output_port, context->destination, 120, 0, channel
         ) != 0) {
             channel_cleanup_ok = false;
             failures++;
@@ -4550,9 +4542,7 @@ static int run_command(
     }
 
     if (strcmp(command, "panic") == 0) {
-        if (send_cc(port, destination, 64, 0, options->channel) != 0) return 1;
-        if (send_cc(port, destination, 123, 0, options->channel) != 0) return 1;
-        return send_cc(port, destination, 120, 0, options->channel) != 0;
+        return send_channel_panic(port, destination, options->channel) != 0;
     }
 
     fprintf(stderr, "error: unknown command '%s'\n\n%s", command, USAGE);

@@ -212,8 +212,10 @@ format you want to monitor. Named native timbre commands send CC and need
 analogue output to headphones, speakers or an audio interface separately.
 
 The server does not silently switch to another device after a disconnect.
-Stop/restart it after reconnecting the intended synth. Browser Web MIDI has
-its own connection/reconnection behavior and still requires browser permission.
+Stop/restart it after reconnecting the intended synth. On Linux the dashboard's
+Hydrasynth output uses the native MIDI service, including in `dashboard-sonify`;
+it does not request browser MIDI permission. The macOS browser MIDI route remains
+available with its saved connection settings.
 
 ## If the browser freezes or turns white
 
@@ -222,16 +224,26 @@ Keep that process running, including when using `make dashboard-sonify` with
 **MIDI device** selected. Hydrasynth playback needs the updated backend's native
 MIDI watchdog; refreshing the page alone does not update an older server.
 
-Each played note queues a timestamped MIDI note-off when it starts. The browser
-also checks in with the backend every 500 ms during playback. After 2.5 seconds
-without a check-in, the backend uses ALSA to send sustain-off, all-notes-off and
-all-sound-off to the selected Hydrasynth and channel. This works independently
-of the page's JavaScript while the backend and MIDI connection remain available.
-Reload the page after a freeze and press Play to restart playback.
-After a reload or starting playback in another dashboard tab, you may be asked
-to wait up to eight seconds for the previous page's queued note-offs to finish.
-Wait for the stated time, then press Play again. Stop/Play in the same page does
-not require this handover wait.
+A locally inspected Chrome crash dump identified a fatal dangling-pointer check
+inside Chrome's native MIDI callback on Linux. Linux Hydrasynth playback now
+bypasses Web MIDI entirely: the dashboard submits each note and its duration to
+`hydractl`, whose scheduler sends the note-off independently of JavaScript.
+Refresh any old dashboard tabs after restarting the server to load this route.
+
+The browser also checks in with the backend every 500 ms during playback. After
+2.5 seconds without a check-in, the backend cancels native scheduled notes and
+releases them. If that transport fails, a separate ALSA command sends sustain-off,
+explicit note-offs for all 128 pitches, and all-notes-off to the selected synth
+and channel. CC120 is deliberately excluded: the Hydrasynth uses it for ARP Octave.
+This protection requires the backend and MIDI connection to remain available;
+the patch's release envelope may still produce a tail. Reload after a freeze and
+press Play to restart. The macOS Web MIDI route retains its timestamped note-offs
+and may require a short handover wait after replacing a dashboard tab.
+
+Small browser health counters and MIDI stop outcomes are saved in
+`var/diagnostics/browser-health.jsonl`, with one rotated backup and a combined
+limit of approximately 1 MiB. This is separate from study recording and does not
+capture input values, audio, or error-message text.
 
 Study recording is disabled by default while diagnosing the remaining crashes.
 Restart the dashboard, then refresh the page to apply this to the browser as well

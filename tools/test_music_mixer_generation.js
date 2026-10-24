@@ -235,7 +235,10 @@ async function main() {
       }
     } });
     assert.equal(await h.coordinator.startNew(), false);
-    assert.equal(h.engine.snapshot().running, false); assert.equal(h.tracks.length, 0, "failed stems cannot silently fall back to the full mix");
+    assert.equal(h.engine.snapshot().running, false, "failed stems cannot silently start the full mix");
+    assert.equal(h.engine.snapshot().track, null);
+    assert.equal(h.tracks.length, 1, "the saved mix is offered for explicit recovery");
+    assert.match(h.coordinator.snapshot().error, /Use saved full mix/);
     stemFailure = false; await h.coordinator.retry(); await settle();
     assert.equal(h.engine.snapshot().running, true); h.coordinator.stop();
   }
@@ -495,7 +498,25 @@ async function main() {
     } });
     await h.coordinator.resume(); await settle(); await h.coordinator.retry(); await settle();
     assert.equal(h.paid().length, 1, "unknown stem outcomes are recovered by GET without starting new paid music");
-    assert.equal(h.coordinator.snapshot().phase, "error"); h.coordinator.stop();
+    assert.equal(h.coordinator.snapshot().phase, "error");
+    assert.match(h.coordinator.snapshot().error, /Music is saved, but stem separation has no confirmed result/);
+    assert.equal(h.engine.snapshot().track.id, "saved", "the user must choose the full mix explicitly");
+    assert.equal(h.tracks.at(-1).id, "uncertain-stems");
+    h.coordinator.stop();
+  }
+  {
+    const uncertain = job("full-mix", { stem_separation: { state: "unknown", error: "Timed out" } });
+    const h = harness({ choice: { mode: "old", trackId: "full-mix" }, request(path) {
+      if (path === "/generations/full-mix") return uncertain;
+      if (path === "/plans/plan-full-mix") return { settings: {} };
+    } });
+    await h.coordinator.resume(); await settle();
+    assert.equal(h.engine.snapshot().running, true);
+    assert.equal(h.engine.snapshot().track.id, "full-mix");
+    assert.deepEqual(plain(h.engine.snapshot().track.stems), []);
+    assert.equal(h.engine.snapshot().track.stem_separation.state, "unknown", "ambiguous provider outcome remains preserved");
+    assert.equal(h.paid().length, 0, "choosing a saved full mix never regenerates or separates it");
+    h.coordinator.stop();
   }
   {
     const h = harness({ track: job("saved"), choice: { mode: "loop", trackId: "" }, reentrant: true,

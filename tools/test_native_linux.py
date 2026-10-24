@@ -202,6 +202,17 @@ class MidiIntegration(unittest.TestCase):
         for controller, value in ((99, 2), (98, 89), (6, 96), (38, 57)):
             self.peer.midi([0xB2, controller, value])
 
+    def test_cli_panic_releases_every_pitch_without_changing_arp_octave(self):
+        # The watchdog starts a fresh CLI, so it cannot know which notes the
+        # browser left sounding. Capture the actual bytes on a disposable peer.
+        result = subprocess.run([MIDI, "panic", "--device", self.device["name"],
+                                 "--channel", "3"], capture_output=True, text=True, timeout=2)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.peer.midi([0xB2, 123, 0])  # Last message is a receipt barrier.
+        messages = [event["bytes"] for event in self.peer.history if "bytes" in event]
+        expected = [[0xB2, 64, 0], *[[0x82, note, 0] for note in range(128)], [0xB2, 123, 0]]
+        self.assertEqual(messages, expected)
+
     def test_feedback_user_takeover_and_nrpn(self):
         self.peer.send_midi([0x91, 67, 77])
         note = self.server.wait_for(lambda item: item.get("event") == "note_on")
@@ -262,8 +273,11 @@ class MidiIntegration(unittest.TestCase):
         self.assertEqual(self.server.finish(), 0)
         self.peer.midi([0x83, 65, 0])
         for channel in range(16):
-            for controller in (64, 123, 120):
+            for controller in (64, 123):
                 self.peer.midi([0xB0 + channel, controller, 0])
+        self.assertFalse(any(event.get("bytes", [])[:2] == [0xB0 + channel, 120]
+                             for channel in range(16) for event in self.peer.history),
+                         "CC120 is ARP Octave on Hydrasynth, not a panic message")
 
     def test_device_disconnect_stops_without_hanging(self):
         self.peer.send_line("disconnect")

@@ -18,7 +18,7 @@ const KEY = "hydra.music-mixer.demo.v1", UPLOAD_KEY = "hydra.music-mixer.upload.
 function harness(options = {}) {
   const elements = new Map(), handlers = {}, calls = [], jobs = new Map(), separations = new Map(), analyses = new Map(), timers = new Map();
   const storage = options.storage || new Map(), selected = [], generationCalls = [], beatPreparations = [];
-  let timerId = 0, config, engine, emit, fetchHook;
+  let timerId = 0, config, engine, emit, fetchHook, generationUpdate;
   let snapshot = { fields: [], buses: [], channels: [], running: false, starting: false, track: null };
   function element(id) {
     if (!elements.has(id)) elements.set(id, { id: `mm-${id}`, value: "", innerHTML: "", textContent: "", disabled: false, hidden: false,
@@ -31,7 +31,7 @@ function harness(options = {}) {
   const context = vm.createContext({ AbortController, crypto: crypto.webcrypto, performance: { now: () => 0 },
     setTimeout(callback) { timers.set(++timerId, callback); return timerId; }, clearTimeout(id) { timers.delete(id); },
     localStorage: { getItem: key => storage.get(key) || null, setItem: (key, value) => storage.set(key, value), removeItem: key => storage.delete(key) },
-    HydraMusicMixerGeneration: { create(options) { return {
+    HydraMusicMixerGeneration: { create(options) { generationUpdate = options.onUpdate; return {
       snapshot() { return { phase: "idle", enabled: false }; },
       update() {}, settingsChanged() {}, stop() { generationCalls.push("stop"); snapshot.running = false; snapshot.starting = false; emit(copy(snapshot)); }, deactivate() {},
       async recall(track) { generationCalls.push("recall"); await engine.setTrack(track); },
@@ -103,6 +103,7 @@ function harness(options = {}) {
   return { root, element, calls, jobs, separations, analyses, selected, storage, generationCalls, beatPreparations, timers, context,
     get config() { return config; }, get current() { return copy(snapshot); },
     setFetch(hook) { fetchHook = hook; },
+    setGeneration(value) { generationUpdate(value); },
     async activate() { await context.HydraMusicMixer.activate(); await settle(); },
     async chooseFile(value = file) { element("audio-file").files = [value]; handlers.change({ target: element("audio-file") }); await settle(); },
     async click(id) { handlers.click({ target: element(id) }); await settle(); },
@@ -123,6 +124,29 @@ function harness(options = {}) {
 }
 
 async function tests() {
+  for (const state of ["unknown", "failed"]) {
+    const recover = harness();
+    const id = "saved-full-mix";
+    recover.jobs.set(id, { id, plan_id: "saved-plan", name: "Saved generation", state: "complete", separate_stems: true,
+      audio: { duration_seconds: 60 }, audio_url: "/saved.mp3", generation_settings: {}, stem_separation: { state, error: "Provider interrupted" } });
+    await recover.activate();
+    assert.match(recover.element("track").innerHTML, /Full mix only/, "complete music remains an explicit saved-track choice");
+    await recover.next("new");
+    if (state === "unknown") {
+      recover.setGeneration({ phase: "error", enabled: false, pendingId: id, error: "Stem separation outcome unknown" });
+      assert.equal(recover.element("use-full-mix").hidden, false);
+      await recover.click("use-full-mix");
+    } else await recover.select(id);
+    assert.equal(recover.current.track.id, id);
+    assert.equal(recover.current.track.stem_separation.state, state, "saved provider outcome is preserved");
+    assert.deepEqual(recover.config.channels.map(channel => channel.name), ["master"]);
+    assert.equal(recover.element("next-mode").value, "loop", "full-mix recovery disarms automatic paid generation");
+    assert.equal(recover.current.running, false, "loading the mix waits for the user's Play action");
+    assert.match(recover.element("notice").textContent, /Loaded the saved full mix/);
+    await recover.click("play");
+    assert.equal(recover.current.running, true);
+    assert.equal(recover.calls.filter(call => call.method === "POST").length, 0, "full-mix selection and Play use no provider credits");
+  }
   const h = harness(); await h.activate();
   assert.match(h.root.innerHTML, /<details id="mm-custom" class="mm-custom"><summary>Use your own audio<\/summary>/);
   assert.match(h.element("custom-status").textContent, /128 MB, no fixed duration limit/);

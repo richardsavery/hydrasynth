@@ -38,6 +38,7 @@ from robot_control import RobotControlService
 from study_recording import StudyRecorder
 from study_backup import StudyBackup
 from midi_safety import MidiSafetyService
+from runtime_diagnostics import RuntimeDiagnostics
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -2834,6 +2835,7 @@ def handler_for(
     study: StudyRecorder | None = None,
     sessions: SessionAssets | None = None,
     midi_safety: MidiSafetyService | None = None,
+    runtime_diagnostics: RuntimeDiagnostics | None = None,
 ) -> type[BaseHTTPRequestHandler]:
     if sessions is None:
         audio_root = next((Path(service.root).parent for service in (elevenlabs, rap_response, rap_experiment, rap)
@@ -2849,9 +2851,14 @@ def handler_for(
             if path == "/dashboard-config.js":
                 # Deferred scripts run in document order, so both the main page
                 # and Observer know whether capture is enabled before installing it.
-                config = json.dumps({"study_recording": study is not None}, separators=(",", ":"))
+                config = json.dumps({"study_recording": study is not None,
+                                     "native_midi": bool(midi_safety and midi_safety.native_enabled)},
+                                    separators=(",", ":"))
                 payload = f"globalThis.HydraDashboardConfig = Object.freeze({config});\n".encode("utf-8")
                 self._send(200, payload, "application/javascript; charset=utf-8", "no-store")
+                return
+            if path.startswith("/api/runtime-diagnostics/"):
+                self._local_audio_request("GET", path, runtime_diagnostics, "Runtime diagnostics")
                 return
             if path.startswith("/api/midi-safety/"):
                 self._local_audio_request("GET", path, midi_safety, "MIDI safety")
@@ -3003,6 +3010,8 @@ def handler_for(
                 "/styles.css": "styles.css",
                 "/app.js": "app.js",
                 "/midi-safety.js": "midi-safety.js",
+                "/native-midi.js": "native-midi.js",
+                "/runtime-diagnostics.js": "runtime-diagnostics.js",
                 "/study-recorder.js": "study-recorder.js",
                 "/study-recorder.css": "study-recorder.css",
                 "/workspace-shell.js": "workspace-shell.js",
@@ -3083,6 +3092,9 @@ def handler_for(
 
         def do_POST(self) -> None:  # noqa: N802
             path = unquote(urlsplit(self.path).path)
+            if path.startswith("/api/runtime-diagnostics/"):
+                self._local_audio_request("POST", path, runtime_diagnostics, "Runtime diagnostics")
+                return
             if path.startswith("/api/midi-safety/"):
                 self._local_audio_request("POST", path, midi_safety, "MIDI safety")
                 return
@@ -3181,7 +3193,9 @@ def handler_for(
                 except ValueError:
                     length = 0
                 limit = (MAX_SESSION_ZIP if session_archive else MAX_CUSTOM_AUDIO_BYTES if audio_upload else
-                         2 * 1024 if label == "MIDI safety" else
+                         (16 * 1024 if path in {"/api/midi-safety/send", "/api/midi-safety/control"}
+                          else 2 * 1024) if label == "MIDI safety" else
+                         2 * 1024 if label == "Runtime diagnostics" else
                          4 * 1024 * 1024 if label == "Saved sessions" else
                          16 * 1024 if label == "Robot control" else
                          128 * 1024 if label in {"Rap", "Rap experiment"} else
@@ -3205,7 +3219,7 @@ def handler_for(
             try:
                 status, body = audio_service.dispatch(method, self.path, document)
                 if (study is not None and audio_service is not study and audio_service is not sessions
-                        and audio_service is not midi_safety):
+                        and audio_service is not midi_safety and audio_service is not runtime_diagnostics):
                     # The saved audio is referenced by the returned job. Avoid
                     # duplicating raw uploaded bytes into telemetry JSON.
                     observed_document = {"size_bytes": len(document)} if isinstance(document, bytes) else document
@@ -4068,6 +4082,8 @@ def main(argv: list[str] | None = None) -> int:
     signal.signal(signal.SIGTERM, request_stop)
 
     midi_safety = MidiSafetyService(arguments.hydractl.resolve())
+    runtime_diagnostics = RuntimeDiagnostics(PROJECT_ROOT / "var" / "diagnostics", midi_status=midi_safety.status)
+    midi_safety.diagnostic_sink = runtime_diagnostics.record_midi_event
     try:
         catalog_payload = (
             json.dumps(
@@ -4090,10 +4106,12 @@ def main(argv: list[str] | None = None) -> int:
                 rap_response,
                 study,
                 midi_safety=midi_safety,
+                runtime_diagnostics=runtime_diagnostics,
             ),
         )
     except OSError as error:
         midi_safety.close()
+        runtime_diagnostics.close()
         if broker is not None:
             broker.stop()
         service.stop()
@@ -4156,6 +4174,7 @@ def main(argv: list[str] | None = None) -> int:
     finally:
         server.server_close()
         midi_safety.close()
+        runtime_diagnostics.close()
         if broker is not None:
             broker.stop()
         service.stop()

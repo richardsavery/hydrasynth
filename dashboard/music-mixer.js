@@ -255,6 +255,7 @@ globalThis.HydraMusicMixer = (() => {
     $("track").disabled = first;
     $("retry").hidden = generationState.phase !== "error";
     $("clear-pending").hidden = !generationState.canClearPending;
+    $("use-full-mix").hidden = !tracks.some((track) => track.id === generationState.pendingId && fullMixOnly(track));
     $("current").textContent = next.track ? trackLabel(next.track) : "—";
     $("next").textContent = generationState.phase === "looping" ? "Repeating current track"
       : generationState.phase === "loading-saved" ? "Loading selected track…"
@@ -386,10 +387,14 @@ globalThis.HydraMusicMixer = (() => {
   }
   function trackLabel(track) {
     const label = globalThis.HydraElevenLabs.musicLabel(track, plans.get(track.plan_id));
-    return track.origin === "uploaded" ? `${label} · Uploaded` : label;
+    return track.origin === "uploaded" ? `${label} · Uploaded` : fullMixOnly(track) ? `${label} · Full mix only` : label;
+  }
+  function fullMixOnly(job) {
+    return job.state === "complete" && (["failed", "unknown"].includes(job.stem_separation?.state)
+      || job.stem_separation?.state === "complete" && !job.stem_separation.stems?.length);
   }
   function readyTrack(job) {
-    return job.state === "complete" && (job.origin === "uploaded" || job.separate_stems !== true || (job.stem_separation?.state === "complete" && job.stem_separation.stems?.length));
+    return job.state === "complete" && (fullMixOnly(job) || job.origin === "uploaded" || job.separate_stems !== true || (job.stem_separation?.state === "complete" && job.stem_separation.stems?.length));
   }
   function persistCustom() {
     try {
@@ -688,7 +693,10 @@ globalThis.HydraMusicMixer = (() => {
       config.channels = names.map((name) => config.channels.find((channel) => channel.name === name) || api().defaultChannel(name));
       // A newly chosen upload should loop safely, while a session restore or
       // same-track stem upgrade must retain the user's next-track decision.
-      if (job.origin === "uploaded" && selectedId !== id) $("next-mode").value = "loop";
+      if ((job.origin === "uploaded" && selectedId !== id) || (fullMixOnly(job) && explicitRecall)) {
+        $("next-mode").value = "loop";
+        generation.settingsChanged();
+      }
       selectedId = id;
       commit("channels", "track_channels_changed", { track_id: id });
       const track = { ...job, audio_url: job.audio_url || `/api/elevenlabs/generations/${encodeURIComponent(id)}/audio`, stems };
@@ -700,7 +708,7 @@ globalThis.HydraMusicMixer = (() => {
         if (["queued", "generating", "submitting", "separating", "running"].includes(job.stem_separation?.state)) scheduleCustomCheck(customRun);
       }
       renderTracks(); save();
-      notice("");
+      notice(fullMixOnly(job) ? "Loaded the saved full mix. Individual stems are unavailable. Press Play saved track; no new generation request was sent." : "");
     } catch (error) {
       if (run === fetchRun) renderTracks();
       if (error.status === 404) throw new Error(`Saved track ${id} is unavailable. Restore its session bundle or choose another track. Your saved selection and mixer settings have been kept.`);
@@ -853,6 +861,14 @@ globalThis.HydraMusicMixer = (() => {
       loadCustom(custom.id).catch((error) => { if (error.name !== "AbortError") notice(error.message, true); }); return;
     }
     if (el.id === "mm-refresh") { refresh(); return; }
+    if (el.id === "mm-use-full-mix") {
+      const id = generationState.pendingId;
+      if (loadingTrack || !tracks.some((track) => track.id === id && fullMixOnly(track))) return;
+      ++selectionRevision;
+      generation.stop(); const run = ++fetchRun; controller?.abort(); controller = new AbortController();
+      selectTrack(id, run, controller.signal, true).catch((error) => { if (run === fetchRun && error.name !== "AbortError") notice(error.message, true); });
+      return;
+    }
     if (el.id === "mm-clear-pending") {
       if (!generationState.canClearPending) return;
       if (!globalThis.confirm("Clear this unconfirmed request? Saved music is kept. If ElevenLabs already received it, it may still finish and use credits. Clearing does not start a new generation.")) return;
@@ -909,7 +925,7 @@ globalThis.HydraMusicMixer = (() => {
       <section class="mm-prompt-panel" aria-labelledby="mm-prompt-title"><div class="mm-section-heading"><div><span class="mm-eyebrow">01 / MUSIC CREATION</span><h2 id="mm-prompt-title">Create instrumental music</h2></div><span id="mm-next" class="mm-next-state" role="status">—</span></div>
         <div class="mm-next-controls"><label>Next track<select id="mm-next-mode" data-next-field><option value="loop">Loop</option><option value="similar">Generate similar</option><option value="new">Generate new</option><option value="old">Choose old</option></select></label><label id="mm-next-track-field" hidden>Saved track<select id="mm-next-track" data-next-field><option value="">Choose a saved track…</option></select></label></div>
         <div class="mm-prompt-grid"><label class="mm-prompt-text">Next track prompt<textarea id="mm-prompt" data-prompt-field rows="2" maxlength="300" title="Used for Generate similar, Generate new, or a starting track."></textarea></label><label>BPM<input id="mm-bpm" data-prompt-field type="number" min="20" max="300" step="1"></label><label>Key<input id="mm-key" data-prompt-field maxlength="80"></label><label>Track length<select id="mm-duration" data-prompt-field><option value="20">20 seconds</option><option value="40">40 seconds</option><option value="60">60 seconds</option></select></label><label class="mm-instruments">Instruments<input id="mm-instruments" data-prompt-field placeholder="Synthesizer, bass, drums"></label></div>
-        <div class="mm-prompt-actions"><button id="mm-generate" class="mm-button mm-primary">Start music</button><button id="mm-play" class="mm-button" disabled>▶ Play saved track</button><button id="mm-stop" class="mm-button" disabled>■ Stop</button><button id="mm-retry" class="mm-button" hidden>Retry next track</button><button id="mm-clear-pending" class="mm-button" hidden>Clear pending request</button></div>
+        <div class="mm-prompt-actions"><button id="mm-generate" class="mm-button mm-primary">Start music</button><button id="mm-play" class="mm-button" disabled>▶ Play saved track</button><button id="mm-stop" class="mm-button" disabled>■ Stop</button><button id="mm-retry" class="mm-button" hidden>Retry next track</button><button id="mm-use-full-mix" class="mm-button" hidden>Use saved full mix · no charge</button><button id="mm-clear-pending" class="mm-button" hidden>Clear pending request</button></div>
         <div class="mm-now-playing"><span>Now playing</span><b id="mm-current">—</b></div>
         <div id="mm-up-next" class="mm-now-playing mm-up-next" hidden><span>Up next</span><b id="mm-next-prompt"></b></div>
         <div class="mm-transport-readout"><span id="mm-transport-status">Stopped</span><progress id="mm-progress" value="0" max="1" aria-label="Track progress"></progress><span id="mm-clock">0:00 / 0:00</span><span id="mm-beat-sync" class="mm-beat-sync" role="status" hidden></span></div>

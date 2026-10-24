@@ -688,12 +688,21 @@ Jobs, inputs, immutable plan revisions, and audio persist under ignored
 or ambiguous provider outcomes become **unknown**, with no automatic retry;
 another attempt may incur another charge. Successful responses must fully
 decode before playback becomes available. Duration mismatches remain visible.
+If music completed but stem separation failed or has an unknown outcome,
+Music mixer offers **Use saved full mix · no charge**. The same audio appears
+under Recent tracks as **Full mix only**. Choosing it switches to Loop and
+loads the saved audio; press **Play saved track** to listen. Individual stem
+controls remain unavailable, and the original separation attempt stays saved.
 Tempo, key, articulation, and density are requested musical properties;
 listening is needed to assess the musical result.
 
 The provider timeout defaults to 300 seconds and can be configured with
 `ELEVENLABS_TIMEOUT_SECONDS`. Music routes accept same-origin JSON requests
 on a loopback server only, including when remote telemetry is otherwise enabled.
+Audio payload reads check the remaining deadline even when data arrives slowly;
+HTTP response headers retain the socket's idle timeout.
+Connection failures save the operation, response stage, elapsed time and byte
+count in the local job, without recording API keys or provider error bodies.
 The implementation follows the [composition plan API](https://elevenlabs.io/docs/eleven-api/guides/how-to/music/composition-plans),
 [compose endpoint](https://elevenlabs.io/docs/api-reference/music/compose),
 [stem separation endpoint](https://elevenlabs.io/docs/api-reference/music/separate-stems),
@@ -1178,22 +1187,21 @@ Current service limitations:
 
 For a normal scheduled note-off failure, the scheduler makes two bounded
 retries. If all three attempts fail, it sends emergency sustain-off (CC 64),
-all-notes-off (CC 123), and all-sound-off (CC 120) on that MIDI channel. This
+explicit note-offs for all 128 pitches, and all-notes-off (CC 123) on that MIDI channel. This
 deliberately silences user-played notes and notes owned by other jobs on the
 same channel. The resulting job is `failed`, and a `note_off_failed` event
 reports whether emergency cleanup succeeded.
 
 The service's `panic` operation and shutdown path send at most four explicit
-note-offs per tracked channel/pitch, then send CC 64/123/120 on all 16
+note-offs per tracked channel/pitch, then send CC 64/123 on all 16
 channels. A channel's tracked state is cleared only after its CC cleanup
 succeeds; otherwise unconfirmed state is retained. A request-time failure
 returns `midi_send_failed`; the final `stopping` event reports `panic_ok`.
 
-**Hydrasynth cleanup caveat:** the repository's MIDI mapping assigns CC 120 to
-ARP Octave. Native panic/shutdown therefore needs hardware validation before it
-can be treated as a reset that preserves arpeggiator settings. The browser's
-All notes off path uses CC 64/123 without CC 120. See the manual's
-[native MIDI chapter](instruction-manual.html#native-midi-audio).
+CC 120 is ARP Octave on the Hydrasynth, so every panic and cleanup path excludes
+it. The standalone `hydractl panic` command has no note ledger and explicitly
+releases all 128 pitches on its selected channel, in addition to CC 64/123.
+The browser's All notes off path also uses explicit releases and CC 64/123.
 
 Hardware validation on 31 July 2026 passed the persistent-controller acceptance
 run on A001: a scheduled 3.2-second C/E/G chord played while concurrent

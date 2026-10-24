@@ -22,7 +22,8 @@ function fixture() {
     if (kind === 0x90) keys.add(note);
     if (kind === 0x80) { keys.delete(note); if (pedal) sustained.add(note); }
     if (kind === 0xB0 && note === 64) { pedal = value > 0; if (!pedal) sustained.clear(); }
-    if (kind === 0xB0 && (note === 120 || note === 123)) { keys.clear(); sustained.clear(); }
+    // ASM assigns CC120 to ARP Octave, so it cannot silence a stuck note.
+    if (kind === 0xB0 && note === 123) { keys.clear(); sustained.clear(); }
   }
   const output = { name: "HYDRASYNTH EXPLORER MIDI 1", send(bytes, timestamp) {
     sent.push({ bytes: [...bytes], timestamp });
@@ -65,13 +66,24 @@ function appFixture(send) {
     state.output = state.synthOutput = "midi";
     dom["preview-button"] = { classList: { add() {}, remove() {} } };
     dom["session-state"] = {};
-    globalThis.api = { state, togglePlayback, stopPlayback, playMidiNote };
+    globalThis.api = { state, togglePlayback, stopPlayback, playMidiNote, panicMidi };
   `, sandbox);
   sandbox.api.state.midiOutput = h.output;
   return { ...h, ...sandbox.api, calls, errors };
 }
 
 async function main() {
+  {
+    const h = appFixture(async () => ({ ok: true }));
+    h.output.send([0x90, 60, 90]);
+    h.output.send([0xB0, 120, 0]);
+    assert.equal(h.keys.has(60), true, "the fixture follows Hydrasynth's CC120 meaning");
+    h.sent.length = 0;
+    h.panicMidi();
+    assert.deepEqual(h.sent.map(item => item.bytes), [[0xB0, 64, 0],
+      ...Array.from({ length: 128 }, (_, note) => [0x80, note, 0]), [0xB0, 123, 0]]);
+    assert.equal(h.keys.size, 0, "panic releases notes absent from the page's ledger");
+  }
   {
     const h = fixture();
     assert.equal(Safety.MAX_NOTE_MS, 5000);
@@ -139,7 +151,7 @@ async function main() {
       }
       if (!lease || body.lease_id !== lease.id || h.now() >= lease.deadline) throw new Error("Stale MIDI safety lease");
       if (method === "heartbeat") lease.deadline = h.now() + 2500;
-      if (method === "disarm") { h.output.send([0xB0, 120, 0]); lease = null; }
+      if (method === "disarm") { h.output.send([0xB0, 64, 0]); h.output.send([0xB0, 123, 0]); lease = null; }
       return { ok: true };
     };
     const guard = Safety.createGuard({ ...h, send, onFailure(error) { failures.push(error.message); h.notes.stop(); } });
@@ -152,7 +164,7 @@ async function main() {
     h.advanceNative(500); await h.flushTimers();
     assert.equal(calls.filter(call => call.method === "heartbeat").length, 1);
     h.advanceNative(2600); // Simulate renderer death; backend deadline remains independent.
-    if (lease && h.now() >= lease.deadline) { h.output.send([0xB0, 64, 0]); h.output.send([0xB0, 120, 0]); lease = null; }
+    if (lease && h.now() >= lease.deadline) { h.output.send([0xB0, 64, 0]); h.output.send([0xB0, 123, 0]); lease = null; }
     assert.equal(h.sustained.size, 0, "the server watchdog can silence sustained notes without JS");
     assert.throws(() => guard.assertReady(h.output), /expired/, "a recovered JS thread cannot resume an expired session");
     await h.flushTimers();

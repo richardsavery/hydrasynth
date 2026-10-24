@@ -183,7 +183,10 @@ globalThis.HydraMusicMixerGeneration = (() => {
           }
           if (separation?.state === "failed" || separation?.state === "unknown" || separation?.state === "complete") {
             pending.stage = separation?.state === "unknown" ? "polling" : "failed"; persist();
-            throw new Error(separation.error || "Stem separation failed. The current track will repeat.");
+            // Retain the complete mix for an explicit free recovery choice.
+            // Automatic playback still requires the requested stems.
+            onTrack({ ...job, stems: [] });
+            throw new Error(`Music is saved, but stem separation ${separation.state === "unknown" ? "has no confirmed result" : "failed"}. Use saved full mix to continue without another charge. No automatic retry was made.`);
           }
           // Every new job requests stems on the server. Never issue a second
           // paid separation request while that pipeline is finishing.
@@ -322,7 +325,7 @@ globalThis.HydraMusicMixerGeneration = (() => {
         let track = await call(`/generations/${encodeURIComponent(id)}`, {}, run);
         if (!valid()) return false;
         const separation = track.stem_separation;
-        if (track.state !== "complete" || (track.separate_stems === true && !(separation?.state === "complete" && separation.stems?.length))) {
+        if (track.state !== "complete" || (track.separate_stems === true && !["complete", "failed", "unknown"].includes(separation?.state))) {
           throw new Error("This saved track is not ready. Choose a completed track.");
         }
         if (!track.generation_settings && !track.realtime?.generation_settings && track.plan_id) {

@@ -5,7 +5,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const vm = require("node:vm");
 
-function fixture({ preferences = {}, saved = {}, available = true } = {}) {
+function fixture({ preferences = {}, saved = {}, available = true, native = false, nativeAvailable = true } = {}) {
   const storage = new Map([["hydra.connections.v1", JSON.stringify(preferences)], ["hydra-signal-lab-v1", JSON.stringify(saved)]]);
   const elements = new Map(), calls = [], messages = [], sent = [];
   const element = id => {
@@ -21,6 +21,7 @@ function fixture({ preferences = {}, saved = {}, available = true } = {}) {
     navigator: available ? { requestMIDIAccess(options) {
       calls.push(options); return new Promise((yes, no) => { resolve = yes; reject = no; });
     } } : {},
+    HydraDashboardConfig: { native_midi: native },
     testStop: () => { stops++; }, testMessage: text => messages.push(text)
   });
   for (const file of ["drums.js", "sonification.js", "parameters.js", "app.js"])
@@ -30,6 +31,7 @@ function fixture({ preferences = {}, saved = {}, available = true } = {}) {
       selectConnectionOutput, restoreConnectionPreferences, saveConnectionPreferences };
     renderSoundControls = renderOutputMode = renderPlaybackAvailability = updateConnectionSummary = () => {};
     stopPlayback = () => { testStop(); state.playing = state.preparing = false; };
+    midiSafetyGuard = () => ({ ownerId: "test-owner" });
     showToast = testMessage;
     saveSettings = () => { if (state.connectionsReady) saveConnectionPreferences(); return true; };
   `, context);
@@ -40,6 +42,10 @@ function fixture({ preferences = {}, saved = {}, available = true } = {}) {
   api.dom["midi-rate"].value = "50";
   api.state.workspaceView = "connections";
   const access = { outputs: new Map() };
+  if (nativeAvailable) context.HydraNativeMidi = { createAccess(options) {
+    calls.push({ native: true, ownerId: options.ownerId });
+    return new Promise((yes, no) => { resolve = yes; reject = no; });
+  } };
   const port = (id, name = "HYDRASYNTH", manufacturer = "ASM", state = "connected") => ({ id, name, manufacturer, state,
     send: bytes => sent.push([id, ...bytes]) });
   return { ...api, access, calls, storage, messages, sent, element, port, get stops() { return stops; },
@@ -51,6 +57,37 @@ function fixture({ preferences = {}, saved = {}, available = true } = {}) {
 }
 
 async function main() {
+  assert.match(fs.readFileSync(path.join(__dirname, "../dashboard/index.html"), "utf8"),
+    /id="midi-status">Connect the Hydrasynth over USB, then select Connect MIDI device\./,
+    "startup instructions work before the server's native/browser transport configuration is applied");
+  {
+    const h = fixture({ native: true });
+    await h.restoreConnectionPreferences({ autoConnectMidi: true }); await h.grant();
+    assert.match(h.dom["midi-status"].textContent, /Hydrasynth over USB/);
+    assert.doesNotMatch(h.dom["midi-status"].textContent, /browser|grant|permission/i,
+      "native discovery never asks for browser MIDI permission");
+  }
+  {
+    const h = fixture({ native: true, available: false, preferences: {
+      synthOutput: "midi", midiDeviceId: "previous-webmidi-id", midiDeviceName: "HYDRASYNTH EXPLORER MIDI 1", midiDeviceManufacturer: "ASM"
+    } });
+    const hydra = { ...h.port("native:HYDRASYNTH EXPLORER: HYDRASYNTH EXPLORER MIDI 1", "HYDRASYNTH EXPLORER MIDI 1", ""),
+      transport: "native", aliases: ["HYDRASYNTH EXPLORER: HYDRASYNTH EXPLORER MIDI 1"] };
+    h.access.outputs.set(hydra.id, hydra);
+    await h.restoreConnectionPreferences({ autoConnectMidi: true }); await h.grant();
+    assert.deepEqual(h.calls, [{ native: true, ownerId: "test-owner" }], "Linux never requests browser MIDI access, even when it is unavailable");
+    assert.equal(h.state.midiOutput, hydra, "the previous Linux browser identity migrates by name");
+    assert.match(h.dom["midi-status"].textContent, /through the dashboard/);
+    assert.equal(h.state.synthOutput, "midi");
+    assert.deepEqual(h.sent, [], "connecting the native route never sounds the synth");
+  }
+  {
+    const h = fixture({ native: true, nativeAvailable: false });
+    await h.restoreConnectionPreferences({ autoConnectMidi: true });
+    await h.state.midiConnecting;
+    assert.equal(h.calls.length, 0, "a missing native module cannot fall back to Chrome MIDI");
+    assert.match(h.dom["midi-status"].textContent, /Native MIDI did not load/);
+  }
   {
     const h = fixture(), hydra = h.port("hydra-1");
     h.access.outputs.set(hydra.id, hydra);

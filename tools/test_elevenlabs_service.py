@@ -4,17 +4,20 @@
 import copy
 from email.message import Message
 import io
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import math
 import os
 from pathlib import Path
 import re
 import shutil
+import socket
 import ssl
 import struct
 import subprocess
 import tempfile
 import threading
+import time
 import unittest
 from unittest import mock
 from urllib import error
@@ -327,9 +330,11 @@ class ServiceTests(unittest.TestCase):
     def test_upload_ambiguous_separation_is_never_replayed(self):
         job = self.upload()
         self.service.create_stem_job(job["id"])
-        self.client.separate_stems = mock.Mock(side_effect=GenerationError("Unknown outcome", "unknown"))
+        details = {"operation": "stem_separation", "phase": "downloading", "reason": "timeout", "bytes_received": 10}
+        self.client.separate_stems = mock.Mock(side_effect=GenerationError("Unknown outcome", "unknown", diagnostics=details))
         self.service._run_stem_job(job["id"])
         self.assertEqual(self.service.create_stem_job(job["id"])["state"], "unknown")
+        self.assertEqual(self.service._job(job["id"])["stem_separation"]["failure_details"], details)
         self.service.close()
         self.service = ElevenLabsService(self.root / "var" / "elevenlabs", self.env, client=self.client, start_worker=False)
         self.assertEqual(self.service.create_stem_job(job["id"])["state"], "unknown")
@@ -540,11 +545,13 @@ class ServiceTests(unittest.TestCase):
                 self.assertEqual(self.service.audio_response(self.service._job(job["id"])).path.read_bytes(), b"mock valid audio")
 
     def test_unknown_never_retries_and_partial_file_is_removed(self):
-        self.client.failure = GenerationError("timeout test-secret-123", "unknown")
+        details = {"operation": "music_generation", "phase": "awaiting_response", "reason": "timeout", "bytes_received": 0}
+        self.client.failure = GenerationError("timeout test-secret-123", "unknown", diagnostics=details)
         first = self.generate()
         self.service._run_job(first["id"])
         result = self.service._job(first["id"])
         self.assertEqual(result["state"], "unknown")
+        self.assertEqual(result["failure_details"], details)
         self.assertNotIn("stem_separation", result)
         self.assertNotIn("test-secret", result["error"])
         self.assertFalse((self.service.root / "jobs" / first["id"] / "audio.tmp").exists())
@@ -905,6 +912,81 @@ class ClientTests(unittest.TestCase):
                 self.client.generate(example_plan()["request"], self.output)
         self.assertEqual(caught.exception.state, "unknown")
         self.assertEqual(opener.open.call_count, 1)
+        self.assertEqual(caught.exception.diagnostics["reason"], "incomplete_response")
+        self.assertEqual(caught.exception.diagnostics["bytes_received"], len(b"partial-audio"))
+
+    def test_slow_response_has_total_deadline_and_no_second_submission(self):
+        # A continuously trickling response never hits a socket idle timeout.
+        # A real urllib response must still stop at the total request deadline.
+        calls = []
+        class SlowResponse(BaseHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+            def do_POST(self):
+                calls.append(self.path)
+                self.rfile.read(int(self.headers["Content-Length"]))
+                self.send_response(200)
+                self.send_header("Content-Type", "audio/mpeg")
+                self.send_header("Content-Length", "40")
+                self.send_header("request-id", "safe-request-123")
+                self.end_headers()
+                try:
+                    for _ in range(40):
+                        self.wfile.write(b"x")
+                        self.wfile.flush()
+                        time.sleep(.03)
+                except (BrokenPipeError, ConnectionResetError):
+                    pass
+        server = ThreadingHTTPServer(("127.0.0.1", 0), SlowResponse)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        self.client.timeout = .18
+        started = time.monotonic()
+        try:
+            with mock.patch("elevenlabs_service.PROVIDER_URL", f"http://127.0.0.1:{server.server_port}/music"):
+                with self.assertRaises(GenerationError) as caught:
+                    self.client.generate(example_plan()["request"], self.output)
+            elapsed = time.monotonic() - started
+            self.assertLess(elapsed, .7, "read(64 KiB) must not wait for the entire trickle")
+            self.assertEqual(calls, ["/music"])
+            self.assertEqual(caught.exception.state, "unknown")
+            self.assertEqual(caught.exception.diagnostics["phase"], "downloading")
+            self.assertEqual(caught.exception.diagnostics["reason"], "timeout")
+            self.assertEqual(caught.exception.diagnostics["provider_request_id"], "safe-request-123")
+            self.assertGreater(caught.exception.diagnostics["bytes_received"], 0)
+            self.assertLess(caught.exception.diagnostics["bytes_received"], 40)
+            self.assertNotIn("do-not-leak", canonical_json(caught.exception.diagnostics))
+        finally:
+            server.shutdown(); server.server_close(); thread.join(timeout=2)
+
+    def test_stem_timeout_identifies_stage_and_retains_safe_diagnostics(self):
+        source = self.output.with_name("saved.mp3")
+        source.write_bytes(b"saved music")
+        opener = mock.Mock()
+        opener.open.side_effect = TimeoutError("private details do-not-leak")
+        with mock.patch("elevenlabs_service.request.build_opener", return_value=opener):
+            with self.assertRaises(GenerationError) as caught:
+                self.client.separate_stems(source, self.output, "six_stems_v1")
+        self.assertEqual(opener.open.call_count, 1)
+        self.assertEqual(caught.exception.state, "unknown")
+        self.assertIn("Stem separation timed out", str(caught.exception))
+        self.assertIn("full mix is saved", str(caught.exception))
+        self.assertEqual(caught.exception.diagnostics["operation"], "stem_separation")
+        self.assertEqual(caught.exception.diagnostics["phase"], "awaiting_response")
+        self.assertEqual(caught.exception.diagnostics["bytes_received"], 0)
+        self.assertNotIn("do-not-leak", str(caught.exception))
+
+    def test_known_connect_failures_are_unsent_without_retry(self):
+        for reason in (socket.gaierror("private do-not-leak"), ConnectionRefusedError("private do-not-leak")):
+            opener = mock.Mock()
+            opener.open.side_effect = error.URLError(reason)
+            with mock.patch("elevenlabs_service.request.build_opener", return_value=opener):
+                with self.assertRaises(GenerationError) as caught:
+                    self.client.generate(example_plan()["request"], self.output)
+            self.assertEqual(opener.open.call_count, 1)
+            self.assertEqual(caught.exception.state, "failed")
+            self.assertIn("request was not sent", str(caught.exception))
+            self.assertNotIn("do-not-leak", str(caught.exception))
 
     def test_provider_rejections_and_ambiguous_errors_do_not_retry(self):
         for failure, state in [

@@ -20,6 +20,7 @@ from pathlib import Path
 import queue
 import re
 import shutil
+import socket
 import sqlite3
 import ssl
 import subprocess
@@ -146,9 +147,10 @@ class ServiceError(Exception):
 
 
 class GenerationError(Exception):
-    def __init__(self, message: str, state: str = "failed"):
+    def __init__(self, message: str, state: str = "failed", *, diagnostics: dict[str, Any] | None = None):
         super().__init__(message)
         self.state = state
+        self.diagnostics = diagnostics
 
 
 def uploaded_filename(filename: str) -> str:
@@ -285,9 +287,35 @@ class ElevenLabsClient:
         return self._download(outgoing, destination, archive=True, max_bytes=max_archive_bytes)
 
     def _download(self, outgoing: request.Request, destination: Path, *, archive: bool = False, max_bytes: int = MAX_AUDIO_BYTES) -> dict[str, Any]:
+        started = time.monotonic()
+        deadline = started + self.timeout
+        phase, total = "awaiting_response", 0
+        provider_request_id = None
+        operation = "Stem separation" if archive else "Music generation"
+
+        def failure(kind: str, *, unsent: bool = False) -> GenerationError:
+            details = {"operation": "stem_separation" if archive else "music_generation",
+                       "phase": phase, "reason": kind, "bytes_received": total,
+                       "elapsed_seconds": round(time.monotonic() - started, 3),
+                       "timeout_seconds": self.timeout}
+            if provider_request_id:
+                details["provider_request_id"] = provider_request_id
+            if unsent:
+                message = f"{operation} could not connect to ElevenLabs. Check the internet connection. The request was not sent."
+            else:
+                reason = "timed out" if kind == "timeout" else "was interrupted"
+                message = (f"{operation} {reason} while {'downloading the result' if phase == 'downloading' else 'waiting for ElevenLabs'}. "
+                           "The provider outcome is unknown; another attempt may incur another charge. No automatic retry was made.")
+                if archive:
+                    message += " The full mix is saved and remains available."
+            return GenerationError(message, "failed" if unsent else "unknown", diagnostics=details)
+
         try:
-            deadline = time.monotonic() + self.timeout
             with request.build_opener(NoRedirect, request.HTTPSHandler(context=self.tls_context)).open(outgoing, timeout=self.timeout) as response:
+                phase = "downloading"
+                candidate = response.headers.get("request-id") or response.headers.get("x-request-id")
+                if candidate and not (self.api_key and self.api_key in candidate) and re.fullmatch(r"[A-Za-z0-9_-]{1,200}", candidate):
+                    provider_request_id = candidate
                 if getattr(response, "status", 200) != 200:
                     raise GenerationError("ElevenLabs returned an unexpected HTTP status. The result was not saved.", "unknown")
                 media_type = response.headers.get_content_type().lower()
@@ -303,12 +331,21 @@ class ElevenLabsClient:
                         raise GenerationError("ElevenLabs returned an invalid audio response length.", "unknown") from None
                     if expected_length < 0 or expected_length > max_bytes:
                         raise GenerationError("The generated audio exceeded the local response size limits.")
-                total = 0
                 with destination.open("xb") as audio:
                     while True:
+                        remaining = deadline - time.monotonic()
+                        if remaining <= 0:
+                            raise TimeoutError
+                        # urllib's read(n) may make many socket reads before
+                        # returning n bytes, resetting its idle timeout each
+                        # time. read1 returns after one buffered/raw read; cap
+                        # that read by the remaining total download deadline.
+                        sock = getattr(getattr(getattr(response, "fp", None), "raw", None), "_sock", None)
+                        if sock is not None:
+                            sock.settimeout(remaining)
+                        chunk = response.read1(64 * 1024)
                         if time.monotonic() > deadline:
                             raise TimeoutError
-                        chunk = response.read(64 * 1024)
                         if not chunk:
                             break
                         total += len(chunk)
@@ -320,7 +357,7 @@ class ElevenLabsClient:
                 if total == 0:
                     raise GenerationError("ElevenLabs returned empty audio. No playable result was saved.")
                 if expected_length is not None and total != expected_length:
-                    raise GenerationError("The audio download was incomplete. The provider outcome is unknown; no automatic retry was made.", "unknown")
+                    raise failure("incomplete_response")
                 song_id = response.headers.get("song-id") or response.headers.get("x-song-id")
                 if song_id and not re.fullmatch(r"[A-Za-z0-9_-]{1,200}", song_id):
                     song_id = None
@@ -365,15 +402,13 @@ class ElevenLabsClient:
                     "The HTTPS connection could not verify ElevenLabs' certificate. Install or repair Python's trusted CA certificates "
                     "(or the system /etc/ssl/cert.pem bundle) and restart the dashboard. The generation request was not sent."
                 ) from None
-            raise GenerationError(
-                "The generation connection was interrupted or timed out. The provider outcome is unknown; "
-                "another attempt may incur another charge. No automatic retry was made.", "unknown"
-            ) from None
-        except (TimeoutError, ConnectionError, OSError, http.client.IncompleteRead):
-            raise GenerationError(
-                "The generation connection was interrupted or timed out. The provider outcome is unknown; "
-                "another attempt may incur another charge. No automatic retry was made.", "unknown"
-            ) from None
+            if isinstance(reason, (socket.gaierror, ConnectionRefusedError)):
+                raise failure("connection_unavailable", unsent=True) from None
+            raise failure("timeout" if isinstance(reason, TimeoutError) else "connection_interrupted") from None
+        except TimeoutError:
+            raise failure("timeout") from None
+        except (ConnectionError, OSError, http.client.IncompleteRead, http.client.HTTPException):
+            raise failure("connection_interrupted") from None
 
 
 def validate_audio(path: Path, requested_duration: float, ffmpeg: str, ffprobe: str, *, uploaded: bool = False) -> dict[str, Any]:
@@ -1115,6 +1150,8 @@ class ElevenLabsService:
             )
         except GenerationError as exc:
             job.update(state=exc.state, updated_at=utc_now(), error=self._redact(str(exc)))
+            if exc.diagnostics:
+                job["failure_details"] = exc.diagnostics
         except Exception:
             # An unexpected local failure may happen after POST; never retry it.
             job.update(state="unknown", updated_at=utc_now(), error="Generation stopped after an unexpected local error. The provider outcome may be unknown; no automatic retry was made.")
@@ -1174,6 +1211,8 @@ class ElevenLabsService:
                               separation_latency_seconds=round(time.monotonic() - started, 3))
         except GenerationError as exc:
             separation.update(state=exc.state, updated_at=utc_now(), error=self._redact(str(exc)))
+            if exc.diagnostics:
+                separation["failure_details"] = exc.diagnostics
         except (ValueError, zipfile.BadZipFile, RuntimeError):
             separation.update(state="failed", updated_at=utc_now(), error="The stem archive failed validation. The original track is still available; no automatic retry was made.")
         except Exception:

@@ -10,6 +10,7 @@ import unittest
 
 from hydra_dashboard import DashboardHTTPServer, SnapshotStore, handler_for
 from midi_safety import MidiSafetyService, SETTLING_MS, TIMEOUT_MS, output_names
+from native_midi import NativeMidiError
 
 
 LINUX_NAME = "HYDRASYNTH EXPLORER: HYDRASYNTH EXPLORER MIDI 1"
@@ -46,12 +47,30 @@ class Native:
         return [argv for argv, _ in self.calls if argv[1] == "panic"]
 
 
+class Transport:
+    def __init__(self, binary, device, channel):
+        self.binary, self.device, self.channel = binary, device, channel
+        self.commands = []
+        self.closed = False
+        self.failed = False
+        self.healthy = True
+
+    def request(self, command):
+        self.commands.append(command)
+        if self.failed:
+            raise NativeMidiError("simulated disconnect")
+        return {"ok": True}
+
+    def close(self):
+        self.closed = True
+
+
 class MidiSafetyTests(unittest.TestCase):
     def setUp(self):
         self.now = 100.0
         self.native = Native()
         self.service = MidiSafetyService(Path("/fake/hydractl"), runner=self.native,
-                                         clock=lambda: self.now, start_thread=False)
+                                         clock=lambda: self.now, start_thread=False, native_enabled=False)
         self.addCleanup(self.service.close)
 
     def request(self, operation, payload):
@@ -67,6 +86,200 @@ class MidiSafetyTests(unittest.TestCase):
         self.assertFalse(self.service.status()["armed"])
         self.service.close()
         self.assertEqual(self.native.calls, [])
+
+    def test_diagnostics_correlate_lifecycle_without_secrets_or_inputs(self):
+        events = []
+        self.service.diagnostic_sink = events.append
+        first = self.arm(channel=3)
+        self.assertEqual(self.service.status()["generation"], 1)
+        self.request("heartbeat", {"lease_id": first["lease_id"]})
+        self.assertEqual(len(events), 1, "heartbeats must not become a high-volume log")
+        self.now += TIMEOUT_MS / 1000
+        self.service.check_timeout()
+        self.assertEqual(events, [
+            {"event": "armed", "reason": "armed", "generation": 1, "channel": 3},
+            {"event": "panic", "reason": "heartbeat_timeout", "generation": 1,
+             "channel": 3, "panic_ok": True},
+        ])
+        self.assertIsNone(self.service.status()["generation"])
+        second = self.arm(channel=3)
+        self.assertEqual(self.service.status()["generation"], 2)
+        self.request("disarm", {"lease_id": second["lease_id"]})
+        self.assertEqual(events[-1]["reason"], "disarmed")
+        self.assertEqual(events[-1]["generation"], 2)
+        encoded = json.dumps(events)
+        for secret in (first["lease_id"], second["lease_id"], OWNER, BROWSER_NAME, LINUX_NAME):
+            self.assertNotIn(secret, encoded)
+
+    def test_diagnostic_failure_cannot_prevent_native_release(self):
+        def broken_sink(_event):
+            raise OSError("disk full")
+        self.service.diagnostic_sink = broken_sink
+        lease = self.arm()
+        self.assertEqual(self.request("disarm", {"lease_id": lease["lease_id"]})[0], 200)
+        self.assertEqual(len(self.native.panics), 1)
+        self.assertTrue(self.service.status()["last_panic_ok"])
+
+    def native_arm(self, owner=OWNER):
+        self.service.native_enabled = True
+        self.service._transport_factory = Transport
+        code, lease = self.request("arm", {"port_name": LINUX_NAME, "channel": 3,
+                                           "owner_id": owner, "transport": "native"})
+        self.assertEqual(code, 200, lease)
+        return lease
+
+    def test_native_dashboard_rejects_cached_webmidi_page_before_hardware_access(self):
+        self.service.native_enabled = True
+        base = {"port_name": BROWSER_NAME, "channel": 1, "owner_id": OWNER}
+        for document in (base, {**base, "transport": "webmidi"}):
+            code, body = self.request("arm", document)
+            self.assertEqual(code, 409)
+            self.assertIn("Reload the dashboard", body["error"])
+        self.assertEqual(self.native.calls, [])
+        self.assertFalse(self.service.status()["armed"])
+
+    def test_native_ports_preserve_alias_and_full_identity(self):
+        self.service.native_enabled = True
+        code, body = self.service.dispatch("GET", "/api/midi-safety/ports")
+        self.assertEqual(code, 200)
+        self.assertEqual(body["outputs"], [{"id": "native:" + LINUX_NAME,
+            "name": BROWSER_NAME, "aliases": [LINUX_NAME, BROWSER_NAME], "transport": "native",
+            "manufacturer": "", "state": "connected", "type": "output", "native": True}])
+
+    def test_native_commands_and_disarm_use_persistent_scheduler(self):
+        lease = self.native_arm()
+        transport = self.service._native
+        self.assertEqual(transport.device, LINUX_NAME)
+        commands = [{"op": "play", "notes": [60, 64, 67], "velocity": 80, "duration_ms": 400},
+                    {"op": "cc", "number": 74, "value": 90},
+                    {"op": "nrpn", "parameter": 1234, "value": 5678},
+                    {"op": "program", "number": 15}, {"op": "note_off", "note": 60}]
+        self.assertEqual(self.request("send", {"lease_id": lease["lease_id"], "commands": commands}),
+                         (200, {"ok": True, "sent": 5}))
+        self.assertEqual(transport.commands, [{**item, "channel": 3} for item in commands])
+        self.request("disarm", {"lease_id": lease["lease_id"]})
+        self.assertEqual(transport.commands[-1], {"op": "panic"})
+        self.assertTrue(transport.closed)
+        self.assertEqual(self.native.panics, [], "successful native panic needs no CLI fallback")
+
+    def test_native_batch_is_fully_validated_before_any_command(self):
+        lease = self.native_arm()
+        valid = {"op": "cc", "number": 74, "value": 90}
+        invalid = [{"op": "note_on", "note": 60}, {"op": "play", "notes": [60], "velocity": 80, "duration_ms": 5001},
+                   {"op": "play", "notes": [60, 60], "velocity": 80, "duration_ms": 100},
+                   {"op": "play", "notes": [60], "velocity": 80, "duration_ms": 1.2},
+                   {**valid, "channel": 2}, {**valid, "force": True}, {**valid, "value": True},
+                   {**valid, "channel": True}, {"op": "program", "number": 128}, {"op": "shutdown"},
+                   {"op": "play", "notes": [60], "velocity": 80, "duration_ms": 9}]
+        for command in invalid:
+            with self.subTest(command=command):
+                self.assertEqual(self.request("send", {"lease_id": lease["lease_id"], "commands": [valid, command]})[0], 400)
+        self.assertEqual(self.request("send", {"lease_id": lease["lease_id"], "commands": [valid] * 65})[0], 400)
+        self.assertEqual(self.service._native.commands, [])
+
+    def test_native_expiry_cancels_jobs_and_rejects_stale_commands(self):
+        lease = self.native_arm()
+        transport = self.service._native
+        self.now += TIMEOUT_MS / 1000
+        self.service.check_timeout()
+        self.assertEqual(transport.commands, [{"op": "panic"}])
+        self.assertTrue(transport.closed)
+        self.assertEqual(self.request("send", {"lease_id": lease["lease_id"], "commands": [{"op": "note_off", "note": 60}]})[0], 409)
+        self.assertIsNone(self.service._native)
+
+    def test_native_handover_has_no_uncancellable_browser_queue(self):
+        first = self.native_arm()
+        transport = self.service._native
+        replacement = self.native_arm(OTHER_OWNER)
+        self.assertTrue(transport.closed)
+        self.assertNotEqual(first["lease_id"], replacement["lease_id"])
+        self.assertEqual(self.request("send", {"lease_id": first["lease_id"], "commands": [{"op": "note_off", "note": 60}]})[0], 409)
+        self.assertEqual(self.service._native.commands, [])
+
+    def test_native_failure_revokes_lease_closes_process_and_panics_fallback(self):
+        lease = self.native_arm()
+        transport = self.service._native
+        transport.failed = True
+        status, _ = self.request("send", {"lease_id": lease["lease_id"], "commands": [{"op": "cc", "number": 74, "value": 90}]})
+        self.assertEqual(status, 503)
+        self.assertTrue(transport.closed)
+        self.assertFalse(self.service.status()["armed"])
+        self.assertEqual(len(self.native.panics), 1)
+
+    def test_native_child_exit_panics_even_while_browser_keeps_heartbeating(self):
+        lease = self.native_arm()
+        transport = self.service._native
+        transport.healthy = False
+        transport.failed = True
+        self.assertEqual(self.request("heartbeat", {"lease_id": lease["lease_id"]})[0], 409)
+        self.assertFalse(self.service.status()["armed"])
+        self.assertEqual(self.service.status()["last_reason"], "transport_failed")
+        self.assertEqual(len(self.native.panics), 1)
+        self.assertTrue(transport.closed)
+
+    def test_native_batch_cannot_extend_lease_by_blocking_watchdog(self):
+        lease = self.native_arm()
+        transport = self.service._native
+        original = transport.request
+        def slow_request(command):
+            self.now += 3
+            return original(command)
+        transport.request = slow_request
+        status, _ = self.request("send", {"lease_id": lease["lease_id"],
+            "commands": [{"op": "program", "number": 5}] * 3})
+        self.assertEqual(status, 409)
+        self.assertEqual(transport.commands, [{"op": "program", "number": 5, "channel": 3}, {"op": "panic"}])
+        self.assertFalse(self.service.status()["armed"])
+
+    def test_unleased_control_batch_has_bounded_duration(self):
+        self.service.native_enabled = True
+        def slow_transport(*args):
+            transport = Transport(*args)
+            original = transport.request
+            def request(command):
+                self.now += 1.1
+                return original(command)
+            transport.request = request
+            self.transport = transport
+            return transport
+        self.service._transport_factory = slow_transport
+        status, _ = self.request("control", {"port_name": BROWSER_NAME, "channel": 3,
+            "owner_id": OWNER, "commands": [{"op": "program", "number": 5}] * 64})
+        self.assertEqual(status, 503)
+        self.assertEqual(len(self.transport.commands), 2)
+        self.assertTrue(self.transport.closed)
+
+    def test_delayed_unleased_controls_cannot_affect_new_same_owner_playback(self):
+        old = self.native_arm()
+        self.request("disarm", {"lease_id": old["lease_id"]})
+        new = self.native_arm()
+        transport = self.service._native
+        for command in ({"op": "panic"}, {"op": "program", "number": 5},
+                        {"op": "cc", "number": 32, "value": 2}):
+            with self.subTest(command=command):
+                status, _ = self.request("control", {"port_name": BROWSER_NAME, "channel": 3,
+                    "owner_id": OWNER, "commands": [command]})
+                self.assertEqual(status, 409)
+        self.assertEqual(transport.commands, [])
+        self.assertTrue(self.service.status()["armed"])
+        self.assertEqual(self.request("send", {"lease_id": new["lease_id"],
+            "commands": [{"op": "program", "number": 5}]})[0], 200)
+
+    def test_native_manual_control_requires_ownership_and_cannot_sound_notes(self):
+        self.service.native_enabled = True
+        self.service._transport_factory = Transport
+        command = {"port_name": BROWSER_NAME, "channel": 3, "owner_id": OWNER,
+                   "commands": [{"op": "program", "number": 5}]}
+        self.assertEqual(self.request("control", command)[0], 200)
+        transport = self.service._native
+        self.assertEqual(transport.commands, [{"op": "program", "number": 5, "channel": 3}])
+        for forbidden in ({"op": "cc", "number": 64, "value": 127},
+                          {"op": "play", "notes": [60], "velocity": 80, "duration_ms": 100}):
+            self.assertEqual(self.request("control", {**command, "commands": [forbidden]})[0], 400)
+        self.native_arm()
+        self.assertIs(self.service._native, transport, "same-device playback reuses manual control connection")
+        self.assertEqual(self.request("control", {**command, "owner_id": OTHER_OWNER})[0], 409)
+        self.assertEqual(len(transport.commands), 1)
 
     def test_linux_names_match_browser_and_panic_uses_full_name_not_address(self):
         self.assertEqual(output_names(LINUX_LIST), ["Other Keyboard: MIDI 1", LINUX_NAME])
@@ -164,7 +377,7 @@ class MidiSafetyTests(unittest.TestCase):
                 self.service.close()
                 self.native = Native()
                 self.service = MidiSafetyService(Path("/fake/hydractl"), runner=self.native,
-                                                 clock=lambda: self.now, start_thread=False)
+                                                 clock=lambda: self.now, start_thread=False, native_enabled=False)
                 self.addCleanup(self.service.close)
                 old = self.arm()
                 if ending == "stop":
@@ -299,7 +512,8 @@ class MidiSafetyTests(unittest.TestCase):
 
     def test_independent_thread_releases_without_any_more_http_requests(self):
         self.service.close()
-        self.service = MidiSafetyService(Path("/fake/hydractl"), runner=self.native, clock=lambda: self.now)
+        self.service = MidiSafetyService(Path("/fake/hydractl"), runner=self.native,
+                                         clock=lambda: self.now, native_enabled=False)
         self.addCleanup(self.service.close)
         self.arm()
         self.now += TIMEOUT_MS / 1000
@@ -310,7 +524,8 @@ class MidiSafetyTests(unittest.TestCase):
 class MidiSafetyHTTPTests(unittest.TestCase):
     def setUp(self):
         self.native = Native()
-        self.service = MidiSafetyService(Path("/fake/hydractl"), runner=self.native, start_thread=False)
+        self.service = MidiSafetyService(Path("/fake/hydractl"), runner=self.native,
+                                         start_thread=False, native_enabled=False)
         self.server = DashboardHTTPServer(("127.0.0.1", 0), handler_for(SnapshotStore("demo"), midi_safety=self.service))
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
@@ -345,13 +560,46 @@ class MidiSafetyHTTPTests(unittest.TestCase):
     def test_frontend_safety_module_is_served(self):
         connection = http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
         try:
-            connection.request("GET", "/midi-safety.js")
-            response = connection.getresponse()
-            self.assertEqual(response.status, 200)
-            self.assertIn("javascript", response.getheader("Content-Type", ""))
-            self.assertIn(b"globalThis.HydraMidiSafety", response.read())
+            for filename, symbol in (("midi-safety.js", b"globalThis.HydraMidiSafety"),
+                                     ("native-midi.js", b"globalThis.HydraNativeMidi")):
+                connection.request("GET", "/" + filename)
+                response = connection.getresponse()
+                self.assertEqual(response.status, 200)
+                self.assertIn("javascript", response.getheader("Content-Type", ""))
+                self.assertIn(symbol, response.read())
         finally:
             connection.close()
+
+    def test_browser_configuration_follows_native_transport_capability(self):
+        for enabled in (True, False):
+            self.service.native_enabled = enabled
+            connection = http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
+            try:
+                connection.request("GET", "/dashboard-config.js")
+                response = connection.getresponse()
+                self.assertEqual(response.status, 200)
+                self.assertEqual(response.getheader("Cache-Control"), "no-store")
+                body = response.read()
+                self.assertIn(b'"native_midi":' + str(enabled).lower().encode(), body)
+                self.assertIn(b'"study_recording":false', body)
+            finally:
+                connection.close()
+
+    def test_native_http_batch_accepts_bounded_payload_above_two_kib(self):
+        self.service.native_enabled = True
+        self.service._transport_factory = Transport
+        status, lease = self.request("arm", json.dumps({"port_name": BROWSER_NAME, "channel": 1,
+                                   "owner_id": OWNER, "transport": "native"}))
+        self.assertEqual(status, 200, lease)
+        payload = json.dumps({"lease_id": lease["lease_id"], "commands":
+                              [{"op": "nrpn", "parameter": 100, "value": 8000}] * 64})
+        self.assertGreater(len(payload), 2048)
+        status, result = self.request("send", payload)
+        self.assertEqual(status, 200, result)
+        self.assertEqual(result["sent"], 64)
+        self.assertEqual(len(self.service._native.commands), 64)
+        self.assertEqual(self.request("send", "{}", {"Content-Type": "application/json",
+                                                    "Content-Length": "16385"})[0], 413)
 
     def test_origin_json_and_size_guards_prevent_hardware_access(self):
         for headers, expected in (

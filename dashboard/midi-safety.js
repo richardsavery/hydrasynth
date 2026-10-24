@@ -123,6 +123,7 @@ globalThis.HydraMidiSafety = (() => {
       clearTimers();
       const previous = lease;
       lease = null;
+      previous?.output.detachLease?.();
       const operation = transition.then(() => previous ? call("disarm", { lease_id: previous.id }) : undefined);
       transition = operation.catch(() => {});
       return operation;
@@ -132,8 +133,15 @@ globalThis.HydraMidiSafety = (() => {
       const version = generation;
       const operation = stopped.catch(() => {}).then(async () => {
         if (version !== generation) return false;
+        // A manual patch request may have started without a playback lease.
+        // Finish that request before arming a new session, so its late program
+        // change or panic cannot alter the new playback.
+        output.cancelPending?.();
+        await output.settled?.();
+        if (version !== generation) return false;
         const started = now();
-        const result = await call("arm", { port_name: output.name, channel, owner_id: ownerId });
+        const result = await call("arm", { port_name: output.portName || output.name, channel, owner_id: ownerId,
+          ...(output.transport === "native" ? { transport: "native" } : {}) });
         if (typeof result.lease_id !== "string" || !result.lease_id || !(result.timeout_ms > 200) || !(result.heartbeat_ms > 0)) {
           throw new Error("The MIDI safety service returned an invalid lease. Restart the dashboard.");
         }
@@ -144,6 +152,7 @@ globalThis.HydraMidiSafety = (() => {
         const current = { id: result.lease_id, output, timeout: result.timeout_ms,
           interval: result.heartbeat_ms, deadline: started + result.timeout_ms - 100 };
         lease = current;
+        output.bindLease?.({ id: current.id, channel, ownerId });
         expires(current);
         timer = schedule(() => heartbeat(current), current.interval);
         return true;
@@ -158,7 +167,7 @@ globalThis.HydraMidiSafety = (() => {
         throw error;
       }
     }
-    return { arm, stop, assertReady };
+    return { arm, stop, assertReady, ownerId, settled: () => transition };
   }
   return { createNotes, createGuard, MAX_NOTE_MS };
 })();

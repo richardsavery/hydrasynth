@@ -78,6 +78,9 @@ dashboard-command:
 dashboard-test:
 	$(PYTHON) -B tools/hydra_dashboard.py --self-test
 	$(PYTHON) -B tools/test_midi_safety.py
+	$(PYTHON) -B tools/test_native_midi.py
+	$(PYTHON) -B tools/test_runtime_diagnostics.py
+	$(NODE) tools/test_runtime_diagnostics.js
 	$(PYTHON) -B tools/test_study_recording.py
 	$(PYTHON) -B tools/test_study_backup.py
 	$(PYTHON) -B tools/test_study_merge_cli.py
@@ -183,6 +186,7 @@ dashboard-test:
 	$(NODE) tools/test_workspace_startup.js
 	$(NODE) tools/test_midi_connection.js
 	$(NODE) tools/test_midi_safety.js
+	$(NODE) tools/test_native_midi.js
 	$(NODE) --check dashboard/observer/app.js
 	$(NODE) tools/test_observer_semantics.js
 

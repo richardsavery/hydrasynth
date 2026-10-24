@@ -139,7 +139,7 @@
           <div class="harmony-controls"><label>PARAM RX mode<select id="midi-format"><option value="nrpn">NRPN · full engine</option><option value="cc">CC · compatibility</option></select></label><label>Updates / second<select id="midi-rate"><option value="25">25</option><option value="50" selected>50</option><option value="100">100</option></select></label></div>
           <p>Set PARAM RX on the synth to match. Full engine parameters require NRPN. Enable PGM CHG RX for patch changes.</p>
           <p id="midi-parameter-status" role="status">No parameter updates queued</p>
-          <p id="midi-status">Connect the Hydrasynth, then grant browser MIDI access.</p>
+          <p id="midi-status">Connect the Hydrasynth over USB, then select Connect MIDI device.</p>
         </div>
         <button id="panic-button" class="panic-button" type="button" hidden>Stop all MIDI notes</button>
       </div>
@@ -417,6 +417,7 @@
   <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
   <script src="/dashboard-config.js" defer></script>
   <script src="study-recorder.js" defer></script>
+  <script src="runtime-diagnostics.js" defer></script>
   <script src="drums.js" defer></script>
   <script src="sonification.js" defer></script>
   <script src="parameters.js" defer></script>
@@ -444,6 +445,7 @@
   <script src="synth-mixer.js" defer></script>
   <script src="workspace-shell.js" defer></script>
   <script src="session-library.js" defer></script>
+  <script src="native-midi.js" defer></script>
   <script src="midi-safety.js" defer></script>
   <script src="app.js" defer></script>
 </body>

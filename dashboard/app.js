@@ -341,6 +341,7 @@ function reloadSession(route) {
 function stopDashboardOnUnload() {
   if (state.sessionReloading) return;
   disconnectLive(); stopPlayback(); panicMidi();
+  state.midiAccess?.close?.();
   workspaceModule("HydraSynthMixer")?.deactivate(); workspaceModule("HydraMusicMixer")?.deactivate();
   workspaceModule("HydraRapExperiment")?.deactivate(); workspaceModule("HydraElevenLabs")?.deactivate();
   workspaceModule("HydraRapResponse")?.deactivate();
@@ -1734,12 +1735,20 @@ async function sendMidiPatch(patch, generation) {
       state.noteTimers.forEach((timer) => window.clearTimeout(timer));
       state.noteTimers.clear();
     }
+    if (output.transport === "native") {
+      await state.midiGuard?.settled();
+      if (generation !== state.playbackGeneration || output !== state.midiOutput) return false;
+    }
     // Match the native driver's bank-select sequence, with cancellable gaps.
     output.send([0xB0 | MIDI_CHANNEL, 0, 0]);
+    if (output.transport === "native") await output.flush();
     if (!await waitForPatch(20, generation, output)) return false;
     output.send([0xB0 | MIDI_CHANNEL, 32, "ABCDEFGH".indexOf(patch.bank)]);
+    if (output.transport === "native") await output.flush();
     if (!await waitForPatch(20, generation, output)) return false;
     output.send([0xC0 | MIDI_CHANNEL, patch.number - 1]);
+    if (output.transport === "native") await output.flush();
+    if (generation !== state.playbackGeneration || output !== state.midiOutput) return false;
     state.currentPatch = { ...patch };
     recordStudyEvent("synth.patch.sent", { generation, bank: patch.bank, number: patch.number, midi_channel: MIDI_CHANNEL,
       destination_id: output.id || null, destination_name: output.name || null, playback_continuing: state.playing });
@@ -1893,7 +1902,11 @@ function startParameterPump() {
         state.parameterCarry += settings.midiRate / 50;
         const limit = Math.floor(state.parameterCarry);
         state.parameterCarry -= limit;
-        const emitted = state.midiPacer.flush((bytes) => state.midiOutput.send(bytes), limit);
+        const native = state.midiOutput.transport === "native";
+        const emitted = state.midiPacer.flush((bytes) => { if (!native) state.midiOutput.send(bytes); }, limit);
+        if (native && emitted.length) state.midiOutput.commands(emitted.map(command => command.kind === "nrpn"
+          ? { op: "nrpn", parameter: command.number, value: command.value }
+          : { op: "cc", number: command.number, value: command.value }));
         for (const command of emitted) if (command.kind === "cc" && command.number === 64) {
           if (command.value > 0) state.midiSustainOutputs.add(state.midiOutput);
           else state.midiSustainOutputs.delete(state.midiOutput);
@@ -2219,8 +2232,9 @@ function playAudioNote(note, velocity, durationMs, cc, level = 1) {
 
 function connectMidi(options = {}) {
   const automatic = options.automatic === true;
+  const native = globalThis.HydraDashboardConfig?.native_midi === true;
   if (state.midiConnecting) return state.midiConnecting;
-  if (!navigator.requestMIDIAccess) {
+  if (!native && !navigator.requestMIDIAccess) {
     state.midiConnectionError = "Web MIDI is not available in this browser. Browser preview still works.";
     updateMidiStatus();
     if (!automatic) showToast(state.midiConnectionError);
@@ -2228,7 +2242,21 @@ function connectMidi(options = {}) {
   }
   state.midiConnectionError = "";
   let accessRequest;
-  try { accessRequest = state.midiAccess || navigator.requestMIDIAccess({ sysex: false }); }
+  try {
+    if (native) {
+      if (!globalThis.HydraNativeMidi) throw new Error("Native MIDI did not load. Reload the dashboard before connecting.");
+      accessRequest = state.midiAccess ? state.midiAccess.refresh() : globalThis.HydraNativeMidi.createAccess({
+        ownerId: midiSafetyGuard().ownerId,
+        onFailure(error, output) {
+          if (output !== state.midiOutput) return;
+          stopPlayback({ releaseMidi: error.status !== 409 });
+          state.playbackError = error.message || "Native MIDI stopped responding.";
+          showToast(state.playbackError);
+        },
+        onUnavailable(error) { state.midiConnectionError = error.message; updateMidiStatus(); }
+      });
+    } else accessRequest = state.midiAccess || navigator.requestMIDIAccess({ sysex: false });
+  }
   catch (error) { accessRequest = Promise.reject(error); }
   state.midiConnecting = Promise.resolve(accessRequest).then(access => {
     state.midiAccess = access;
@@ -2242,7 +2270,8 @@ function connectMidi(options = {}) {
     updateConnectionSummary();
     return state.midiOutput;
   }).catch(error => {
-    state.midiConnectionError = "MIDI access was not granted. Use Connect MIDI device to try again.";
+    state.midiConnectionError = native ? error.message || "Native MIDI is unavailable. Restart the dashboard and reconnect."
+      : "MIDI access was not granted. Use Connect MIDI device to try again.";
     updateMidiStatus();
     if (!automatic) showToast(error?.message || state.midiConnectionError);
     return null;
@@ -2265,8 +2294,9 @@ function renderMidiOutputs() {
   const previous = state.midiOutput ? midiDeviceIdentity(state.midiOutput) : preferences;
   const previousId = previous.midiDeviceId || dom["midi-output"].value;
   const normalize = value => String(value || "").trim().toLowerCase();
-  const identityMatches = previous.midiDeviceName ? outputs.filter(output => normalize(output.name) === normalize(previous.midiDeviceName)
-    && (!previous.midiDeviceManufacturer || normalize(output.manufacturer) === normalize(previous.midiDeviceManufacturer))) : [];
+  const identityMatches = previous.midiDeviceName ? outputs.filter(output =>
+    [output.name, ...(output.aliases || [])].some(name => normalize(name) === normalize(previous.midiDeviceName))
+    && (output.transport === "native" || !previous.midiDeviceManufacturer || normalize(output.manufacturer) === normalize(previous.midiDeviceManufacturer))) : [];
   const hydrasynths = outputs.filter(isHydrasynthOutput);
   const hasPreference = previousId || previous.midiDeviceName || preferences.midiDeviceExplicit;
   const selected = outputs.find(output => output.id === previousId)
@@ -2316,11 +2346,13 @@ function selectMidiOutput() {
 function updateMidiStatus() {
   renderSoundControls();
   if (state.midiOutput) {
-    dom["midi-status"].textContent = `${state.midiOutput.name} is ready on channel ${MIDI_CHANNEL + 1}.`;
+    dom["midi-status"].textContent = `${state.midiOutput.name} is ready on channel ${MIDI_CHANNEL + 1}${state.midiOutput.transport === "native" ? " through the dashboard" : ""}.`;
     dom["midi-choice-detail"].textContent = state.midiOutput.name;
     dom["connect-midi"].innerHTML = `MIDI connected <span>✓</span>`;
   } else {
-    dom["midi-status"].textContent = state.midiConnectionError || "Waiting for the saved MIDI device or a single Hydrasynth. Choose a device if several are connected.";
+    dom["midi-status"].textContent = state.midiConnectionError || (globalThis.HydraDashboardConfig?.native_midi === true
+      ? "Connect the Hydrasynth over USB, then select Connect MIDI device. Choose an output if several are connected."
+      : "Waiting for the saved MIDI device or a single Hydrasynth. Choose a device if several are connected.");
     dom["midi-choice-detail"].textContent = "No output selected";
     dom["connect-midi"].innerHTML = `Connect MIDI device <span>→</span>`;
     if (state.output === "midi") {
@@ -2358,6 +2390,7 @@ function midiNoteScheduler() {
 function playMidiNote(note, velocity, durationMs) {
   if (!state.midiOutput) return false;
   midiSafetyGuard().assertReady(state.midiOutput);
+  if (state.midiOutput.transport === "native") return state.midiOutput.play(note, velocity, durationMs);
   return midiNoteScheduler().play(state.midiOutput, note, velocity, durationMs);
 }
 
@@ -2372,14 +2405,30 @@ function sendMidiCc(ccValues) {
 }
 
 function stopActiveMidiNotes(options) {
+  if (state.midiOutput?.transport === "native") {
+    if (options?.release === false) state.midiOutput.cancelPending();
+    else state.midiOutput.stopNotes();
+    state.midiSustainOutputs.clear();
+    return;
+  }
   if (state.midiNotes || state.midiNoteTimers.size || state.midiSustainOutputs.size) midiNoteScheduler().stop(options);
 }
 
 function panicMidi() {
   stopActiveMidiNotes();
-  for (const cc of [64, 123, 120]) {
-    try { state.midiOutput?.send([0xB0 | MIDI_CHANNEL, cc, 0]); } catch (_) {}
+  if (state.midiOutput?.transport === "native") {
+    const output = state.midiOutput, generation = state.playbackGeneration;
+    Promise.resolve(state.midiGuard?.settled()).then(() => {
+      if (generation === state.playbackGeneration && output === state.midiOutput) return output.panic();
+    }).catch(error => showToast(error.message || "Could not release native MIDI notes."));
+    return;
   }
+  try { state.midiOutput?.send([0xB0 | MIDI_CHANNEL, 64, 0]); } catch (_) {}
+  for (let note = 0; note < 128; note++) {
+    try { state.midiOutput?.send([0x80 | MIDI_CHANNEL, note, 0]); } catch (_) {}
+  }
+  // Hydrasynth uses CC120 for ARP Octave; only CC123 is All Notes Off.
+  try { state.midiOutput?.send([0xB0 | MIDI_CHANNEL, 123, 0]); } catch (_) {}
 }
 
 function setOutput(output) {

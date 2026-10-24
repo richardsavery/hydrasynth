@@ -20,7 +20,7 @@ static bool is_cleanup_message(const uint8_t *bytes, size_t length) {
         if (data1 > 127 || data2 > 127) return false;
         if (status == 0x80 || (status == 0x90 && data2 == 0)) continue;
         if (status == 0xB0 && data2 == 0 &&
-            (data1 == 64 || data1 == 120 || data1 == 123)) continue;
+            (data1 == 64 || data1 == 123)) continue;
         return false;
     }
     return true;
